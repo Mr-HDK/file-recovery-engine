@@ -1,11 +1,11 @@
+use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
+use fr_ntfs::parse_boot_sector;
 use fr_scoring::score_candidate_with_reasons;
 use fr_session::{quick_scan_ntfs_from_read_session, QuickScanConfig, QuickScanError};
 use fr_types::{ConfidenceTier, EvidenceSource, RecoveryCandidate, RecoverySourceKind};
-use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
-use fr_ntfs::parse_boot_sector;
-use std::fs::{self, File};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -908,7 +908,8 @@ fn build_named_stream_output_path(
 fn sanitize_windows_path_component(raw: &str) -> String {
     let mut sanitized = String::with_capacity(raw.len().max(8));
     for ch in raw.chars() {
-        let invalid = ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*');
+        let invalid =
+            ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*');
         sanitized.push(if invalid { '_' } else { ch });
     }
 
@@ -1099,8 +1100,8 @@ fn read_with_alignment(
     let required_len = prefix_len
         .checked_add(output.len())
         .ok_or(fr_winio::WinIoError::InvalidReadOffset)?;
-    let aligned_len = round_up(required_len, alignment)
-        .ok_or(fr_winio::WinIoError::InvalidReadOffset)?;
+    let aligned_len =
+        round_up(required_len, alignment).ok_or(fr_winio::WinIoError::InvalidReadOffset)?;
 
     let mut scratch = vec![0u8; aligned_len];
     if !read_exact(session, aligned_offset, &mut scratch)? {
@@ -1224,7 +1225,8 @@ mod tests {
         let mut seen_names = HashMap::new();
 
         let first = build_named_stream_output_path(output_path, "Zone.Identifier", &mut seen_names);
-        let second = build_named_stream_output_path(output_path, "zone.identifier", &mut seen_names);
+        let second =
+            build_named_stream_output_path(output_path, "zone.identifier", &mut seen_names);
 
         assert_eq!(
             first.file_name().and_then(|name| name.to_str()),

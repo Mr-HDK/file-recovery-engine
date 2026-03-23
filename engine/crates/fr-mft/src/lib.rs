@@ -1,4 +1,4 @@
-﻿use thiserror::Error;
+use thiserror::Error;
 
 pub const ATTRIBUTE_TYPE_STANDARD_INFORMATION: u32 = 0x10;
 pub const ATTRIBUTE_TYPE_ATTRIBUTE_LIST: u32 = 0x20;
@@ -125,7 +125,10 @@ pub enum MftParseError {
     DataRunLcnOverflow,
 }
 
-pub fn parse_mft_record(record_bytes: &[u8], bytes_per_sector: usize) -> Result<MftRecord, MftParseError> {
+pub fn parse_mft_record(
+    record_bytes: &[u8],
+    bytes_per_sector: usize,
+) -> Result<MftRecord, MftParseError> {
     if record_bytes.len() < 48 {
         return Err(MftParseError::BufferTooSmall {
             expected: 48,
@@ -152,7 +155,9 @@ pub fn parse_mft_record(record_bytes: &[u8], bytes_per_sector: usize) -> Result<
 
     let first_attribute_offset = read_u16(&fixed, 0x14);
     if first_attribute_offset as usize >= bytes_in_use as usize {
-        return Err(MftParseError::InvalidFirstAttributeOffset(first_attribute_offset));
+        return Err(MftParseError::InvalidFirstAttributeOffset(
+            first_attribute_offset,
+        ));
     }
 
     let header = MftRecordHeader {
@@ -233,7 +238,10 @@ pub fn parse_mft_record(record_bytes: &[u8], bytes_per_sector: usize) -> Result<
     Ok(MftRecord { header, attributes })
 }
 
-fn apply_update_sequence_fixup(record_bytes: &[u8], bytes_per_sector: usize) -> Result<Vec<u8>, MftParseError> {
+fn apply_update_sequence_fixup(
+    record_bytes: &[u8],
+    bytes_per_sector: usize,
+) -> Result<Vec<u8>, MftParseError> {
     let usa_offset = read_u16(record_bytes, 0x04) as usize;
     let usa_count = read_u16(record_bytes, 0x06) as usize;
     if usa_count == 0 {
@@ -474,7 +482,11 @@ mod tests {
         let mut record = build_base_record(0x70);
         let attr_offset = 0x38;
 
-        write_u32(&mut record, attr_offset, ATTRIBUTE_TYPE_STANDARD_INFORMATION);
+        write_u32(
+            &mut record,
+            attr_offset,
+            ATTRIBUTE_TYPE_STANDARD_INFORMATION,
+        );
         write_u32(&mut record, attr_offset + 4, 0x20);
         record[attr_offset + 8] = 0;
         record[attr_offset + 9] = 0;
@@ -492,7 +504,10 @@ mod tests {
         assert_eq!(parsed.attributes.len(), 1);
 
         let attribute = &parsed.attributes[0];
-        assert_eq!(attribute.attribute_type, ATTRIBUTE_TYPE_STANDARD_INFORMATION);
+        assert_eq!(
+            attribute.attribute_type,
+            ATTRIBUTE_TYPE_STANDARD_INFORMATION
+        );
 
         match &attribute.form {
             AttributeForm::Resident(value) => assert_eq!(value.value, vec![1, 2, 3, 4]),
@@ -523,7 +538,8 @@ mod tests {
         write_u64(&mut record, attr_offset + 0x40, 32768);
 
         let run_bytes = [0x11, 0x03, 0x0A, 0x11, 0x02, 0xFE, 0x01, 0x05, 0x00];
-        record[attr_offset + 0x40..attr_offset + 0x40 + run_bytes.len()].copy_from_slice(&run_bytes);
+        record[attr_offset + 0x40..attr_offset + 0x40 + run_bytes.len()]
+            .copy_from_slice(&run_bytes);
 
         write_u32(&mut record, attr_offset + 0x50, ATTRIBUTE_TYPE_END);
 

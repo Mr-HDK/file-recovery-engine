@@ -1,4 +1,4 @@
-﻿use fr_types::RecoverySourceKind;
+use fr_types::RecoverySourceKind;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,10 @@ impl ReadSession {
     }
 }
 
-pub fn probe_source_read_only(path: &str, kind: RecoverySourceKind) -> Result<SourceProbe, WinIoError> {
+pub fn probe_source_read_only(
+    path: &str,
+    kind: RecoverySourceKind,
+) -> Result<SourceProbe, WinIoError> {
     let session = ReadSession::open(path, kind)?;
     Ok(SourceProbe {
         normalized_path: session.normalized_path,
@@ -138,7 +141,11 @@ mod platform {
     }
 
     impl PlatformReadSession {
-        pub(super) fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize, WinIoError> {
+        pub(super) fn read_at(
+            &mut self,
+            offset: u64,
+            buffer: &mut [u8],
+        ) -> Result<usize, WinIoError> {
             if buffer.is_empty() {
                 return Ok(0);
             }
@@ -149,7 +156,8 @@ mod platform {
 
             if self.enforce_alignment {
                 if let Some(alignment) = self.alignment_bytes {
-                    if offset % alignment as u64 != 0 || buffer.len() as u64 % alignment as u64 != 0 {
+                    if offset % alignment as u64 != 0 || buffer.len() as u64 % alignment as u64 != 0
+                    {
                         return Err(WinIoError::MisalignedRead {
                             alignment_bytes: alignment,
                             offset,
@@ -159,7 +167,9 @@ mod platform {
                 }
             }
 
-            let moved = unsafe { SetFilePointerEx(self.handle, offset as i64, std::ptr::null_mut(), FILE_BEGIN) };
+            let moved = unsafe {
+                SetFilePointerEx(self.handle, offset as i64, std::ptr::null_mut(), FILE_BEGIN)
+            };
             if moved == 0 {
                 return Err(map_last_error());
             }
@@ -256,10 +266,16 @@ mod platform {
     ) -> (Option<u32>, bool) {
         match kind {
             RecoverySourceKind::ImageFile => (None, false),
-            RecoverySourceKind::Volume => (query_volume_sector_size(normalized_path).or(Some(512)), true),
-            RecoverySourceKind::PhysicalDisk => {
-                (physical_geometry.map(|(sector_size, _)| sector_size).or(Some(512)), true)
-            }
+            RecoverySourceKind::Volume => (
+                query_volume_sector_size(normalized_path).or(Some(512)),
+                true,
+            ),
+            RecoverySourceKind::PhysicalDisk => (
+                physical_geometry
+                    .map(|(sector_size, _)| sector_size)
+                    .or(Some(512)),
+                true,
+            ),
         }
     }
 
@@ -356,7 +372,11 @@ mod platform {
     pub(super) struct PlatformReadSession;
 
     impl PlatformReadSession {
-        pub(super) fn read_at(&mut self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, WinIoError> {
+        pub(super) fn read_at(
+            &mut self,
+            _offset: u64,
+            _buffer: &mut [u8],
+        ) -> Result<usize, WinIoError> {
             Err(WinIoError::UnsupportedPlatform)
         }
     }

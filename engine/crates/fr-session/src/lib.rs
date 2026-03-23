@@ -146,10 +146,14 @@ pub fn quick_scan_ntfs_metadata(
     let mft_offset_u64 = boot_sector
         .mft_offset_bytes()
         .ok_or(QuickScanError::InvalidMftOffset)?;
-    let mft_offset = usize::try_from(mft_offset_u64).map_err(|_| QuickScanError::InvalidMftOffset)?;
+    let mft_offset =
+        usize::try_from(mft_offset_u64).map_err(|_| QuickScanError::InvalidMftOffset)?;
 
     if mft_offset >= source_bytes.len() {
-        return Err(QuickScanError::MftOutOfBounds(mft_offset, source_bytes.len()));
+        return Err(QuickScanError::MftOutOfBounds(
+            mft_offset,
+            source_bytes.len(),
+        ));
     }
 
     let record_size = boot_sector.file_record_size_bytes as usize;
@@ -595,11 +599,8 @@ mod tests {
     fn quick_scan_parses_single_record() {
         let image = build_test_ntfs_image_with_single_record();
 
-        let summary = quick_scan_ntfs_metadata(
-            &image,
-            QuickScanConfig { max_records: 16 },
-        )
-        .unwrap();
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
 
         assert_eq!(summary.parsed_records, 1);
         assert_eq!(summary.parse_failures, 0);
@@ -611,11 +612,8 @@ mod tests {
     fn quick_scan_extracts_deleted_named_candidate() {
         let image = build_test_ntfs_image_with_named_records();
 
-        let summary = quick_scan_ntfs_metadata(
-            &image,
-            QuickScanConfig { max_records: 16 },
-        )
-        .unwrap();
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
 
         assert_eq!(summary.parsed_records, 2);
         assert_eq!(summary.deleted_records, 1);
@@ -631,7 +629,10 @@ mod tests {
         assert!(deleted.deleted);
         assert_eq!(deleted.name.as_deref(), Some("report.txt"));
         assert_eq!(deleted.parent_record_number, Some(5));
-        assert_eq!(deleted.reconstructed_path.as_deref(), Some(r"Docs\report.txt"));
+        assert_eq!(
+            deleted.reconstructed_path.as_deref(),
+            Some(r"Docs\report.txt")
+        );
     }
 
     #[cfg(windows)]
@@ -667,7 +668,10 @@ mod tests {
             .find(|candidate| candidate.record_number == 6)
             .unwrap();
         assert!(deleted.deleted);
-        assert_eq!(deleted.reconstructed_path.as_deref(), Some(r"Docs\report.txt"));
+        assert_eq!(
+            deleted.reconstructed_path.as_deref(),
+            Some(r"Docs\report.txt")
+        );
 
         fs::remove_file(&image_path).unwrap();
         fs::remove_dir_all(&temp_dir).unwrap();
@@ -725,21 +729,12 @@ mod tests {
         write_u16(&mut image, 0x1FE, 0xAA55);
 
         let mft_offset = 4 * 512;
-        let parent = build_named_record(
-            5,
-            0x0003,
-            "Docs",
-            0,
-        );
-        let child_deleted = build_named_record(
-            6,
-            0x0000,
-            "report.txt",
-            5,
-        );
+        let parent = build_named_record(5, 0x0003, "Docs", 0);
+        let child_deleted = build_named_record(6, 0x0000, "report.txt", 5);
 
         image[mft_offset..mft_offset + parent.len()].copy_from_slice(&parent);
-        image[mft_offset + 1024..mft_offset + 1024 + child_deleted.len()].copy_from_slice(&child_deleted);
+        image[mft_offset + 1024..mft_offset + 1024 + child_deleted.len()]
+            .copy_from_slice(&child_deleted);
 
         image
     }

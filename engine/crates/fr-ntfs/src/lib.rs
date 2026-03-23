@@ -1,4 +1,4 @@
-﻿use thiserror::Error;
+use thiserror::Error;
 
 pub const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
 
@@ -20,8 +20,7 @@ impl NtfsBootSector {
     }
 
     pub fn volume_size_bytes(&self) -> Option<u64> {
-        self.total_sectors
-            .checked_mul(self.bytes_per_sector as u64)
+        self.total_sectors.checked_mul(self.bytes_per_sector as u64)
     }
 
     pub fn mft_offset_bytes(&self) -> Option<u64> {
@@ -77,12 +76,16 @@ pub fn parse_boot_sector(bytes: &[u8]) -> Result<NtfsBootSector, BootSectorParse
 
     let bytes_per_sector = read_u16_le(bytes, 0x0B);
     if bytes_per_sector == 0 || !bytes_per_sector.is_power_of_two() {
-        return Err(BootSectorParseError::InvalidBytesPerSector(bytes_per_sector));
+        return Err(BootSectorParseError::InvalidBytesPerSector(
+            bytes_per_sector,
+        ));
     }
 
     let sectors_per_cluster = bytes[0x0D];
     if sectors_per_cluster == 0 || !sectors_per_cluster.is_power_of_two() {
-        return Err(BootSectorParseError::InvalidSectorsPerCluster(sectors_per_cluster));
+        return Err(BootSectorParseError::InvalidSectorsPerCluster(
+            sectors_per_cluster,
+        ));
     }
 
     let cluster_size = (bytes_per_sector as u32)
@@ -179,7 +182,10 @@ mod tests {
         sector[0x03..0x0B].copy_from_slice(NTFS_OEM_ID);
 
         let error = parse_boot_sector(&sector).unwrap_err();
-        assert!(matches!(error, BootSectorParseError::InvalidBootSignature(_)));
+        assert!(matches!(
+            error,
+            BootSectorParseError::InvalidBootSignature(_)
+        ));
     }
 
     #[test]

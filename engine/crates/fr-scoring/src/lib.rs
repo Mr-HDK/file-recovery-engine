@@ -124,7 +124,9 @@ mod tests {
             scored.tier,
             ConfidenceTier::Low | ConfidenceTier::VeryLow
         ));
-        assert!(scored.reasons.contains(&"Carve-only candidate confidence cap"));
+        assert!(scored
+            .reasons
+            .contains(&"Carve-only candidate confidence cap"));
     }
 
     #[test]
@@ -141,7 +143,8 @@ mod tests {
 
     #[test]
     fn compatibility_api_uses_weighted_tier() {
-        let candidate = candidate_with_evidence(vec![EvidenceSource::DirectoryIndex, EvidenceSource::Usn]);
+        let candidate =
+            candidate_with_evidence(vec![EvidenceSource::DirectoryIndex, EvidenceSource::Usn]);
         assert_eq!(
             score_candidate(&candidate),
             score_candidate_with_reasons(&candidate).tier
