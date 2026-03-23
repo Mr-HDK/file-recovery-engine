@@ -123,19 +123,19 @@ mod platform {
     use std::iter;
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF,
-        ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE,
+        ERROR_PATH_NOT_FOUND, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetDiskFreeSpaceW, GetFileSizeEx, ReadFile, SetFilePointerEx,
         FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GENERIC_READ, OPEN_EXISTING,
+        OPEN_EXISTING,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
     const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00A0;
 
     pub(super) struct PlatformReadSession {
-        handle: isize,
+        handle: HANDLE,
         alignment_bytes: Option<u32>,
         enforce_alignment: bool,
     }
@@ -218,7 +218,7 @@ mod platform {
                 std::ptr::null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             )
         };
 
@@ -279,7 +279,7 @@ mod platform {
         }
     }
 
-    fn query_physical_geometry(handle: isize) -> Option<(u32, u64)> {
+    fn query_physical_geometry(handle: HANDLE) -> Option<(u32, u64)> {
         let mut buffer = [0u8; 128];
         let mut bytes_returned: u32 = 0;
 
