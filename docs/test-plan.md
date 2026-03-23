@@ -1,0 +1,62 @@
+﻿# Test Plan
+
+## Principles
+
+- Validate safety constraints before recovery correctness.
+- Prefer deterministic fixtures and golden outputs.
+- Separate parser tests, orchestration tests, and UI smoke checks.
+
+## Test layers
+
+1. Core unit tests
+- Source/destination safety validator.
+- Session persistence create/update/list flows.
+- Confidence tier mapping logic (engine).
+
+2. Parser tests (engine)
+- NTFS boot sector and MFT golden parsing.
+- USN record parsing golden tests.
+- FAT/exFAT parser scaffolding tests.
+
+3. Integration tests
+- Enumerate sources and enforce separation.
+- Session resume from persisted checkpoints.
+
+4. Fuzzing
+- NTFS attribute parser fuzz targets.
+- USN record parser fuzz targets.
+
+5. UI smoke tests
+- App starts and source list loads.
+- Destination validation blocks same-volume writes.
+
+## Required fixture coverage roadmap
+
+- Recently deleted NTFS files.
+- Deleted directories with nested children.
+- Resident and non-resident files.
+- Fragmented and partially overwritten files.
+- Sparse/compressed files and ADS.
+- Raw image input path.
+- USN-assisted reconstruction scenarios.
+
+## Current batch coverage
+
+- Unit tests for separation validator.
+- Unit tests for SQLite-backed session store.
+- Unit tests for native engine probe/session wrapper fallback behavior.
+- Unit tests for preview-read scanner deterministic outcomes.
+- Rust unit tests for NTFS boot sector parsing.
+- Rust unit tests for MFT record parsing with resident and non-resident attributes plus update-sequence-array fixup mismatch detection.
+- Rust unit tests for session-level NTFS quick-scan orchestration over synthetic image bytes.
+- Candidate persistence tests for recovery diagnostics/status-code/write-bytes fields in SQLite.
+- Candidate persistence tests for quick-scan ADS/compressed/sparse/encrypted flags in SQLite.
+- Candidate persistence tests for raw recovery diagnostics flags bitmask in SQLite.
+- Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
+- Session log writer tests for JSON/text log creation and recovery report artifact emission.
+
+## Benchmarks
+
+- `scripts/new-test-fixture.ps1` generates filesystem fixture trees.
+- `scripts/benchmark-ntfs-corpus.ps1` runs the fixed NTFS corpus benchmark defined in `testdata/raw-images/ntfs-corpus/manifest.json`.
+- Benchmark outputs are written to `tools/benchmark-results/` as JSON + Markdown summaries.

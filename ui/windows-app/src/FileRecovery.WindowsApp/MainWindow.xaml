@@ -1,0 +1,185 @@
+﻿<Window x:Class="FileRecovery.WindowsApp.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="File Recovery" Height="760" Width="1180" MinHeight="620" MinWidth="980">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" BorderThickness="1" CornerRadius="6" Padding="12" BorderBrush="#CCD2DD">
+            <DockPanel>
+                <TextBlock Text="Windows File Recovery" FontSize="20" FontWeight="SemiBold" />
+                <TextBlock x:Name="EngineStatusTextBlock"
+                           DockPanel.Dock="Right"
+                           FontSize="12"
+                           VerticalAlignment="Center"
+                           Foreground="#4B5563"/>
+            </DockPanel>
+        </Border>
+
+        <Border x:Name="ElevationWarningBorder"
+                Grid.Row="1"
+                Margin="0,10,0,0"
+                BorderThickness="1"
+                BorderBrush="#F59E0B"
+                CornerRadius="6"
+                Padding="10"
+                Background="#FFFBEB"
+                Visibility="Collapsed">
+            <DockPanel>
+                <Button Content="Restart Elevated"
+                        Width="130"
+                        DockPanel.Dock="Right"
+                        Click="RestartElevatedButton_Click"/>
+                <TextBlock x:Name="ElevationWarningTextBlock"
+                           VerticalAlignment="Center"
+                           Foreground="#92400E"
+                           Text="Running without elevation. Raw source access may fail for some devices."/>
+            </DockPanel>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*"/>
+                <ColumnDefinition Width="1*"/>
+            </Grid.ColumnDefinitions>
+
+            <GroupBox Header="Source Selection" Padding="8" Margin="0,0,12,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
+                        <Button Content="Import Image" Width="110" Click="ImportImageButton_Click"/>
+                    </StackPanel>
+
+                    <DataGrid x:Name="SourcesDataGrid"
+                              Grid.Row="1"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              SelectionMode="Single"
+                              SelectionChanged="SourcesDataGrid_SelectionChanged">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Type" Binding="{Binding Kind}" Width="120"/>
+                            <DataGridTextColumn Header="Source" Binding="{Binding DisplayName}" Width="*"/>
+                            <DataGridTextColumn Header="FileSystem" Binding="{Binding FileSystem}" Width="90"/>
+                            <DataGridTextColumn Header="Label" Binding="{Binding VolumeLabel}" Width="90"/>
+                            <DataGridTextColumn Header="Partition" Binding="{Binding PartitionInfo}" Width="140"/>
+                            <DataGridTextColumn Header="Sector" Binding="{Binding SectorSizeBytes}" Width="75"/>
+                            <DataGridTextColumn Header="Mounts" Binding="{Binding MountedPaths}" Width="170"/>
+                            <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="190"/>
+                            <DataGridTextColumn Header="Read Only" Binding="{Binding ReadOnlyEnforced}" Width="90"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </GroupBox>
+
+            <GroupBox Grid.Column="1" Header="Destination and Scan" Padding="8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Text="Destination Folder" FontWeight="SemiBold"/>
+                    <DockPanel Grid.Row="1" Margin="0,6,0,10">
+                        <Button Content="Browse" Width="75" DockPanel.Dock="Right" Click="BrowseDestinationButton_Click"/>
+                        <TextBox x:Name="DestinationPathTextBox" Margin="0,0,8,0" MinWidth="220"/>
+                    </DockPanel>
+
+                    <TextBlock Grid.Row="2" Text="Scan Mode" FontWeight="SemiBold"/>
+                    <ComboBox x:Name="ScanModeComboBox" Grid.Row="3" Margin="0,6,0,12" MinWidth="220"/>
+
+                    <StackPanel Grid.Row="4" Orientation="Horizontal" VerticalAlignment="Top">
+                        <Button Content="Validate Safety" Width="120" Margin="0,0,8,0" Click="ValidateSafetyButton_Click"/>
+                        <Button Content="Start Session" Width="110" Click="StartSessionButton_Click"/>
+                        <Button Content="Cancel Operation" Width="120" Margin="8,0,0,0" Click="CancelPreviewButton_Click"/>
+                    </StackPanel>
+                </Grid>
+            </GroupBox>
+        </Grid>
+
+        <GroupBox Grid.Row="3" Margin="0,14,0,0" Header="Validation Output" Padding="8">
+            <ListBox x:Name="ValidationListBox" Height="130"/>
+        </GroupBox>
+
+        <GroupBox Grid.Row="4" Margin="0,14,0,0" Header="Session and Diagnostics" Padding="8">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="2*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBox x:Name="SessionOutputTextBox"
+                         Grid.Row="0"
+                         IsReadOnly="True"
+                         TextWrapping="Wrap"
+                         AcceptsReturn="True"
+                         VerticalScrollBarVisibility="Auto"/>
+
+                <TextBlock Grid.Row="1"
+                           Margin="0,8,0,6"
+                           FontWeight="SemiBold"
+                           Text="Quick Scan Candidates"/>
+
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
+                    <Button Content="Select All" Width="90" Margin="0,0,8,0" Click="SelectAllCandidatesButton_Click"/>
+                    <Button Content="Clear Selection" Width="110" Margin="0,0,8,0" Click="ClearCandidateSelectionButton_Click"/>
+                    <Button Content="Recover Selected" Width="120" Margin="0,0,8,0" Click="RecoverSelectedCandidatesButton_Click"/>
+                    <Button Content="Export Selected" Width="120" Click="ExportSelectedCandidatesButton_Click"/>
+                </StackPanel>
+
+                <DataGrid x:Name="QuickScanCandidatesDataGrid"
+                          Grid.Row="3"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="False"
+                          SelectionMode="Single">
+                    <DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Select" Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
+                        <DataGridTextColumn Header="Record" Binding="{Binding RecordNumber}" Width="70" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Deleted" Binding="{Binding Deleted}" Width="70" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Directory" Binding="{Binding Directory}" Width="80" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="NonResidentData" Binding="{Binding NonResidentData}" Width="120" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="ADS" Binding="{Binding HasNamedDataStreams}" Width="55" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Compressed" Binding="{Binding IsCompressed}" Width="88" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Sparse" Binding="{Binding IsSparse}" Width="65" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Encrypted" Binding="{Binding IsEncrypted}" Width="78" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="180" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Original Path" Binding="{Binding OriginalPath}" Width="*"
+                                            IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Parent Record" Binding="{Binding ParentRecord}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Evidence" Binding="{Binding EvidenceSource}" Width="90" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceTier}" Width="90" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding CandidateStatusCode}" Width="110" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Recover Code" Binding="{Binding RecoveryStatusCodeDisplay}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Diag Flags" Binding="{Binding RecoveryDiagnosticsFlagsDisplay}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Write Diagnostics" Binding="{Binding RecoveryDiagnostics}" Width="260" IsReadOnly="True"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </GroupBox>
+
+        <StatusBar Grid.Row="5" Margin="0,14,0,0">
+            <StatusBarItem>
+                <TextBlock x:Name="StatusTextBlock" Text="Ready"/>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>

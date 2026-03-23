@@ -1,0 +1,25 @@
+namespace FileRecovery.WindowsApp.Core.Models;
+
+public sealed record QuickScanCandidateRecord(
+    int Ordinal,
+    uint RecordNumber,
+    bool Deleted,
+    bool Directory,
+    bool NonResidentData,
+    string? Name,
+    string? OriginalPath,
+    ulong? ParentRecordNumber,
+    bool HasNamedDataStreams = false,
+    bool IsCompressed = false,
+    bool IsSparse = false,
+    bool IsEncrypted = false,
+    string ConfidenceTier = "Medium",
+    string ConfidenceReason = "Metadata-backed candidate from MFT.",
+    RecoveryCandidateStatus CandidateStatus = RecoveryCandidateStatus.Partial,
+    string? RecoveryDiagnostics = null,
+    int? LastRecoveryStatusCode = null,
+    uint? LastRecoveryDiagnosticsFlags = null,
+    ulong? LastRecoveredBytes = null,
+    bool? LastRecoveryPartial = null,
+    DateTimeOffset? LastRecoveryUtc = null
+);

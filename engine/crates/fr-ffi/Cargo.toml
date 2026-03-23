@@ -1,0 +1,16 @@
+﻿[package]
+name = "fr-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fr-types = { path = "../fr-types" }
+fr-winio = { path = "../fr-winio" }
+fr-ntfs = { path = "../fr-ntfs" }
+fr-mft = { path = "../fr-mft" }
+fr-scoring = { path = "../fr-scoring" }
+fr-session = { path = "../fr-session" }

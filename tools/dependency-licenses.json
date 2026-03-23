@@ -1,0 +1,72 @@
+﻿{
+    "generated_at_utc":  "2026-03-22T00:00:00Z",
+    "policy":  "MIT OR Apache-2.0 preferred; GPL-family disallowed in current phase",
+    "dependencies":  [
+                         {
+                             "name":  "Microsoft.Data.Sqlite",
+                             "ecosystem":  "nuget",
+                             "license":  "MIT",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "System.Management",
+                             "ecosystem":  "nuget",
+                             "license":  "MIT",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "Microsoft.NET.Test.Sdk",
+                             "ecosystem":  "nuget",
+                             "license":  "MIT",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "coverlet.collector",
+                             "ecosystem":  "nuget",
+                             "license":  "MIT",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "xunit",
+                             "ecosystem":  "nuget",
+                             "license":  "Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "xunit.runner.visualstudio",
+                             "ecosystem":  "nuget",
+                             "license":  "Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "serde",
+                             "ecosystem":  "cargo",
+                             "license":  "MIT OR Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "serde_json",
+                             "ecosystem":  "cargo",
+                             "license":  "MIT OR Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "thiserror",
+                             "ecosystem":  "cargo",
+                             "license":  "MIT OR Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "chrono",
+                             "ecosystem":  "cargo",
+                             "license":  "MIT OR Apache-2.0",
+                             "status":  "approved"
+                         },
+                         {
+                             "name":  "windows-sys",
+                             "ecosystem":  "cargo",
+                             "license":  "MIT OR Apache-2.0",
+                             "status":  "approved"
+                         }
+                     ]
+}

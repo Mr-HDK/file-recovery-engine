@@ -1,0 +1,13 @@
+﻿[package]
+name = "fr-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fr-types = { path = "../fr-types" }
+fr-ntfs = { path = "../fr-ntfs" }
+fr-mft = { path = "../fr-mft" }
+fr-winio = { path = "../fr-winio" }
+chrono.workspace = true
+thiserror.workspace = true

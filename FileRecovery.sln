@@ -1,0 +1,62 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "ui", "ui", "{70C63EF9-C469-4D56-8F01-FB5DF8A09584}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "windows-app", "windows-app", "{03725862-A45C-4BA3-85E6-781FFBA45EE3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{76B88CD9-09E2-4CD9-A009-DCA4E9CD4E7B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileRecovery.WindowsApp", "ui\windows-app\src\FileRecovery.WindowsApp\FileRecovery.WindowsApp.csproj", "{F2C035A6-ADC9-4BE5-97E7-9A66845954C4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileRecovery.WindowsApp.Core", "ui\windows-app\src\FileRecovery.WindowsApp.Core\FileRecovery.WindowsApp.Core.csproj", "{F3247641-F584-473E-B9B5-AFDC9FE0FEFE}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{399D62A2-3C5F-4DBE-91B4-9298FC8A02EA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileRecovery.WindowsApp.Tests", "ui\windows-app\tests\FileRecovery.WindowsApp.Tests\FileRecovery.WindowsApp.Tests.csproj", "{BF563390-1DA2-4746-8F27-805FA86E5A38}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{07F88AAE-5DEA-41C5-9205-3BE5EB9E4098}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmarks", "benchmarks", "{14E0DE23-3E60-4297-A61E-DEA992AF0AB7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NtfsCorpusBench", "tools\benchmarks\NtfsCorpusBench\NtfsCorpusBench.csproj", "{4249EC34-33C0-4E12-BC63-4B3D172BFE99}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F2C035A6-ADC9-4BE5-97E7-9A66845954C4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F2C035A6-ADC9-4BE5-97E7-9A66845954C4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F2C035A6-ADC9-4BE5-97E7-9A66845954C4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F2C035A6-ADC9-4BE5-97E7-9A66845954C4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F3247641-F584-473E-B9B5-AFDC9FE0FEFE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F3247641-F584-473E-B9B5-AFDC9FE0FEFE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F3247641-F584-473E-B9B5-AFDC9FE0FEFE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F3247641-F584-473E-B9B5-AFDC9FE0FEFE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BF563390-1DA2-4746-8F27-805FA86E5A38}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BF563390-1DA2-4746-8F27-805FA86E5A38}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BF563390-1DA2-4746-8F27-805FA86E5A38}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BF563390-1DA2-4746-8F27-805FA86E5A38}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4249EC34-33C0-4E12-BC63-4B3D172BFE99}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4249EC34-33C0-4E12-BC63-4B3D172BFE99}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4249EC34-33C0-4E12-BC63-4B3D172BFE99}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4249EC34-33C0-4E12-BC63-4B3D172BFE99}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{03725862-A45C-4BA3-85E6-781FFBA45EE3} = {70C63EF9-C469-4D56-8F01-FB5DF8A09584}
+		{76B88CD9-09E2-4CD9-A009-DCA4E9CD4E7B} = {03725862-A45C-4BA3-85E6-781FFBA45EE3}
+		{F2C035A6-ADC9-4BE5-97E7-9A66845954C4} = {76B88CD9-09E2-4CD9-A009-DCA4E9CD4E7B}
+		{F3247641-F584-473E-B9B5-AFDC9FE0FEFE} = {76B88CD9-09E2-4CD9-A009-DCA4E9CD4E7B}
+		{399D62A2-3C5F-4DBE-91B4-9298FC8A02EA} = {03725862-A45C-4BA3-85E6-781FFBA45EE3}
+		{BF563390-1DA2-4746-8F27-805FA86E5A38} = {399D62A2-3C5F-4DBE-91B4-9298FC8A02EA}
+		{14E0DE23-3E60-4297-A61E-DEA992AF0AB7} = {07F88AAE-5DEA-41C5-9205-3BE5EB9E4098}
+		{4249EC34-33C0-4E12-BC63-4B3D172BFE99} = {14E0DE23-3E60-4297-A61E-DEA992AF0AB7}
+	EndGlobalSection
+EndGlobal

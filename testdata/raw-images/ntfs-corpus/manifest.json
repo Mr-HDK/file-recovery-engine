@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Fixed NTFS image corpus for quick-scan benchmark runs.",
+  "cases": [
+    {
+      "id": "ntfs-recent-delete",
+      "relativePath": "ntfs-recent-delete.img",
+      "maxRecords": 131072,
+      "iterations": 3,
+      "candidateCapacity": 2048
+    },
+    {
+      "id": "ntfs-deleted-tree",
+      "relativePath": "ntfs-deleted-tree.img",
+      "maxRecords": 196608,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ntfs-fragmented",
+      "relativePath": "ntfs-fragmented.img",
+      "maxRecords": 262144,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ntfs-partial-overwrite",
+      "relativePath": "ntfs-partial-overwrite.img",
+      "maxRecords": 262144,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    }
+  ]
+}
