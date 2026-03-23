@@ -52,6 +52,8 @@
 - Candidate persistence tests for recovery diagnostics/status-code/write-bytes fields in SQLite.
 - Candidate persistence tests for quick-scan ADS/compressed/sparse/encrypted flags in SQLite.
 - Candidate persistence tests for raw recovery diagnostics flags bitmask in SQLite.
+- Session-retention tests for age/max-count pruning plus compaction trigger behavior in SQLite.
+- Safety-validator tests for nested mount-path layouts and same-volume rejection when source volume is inferred from source path.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 

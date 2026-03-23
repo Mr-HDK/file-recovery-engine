@@ -471,6 +471,70 @@ public sealed class SqliteSessionStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<SessionStoreMaintenanceResult> ApplyRetentionPolicyAsync(
+        TimeSpan maxSessionAge,
+        int maxSessionCount,
+        bool compactDatabase,
+        CancellationToken cancellationToken)
+    {
+        if (maxSessionAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxSessionAge), "Session age retention must be positive.");
+        }
+
+        if (maxSessionCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxSessionCount), "Session retention count must be positive.");
+        }
+
+        var cutoffUtc = DateTimeOffset.UtcNow - maxSessionAge;
+
+        await using var connection = new SqliteConnection($"Data Source={DatabasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        var deletedByAge = await DeleteSessionsMatchingQueryAsync(
+            connection,
+            transaction,
+            """
+            SELECT session_id
+            FROM sessions
+            WHERE updated_utc < $cutoff_utc
+            """,
+            command => command.Parameters.AddWithValue("$cutoff_utc", cutoffUtc.ToString("O")),
+            cancellationToken);
+
+        var deletedByOverflow = await DeleteSessionsMatchingQueryAsync(
+            connection,
+            transaction,
+            """
+            SELECT session_id
+            FROM sessions
+            ORDER BY updated_utc DESC
+            LIMIT -1 OFFSET $offset
+            """,
+            command => command.Parameters.AddWithValue("$offset", maxSessionCount),
+            cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+
+        var remainingSessions = await GetSessionCountAsync(connection, cancellationToken);
+        var compacted = false;
+        if (compactDatabase)
+        {
+            var vacuum = connection.CreateCommand();
+            vacuum.CommandText = "VACUUM;";
+            await vacuum.ExecuteNonQueryAsync(cancellationToken);
+            compacted = true;
+        }
+
+        return new SessionStoreMaintenanceResult(
+            DeletedByAge: deletedByAge,
+            DeletedByOverflow: deletedByOverflow,
+            RemainingSessions: remainingSessions,
+            Compacted: compacted);
+    }
+
     private static async Task EnsureQuickScanCandidateSchemaAsync(
         SqliteConnection connection,
         CancellationToken cancellationToken)
@@ -575,5 +639,73 @@ public sealed class SqliteSessionStore
 
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value is not null;
+    }
+
+    private static async Task<int> DeleteSessionsMatchingQueryAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sessionIdSelectionQuery,
+        Action<SqliteCommand>? configureSelection,
+        CancellationToken cancellationToken)
+    {
+        var dropTemp = connection.CreateCommand();
+        dropTemp.Transaction = transaction;
+        dropTemp.CommandText = "DROP TABLE IF EXISTS temp_sessions_to_prune;";
+        await dropTemp.ExecuteNonQueryAsync(cancellationToken);
+
+        var createTemp = connection.CreateCommand();
+        createTemp.Transaction = transaction;
+        createTemp.CommandText = "CREATE TEMP TABLE temp_sessions_to_prune(session_id TEXT PRIMARY KEY);";
+        await createTemp.ExecuteNonQueryAsync(cancellationToken);
+
+        var fillTemp = connection.CreateCommand();
+        fillTemp.Transaction = transaction;
+        fillTemp.CommandText = $"INSERT INTO temp_sessions_to_prune(session_id) {sessionIdSelectionQuery};";
+        configureSelection?.Invoke(fillTemp);
+        await fillTemp.ExecuteNonQueryAsync(cancellationToken);
+
+        var count = connection.CreateCommand();
+        count.Transaction = transaction;
+        count.CommandText = "SELECT COUNT(1) FROM temp_sessions_to_prune;";
+        var rawCount = await count.ExecuteScalarAsync(cancellationToken);
+        var removedCount = rawCount is null ? 0 : Convert.ToInt32(rawCount);
+
+        if (removedCount > 0)
+        {
+            var deleteCandidates = connection.CreateCommand();
+            deleteCandidates.Transaction = transaction;
+            deleteCandidates.CommandText =
+                """
+                DELETE FROM quick_scan_candidates
+                WHERE session_id IN (SELECT session_id FROM temp_sessions_to_prune);
+                """;
+            await deleteCandidates.ExecuteNonQueryAsync(cancellationToken);
+
+            var deleteSessions = connection.CreateCommand();
+            deleteSessions.Transaction = transaction;
+            deleteSessions.CommandText =
+                """
+                DELETE FROM sessions
+                WHERE session_id IN (SELECT session_id FROM temp_sessions_to_prune);
+                """;
+            await deleteSessions.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var cleanupTemp = connection.CreateCommand();
+        cleanupTemp.Transaction = transaction;
+        cleanupTemp.CommandText = "DROP TABLE IF EXISTS temp_sessions_to_prune;";
+        await cleanupTemp.ExecuteNonQueryAsync(cancellationToken);
+
+        return removedCount;
+    }
+
+    private static async Task<int> GetSessionCountAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(1) FROM sessions;";
+        var raw = await command.ExecuteScalarAsync(cancellationToken);
+        return raw is null ? 0 : Convert.ToInt32(raw);
     }
 }

@@ -62,6 +62,8 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SourceCandidate> _sources = [];
     private readonly ObservableCollection<string> _validationOutput = [];
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
+    private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
+    private const int SessionRetentionMaxCount = 50;
     private SourceCandidate? _selectedSource;
     private CancellationTokenSource? _previewReadCts;
     private CancellationTokenSource? _refreshCts;
@@ -101,6 +103,7 @@ public partial class MainWindow : Window
         {
             RefreshElevationState();
             await _sessionStore.EnsureCreatedAsync(CancellationToken.None);
+            await RunSessionStoreMaintenanceAsync(userInitiated: false, compactDatabase: false, CancellationToken.None);
             await RefreshSourcesAsync(CancellationToken.None);
             await LoadLatestPersistedCandidatesAsync(CancellationToken.None);
             AppendSessionMessage($"Session DB: {_sessionStore.DatabasePath}");
@@ -557,6 +560,50 @@ public partial class MainWindow : Window
         _activeSessionId = latest.SessionId;
         RenderQuickScanCandidates(persisted);
         AppendSessionMessage($"Loaded {persisted.Count} persisted quick-scan candidates from session {latest.SessionId:D}.");
+    }
+
+    private async void SessionMaintenanceButton_Click(object sender, RoutedEventArgs e)
+    {
+        await RunSessionStoreMaintenanceAsync(userInitiated: true, compactDatabase: true, CancellationToken.None);
+    }
+
+    private async Task RunSessionStoreMaintenanceAsync(
+        bool userInitiated,
+        bool compactDatabase,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _sessionStore.ApplyRetentionPolicyAsync(
+                SessionRetentionAge,
+                SessionRetentionMaxCount,
+                compactDatabase,
+                cancellationToken);
+
+            AppendSessionMessage(
+                $"Session DB maintenance: deleted-old={result.DeletedByAge}, deleted-overflow={result.DeletedByOverflow}, remaining={result.RemainingSessions}, compacted={(result.Compacted ? "yes" : "no")}.");
+
+            if (userInitiated)
+            {
+                StatusTextBlock.Text = "Session DB maintenance completed";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AppendSessionMessage("Session DB maintenance canceled.");
+            if (userInitiated)
+            {
+                StatusTextBlock.Text = "Session DB maintenance canceled";
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendSessionMessage($"Session DB maintenance warning: {ex.Message}");
+            if (userInitiated)
+            {
+                StatusTextBlock.Text = "Session DB maintenance failed";
+            }
+        }
     }
 
     private void SelectAllCandidatesButton_Click(object sender, RoutedEventArgs e)

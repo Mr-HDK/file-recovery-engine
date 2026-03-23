@@ -139,6 +139,72 @@ public sealed class SourceDestinationSafetyValidatorTests
         Assert.Contains(result.Issues, i => i.Code == "not-elevated");
     }
 
+    [Fact]
+    public void RejectsSameVolumeWhenVolumeIsResolvedFromMountedSourcePath()
+    {
+        var root = CreateTemporaryDirectory();
+        var mountPath = Path.Combine(root, "mounts", "data");
+        var destination = Path.Combine(mountPath, "recovery-target");
+        Directory.CreateDirectory(mountPath);
+        Directory.CreateDirectory(destination);
+
+        var topology = new FakeStorageTopologyService();
+        topology.Map(root, "VOL-ROOT", 0);
+        topology.Map(mountPath, "VOL-DATA", 2);
+
+        var source = new SourceCandidate(
+            Id: "volume-mounted",
+            Kind: RecoverySourceKind.Volume,
+            DisplayName: "MountedData",
+            DevicePath: "\\\\.\\Harddisk2Partition1",
+            FileSystem: "NTFS",
+            SizeBytes: 100,
+            SectorSizeBytes: 4096,
+            DiskIndex: 2,
+            VolumeIdentity: null,
+            SourcePath: Path.Combine(mountPath, "sample.bin"),
+            ReadOnlyEnforced: true);
+
+        var validator = new SourceDestinationSafetyValidator(topology);
+        var result = validator.Validate(source, destination, isElevated: true);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Issues, i => i.Code == "same-volume");
+    }
+
+    [Fact]
+    public void RejectsSameVolumeForImageSourceInNestedMountLayout()
+    {
+        var root = CreateTemporaryDirectory();
+        var mountPath = Path.Combine(root, "volumes", "archive");
+        var destination = Path.Combine(mountPath, "exports");
+        Directory.CreateDirectory(mountPath);
+        Directory.CreateDirectory(destination);
+
+        var topology = new FakeStorageTopologyService();
+        topology.Map(root, "VOL-ROOT", 0);
+        topology.Map(mountPath, "VOL-ARCHIVE", 4);
+
+        var source = new SourceCandidate(
+            Id: "img-mounted",
+            Kind: RecoverySourceKind.ImageFile,
+            DisplayName: "ArchiveImage",
+            DevicePath: null,
+            FileSystem: null,
+            SizeBytes: 1024,
+            SectorSizeBytes: 512,
+            DiskIndex: null,
+            VolumeIdentity: null,
+            SourcePath: Path.Combine(mountPath, "archive.dd"),
+            ReadOnlyEnforced: true);
+
+        var validator = new SourceDestinationSafetyValidator(topology);
+        var result = validator.Validate(source, destination, isElevated: true);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Issues, i => i.Code == "same-volume-image");
+    }
+
     private static string CreateTemporaryDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), "fr-tests", Guid.NewGuid().ToString("N"));

@@ -1,5 +1,6 @@
-﻿using FileRecovery.WindowsApp.Core.Models;
+using FileRecovery.WindowsApp.Core.Models;
 using FileRecovery.WindowsApp.Core.Persistence;
+using Microsoft.Data.Sqlite;
 
 namespace FileRecovery.WindowsApp.Tests;
 
@@ -140,5 +141,109 @@ public sealed class SqliteSessionStoreTests
         Assert.True(updatedCandidates[0].LastRecoveryPartial);
         Assert.Contains("Compressed", updatedCandidates[0].RecoveryDiagnostics);
         Assert.True(updatedCandidates[0].LastRecoveryUtc.HasValue);
+    }
+
+    [Fact]
+    public async Task AppliesRetentionPolicyAndCompactsDatabase()
+    {
+        var dbDirectory = Path.Combine(Path.GetTempPath(), "fr-tests-db", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dbDirectory);
+        var dbPath = Path.Combine(dbDirectory, "sessions.db");
+
+        var store = new SqliteSessionStore(dbPath);
+        await store.EnsureCreatedAsync(CancellationToken.None);
+
+        var source = new SourceCandidate(
+            Id: "volume-d",
+            Kind: RecoverySourceKind.Volume,
+            DisplayName: "D",
+            DevicePath: "\\\\.\\D:",
+            FileSystem: "NTFS",
+            SizeBytes: 100,
+            SectorSizeBytes: 512,
+            DiskIndex: 1,
+            VolumeIdentity: "VOL-D",
+            SourcePath: "D:\\",
+            ReadOnlyEnforced: true);
+
+        var destination = Path.Combine(dbDirectory, "destination");
+        Directory.CreateDirectory(destination);
+
+        var sessionIds = new List<Guid>();
+        for (var i = 0; i < 5; i++)
+        {
+            var sessionId = await store.CreateSessionAsync(source, destination, ScanMode.Quick, CancellationToken.None);
+            sessionIds.Add(sessionId);
+            await store.ReplaceQuickScanCandidatesAsync(
+                sessionId,
+                new[] { BuildCandidate(ordinal: 0, recordNumber: checked((uint)(100 + i))) },
+                CancellationToken.None);
+        }
+
+        await SetSessionUpdatedUtcAsync(dbPath, sessionIds[0], DateTimeOffset.UtcNow.AddDays(-120));
+        await SetSessionUpdatedUtcAsync(dbPath, sessionIds[1], DateTimeOffset.UtcNow.AddDays(-40));
+        await SetSessionUpdatedUtcAsync(dbPath, sessionIds[2], DateTimeOffset.UtcNow.AddDays(-3));
+        await SetSessionUpdatedUtcAsync(dbPath, sessionIds[3], DateTimeOffset.UtcNow.AddDays(-2));
+        await SetSessionUpdatedUtcAsync(dbPath, sessionIds[4], DateTimeOffset.UtcNow.AddDays(-1));
+
+        var maintenance = await store.ApplyRetentionPolicyAsync(
+            maxSessionAge: TimeSpan.FromDays(30),
+            maxSessionCount: 2,
+            compactDatabase: true,
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal(2, maintenance.DeletedByAge);
+        Assert.Equal(1, maintenance.DeletedByOverflow);
+        Assert.Equal(2, maintenance.RemainingSessions);
+        Assert.True(maintenance.Compacted);
+
+        var sessions = await store.GetRecentSessionsAsync(10, CancellationToken.None);
+        Assert.Equal(2, sessions.Count);
+        Assert.Equal(sessionIds[4], sessions[0].SessionId);
+        Assert.Equal(sessionIds[3], sessions[1].SessionId);
+
+        var latestCandidates = await store.GetQuickScanCandidatesAsync(sessionIds[4], 10, CancellationToken.None);
+        Assert.Single(latestCandidates);
+        var secondLatestCandidates = await store.GetQuickScanCandidatesAsync(sessionIds[3], 10, CancellationToken.None);
+        Assert.Single(secondLatestCandidates);
+
+        var removedCandidatesByAge = await store.GetQuickScanCandidatesAsync(sessionIds[1], 10, CancellationToken.None);
+        Assert.Empty(removedCandidatesByAge);
+        var removedCandidatesByCount = await store.GetQuickScanCandidatesAsync(sessionIds[2], 10, CancellationToken.None);
+        Assert.Empty(removedCandidatesByCount);
+    }
+
+    private static QuickScanCandidateRecord BuildCandidate(int ordinal, uint recordNumber)
+    {
+        return new QuickScanCandidateRecord(
+            Ordinal: ordinal,
+            RecordNumber: recordNumber,
+            Deleted: true,
+            Directory: false,
+            NonResidentData: true,
+            Name: $"candidate-{recordNumber}.bin",
+            OriginalPath: $@"Recovered\candidate-{recordNumber}.bin",
+            ParentRecordNumber: null,
+            ConfidenceTier: "Medium",
+            ConfidenceReason: "Test candidate",
+            CandidateStatus: RecoveryCandidateStatus.Partial);
+    }
+
+    private static async Task SetSessionUpdatedUtcAsync(string dbPath, Guid sessionId, DateTimeOffset updatedUtc)
+    {
+        await using var connection = new SqliteConnection($"Data Source={dbPath}");
+        await connection.OpenAsync(CancellationToken.None);
+
+        var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            UPDATE sessions
+            SET updated_utc = $updated_utc
+            WHERE session_id = $session_id;
+            """;
+        command.Parameters.AddWithValue("$updated_utc", updatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$session_id", sessionId.ToString("D"));
+
+        await command.ExecuteNonQueryAsync(CancellationToken.None);
     }
 }

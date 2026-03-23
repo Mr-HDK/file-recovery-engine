@@ -45,6 +45,7 @@
 - Safety gate runs before session start and blocks same-volume recovery.
 - Source discovery surfaces physical disks, logical volumes, and partition entries with filesystem, labels, sector sizes, and mount paths.
 - Session state persisted in SQLite (created under `%LocalAppData%\\FileRecovery`).
+- Session retention maintenance applies a 30-day window plus maximum recent-session cap and supports explicit compaction (`VACUUM`) from the diagnostics actions.
 - Structured session logs written as JSONL plus readable text logs.
 
 ## Interop boundary

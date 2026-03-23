@@ -16,6 +16,8 @@
 6. Persisted per-candidate recovery diagnostics flags (raw bitmask) through SQLite/UI/export alongside diagnostics text.
 7. Hardened `scripts/test.ps1` to detect cargo from `%USERPROFILE%\\.cargo\\bin`, fail on real command failures, and emit explicit linker/rustfmt guidance.
 8. Added per-session human-readable recovery report generation (`.recovery-report.md`) with candidate-level status/diagnostics details.
+9. Added SQLite session retention policy (30-day + max-session cap) with explicit DB compaction (`VACUUM`) support and UI maintenance trigger.
+10. Added safety-validator coverage for nested mount-point layouts to verify longest-prefix volume resolution and same-volume blocking.
 
 ## Active risks
 
@@ -25,12 +27,8 @@
 
 2. **R2 - Destination safety for complex mount configurations**
 - Impact: false negatives on uncommon mount points.
-- Mitigation: mount-point-to-volume GUID resolution is implemented in topology lookup; add integration tests for uncommon mount layouts.
+- Mitigation: mount-point-to-volume GUID resolution is implemented in topology lookup; nested mount-layout validator tests are now in place and should be expanded with host-level topology integration coverage.
 
 3. **R3 - Offline/unmounted partition visibility on restricted systems**
 - Impact: fallback enumeration covers mounted volumes but may miss unmounted partitions if WMI is blocked.
 - Mitigation: add SetupAPI-based disk/partition walk to complement current Win32 mounted-volume fallback.
-
-4. **R4 - Session store growth over long retention**
-- Impact: larger local DB and slower queries.
-- Mitigation: add retention policy and compaction command in Phase 1.1.

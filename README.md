@@ -7,6 +7,7 @@ Commercial-grade local desktop recovery foundation targeting Windows and NTFS fi
 - Monorepo scaffold for docs, Rust engine, WPF UI, tests, tools, scripts, and CI.
 - Required Phase 0 documentation set under `docs/`.
 - WPF shell with source/destination workflow, safety validation, and SQLite session persistence.
+- SQLite session retention and maintenance controls (automatic retention + manual compaction trigger).
 - Rust engine workspace skeleton with modular crates and stable C ABI entry points.
 - Baseline automated tests for safety validation and session persistence.
 
