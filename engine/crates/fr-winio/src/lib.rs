@@ -140,6 +140,9 @@ mod platform {
         enforce_alignment: bool,
     }
 
+    // Win32 HANDLE values are process-wide kernel object references and can be moved across threads.
+    unsafe impl Send for PlatformReadSession {}
+
     impl PlatformReadSession {
         pub(super) fn read_at(
             &mut self,
