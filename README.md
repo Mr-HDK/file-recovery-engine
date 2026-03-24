@@ -27,6 +27,14 @@ Commercial-grade local desktop recovery foundation targeting Windows and NTFS fi
 ./scripts/benchmark-ntfs-corpus.ps1 -AllowMissing
 ```
 
+Optional elevated host-integration validation (provisions a temporary NTFS VHD and validates compressed/encrypted deleted-file recovery paths):
+
+```powershell
+./scripts/run-host-ntfs-stream-validation.ps1
+# or:
+./scripts/test.ps1 -IncludeHostIntegration
+```
+
 ## Rust toolchain setup (Windows)
 
 ```powershell

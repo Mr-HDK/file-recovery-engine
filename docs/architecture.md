@@ -44,6 +44,7 @@
   4. session initialization.
 - Safety gate runs before session start and blocks same-volume recovery.
 - Source discovery surfaces physical disks, logical volumes, and partition entries with filesystem, labels, sector sizes, and mount paths.
+- Partition discovery fallback now includes a SetupAPI-based disk walk plus partition probing to surface unmounted/offline partition candidates when WMI is unavailable.
 - Session state persisted in SQLite (created under `%LocalAppData%\\FileRecovery`).
 - Session retention maintenance applies a 30-day window plus maximum recent-session cap and supports explicit compaction (`VACUUM`) from the diagnostics actions.
 - Structured session logs written as JSONL plus readable text logs.
@@ -55,6 +56,7 @@
 - Contract versioning starts at `0.1.0` and will be semver-gated.
 - Read-only source sessions expose open/read/close operations with alignment metadata so UI orchestration can keep chunk reads bounded and cancellation-friendly.
 - Engine now includes NTFS boot sector parsing and MFT record parsing (including resident/non-resident attribute decoding and mapping-pairs data-run parsing) as standalone parser primitives for Phase 2 integration.
+- Recovery export now includes non-resident NTFS compressed-stream decompression and encrypted-stream raw export with explicit diagnostics/partial signaling through the FFI boundary.
 
 ## Observability
 

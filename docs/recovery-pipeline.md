@@ -50,7 +50,9 @@
 - Persist per-candidate write diagnostics (status code, bytes written, partial flag, and engine diagnostics text).
 - Persist per-candidate diagnostics flag bitmask for deterministic post-run triage/reporting.
 - Export named NTFS streams as sidecar files (`.ads-<stream>`), and surface exported/skipped stream diagnostics explicitly.
-- Surface unsupported compressed/encrypted stream exports and ADS-only edge cases explicitly instead of silent fallback.
+- Decompress non-resident NTFS compressed streams during export (with explicit partial/unsupported diagnostics when decode fails).
+- Export encrypted streams as raw bytes with explicit "not decrypted" diagnostics and partial recovery signaling.
+- Surface ADS-only edge cases explicitly instead of silent fallback.
 
 10. Reporting
 - Generate session report with recovered count, failures, partials, and evidence breakdown.

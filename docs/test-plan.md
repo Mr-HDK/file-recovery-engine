@@ -54,6 +54,14 @@
 - Candidate persistence tests for raw recovery diagnostics flags bitmask in SQLite.
 - Session-retention tests for age/max-count pruning plus compaction trigger behavior in SQLite.
 - Safety-validator tests for nested mount-path layouts and same-volume rejection when source volume is inferred from source path.
+- Enumeration fallback validation for SetupAPI-based partition discovery paths (mounted and unmounted/offline candidates).
+- Rust FFI integration tests for quick-scan candidate payloads (confidence tier/reason + status flag bitset).
+- Rust FFI integration tests for ADS sidecar recovery behavior (default+named, named-only partial, skipped compressed named stream).
+- Rust FFI integration tests for non-resident compressed default-stream decompression export and encrypted default-stream raw export with partial diagnostics.
+- Windows host integration test harness (gated by `FR_RUN_HOST_INTEGRATION=1`) that provisions an NTFS VHD fixture and validates compressed+encrypted deleted-file recovery diagnostics end-to-end.
+- Host encrypted-file validation auto-degrades on systems where EFS is unavailable for the fixture volume (compressed-path validation still runs).
+- Host integration test exits early with explicit notice when native engine runtime (`file_recovery_engine.dll`) is unavailable in the test process.
+- `scripts/run-host-ntfs-stream-validation.ps1` to execute host integration coverage in an elevated shell.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 

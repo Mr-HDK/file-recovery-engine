@@ -84,6 +84,27 @@ const RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED: u32 = 0x0040;
 const RECOVERY_DIAG_SPARSE_ZERO_FILLED: u32 = 0x0080;
 const RECOVERY_DIAG_NO_DEFAULT_DATA_STREAM: u32 = 0x0100;
 const RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS: u32 = 0x0200;
+const NTFS_MAX_REASONABLE_COMPRESSION_UNIT_EXPONENT: u16 = 8;
+const NTFS_COMPRESSION_FORMAT_LZNT1: u16 = 0x0002;
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+extern "system" {
+    fn RtlGetCompressionWorkSpaceSize(
+        compression_format_and_engine: u16,
+        compress_buffer_work_space_size: *mut u32,
+        compress_fragment_work_space_size: *mut u32,
+    ) -> i32;
+    fn RtlDecompressBufferEx(
+        compression_format: u16,
+        uncompressed_buffer: *mut u8,
+        uncompressed_buffer_size: u32,
+        compressed_buffer: *const u8,
+        compressed_buffer_size: u32,
+        final_uncompressed_size: *mut u32,
+        work_space: *mut core::ffi::c_void,
+    ) -> i32;
+}
 
 #[no_mangle]
 pub extern "C" fn fr_engine_version() -> *const c_char {
@@ -598,18 +619,6 @@ fn fr_recover_ntfs_candidate_to_file_impl(
     let mut exported_named_stream_count = 0usize;
 
     if let Some(data_attribute) = unnamed_data_attribute {
-        if data_attribute.flags & NTFS_ATTRIBUTE_FLAG_ENCRYPTED != 0 {
-            diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED;
-            write_diagnostics_flags(out_diagnostics_flags, diagnostics_flags);
-            return 46;
-        }
-
-        if data_attribute.flags & NTFS_ATTRIBUTE_FLAG_COMPRESSED != 0 {
-            diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
-            write_diagnostics_flags(out_diagnostics_flags, diagnostics_flags);
-            return 45;
-        }
-
         let Ok(mut output_file) = File::create(output_path) else {
             return 44;
         };
@@ -639,20 +648,6 @@ fn fr_recover_ntfs_candidate_to_file_impl(
     let mut named_stream_suffixes: HashMap<String, u32> = HashMap::new();
     let mut skipped_named_streams = 0usize;
     for named_attribute in named_data_attributes {
-        if named_attribute.flags & NTFS_ATTRIBUTE_FLAG_ENCRYPTED != 0 {
-            diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED;
-            skipped_named_streams = skipped_named_streams.saturating_add(1);
-            partial = true;
-            continue;
-        }
-
-        if named_attribute.flags & NTFS_ATTRIBUTE_FLAG_COMPRESSED != 0 {
-            diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
-            skipped_named_streams = skipped_named_streams.saturating_add(1);
-            partial = true;
-            continue;
-        }
-
         let stream_name = named_attribute.name.as_deref().unwrap_or("stream");
         let sidecar_path =
             build_named_stream_output_path(output_path, stream_name, &mut named_stream_suffixes);
@@ -867,15 +862,36 @@ fn recover_data_attribute(
     output_file: &mut File,
     diagnostics_flags: &mut u32,
 ) -> Result<(u64, bool), i32> {
+    let compressed = attribute.flags & NTFS_ATTRIBUTE_FLAG_COMPRESSED != 0;
+    let encrypted = attribute.flags & NTFS_ATTRIBUTE_FLAG_ENCRYPTED != 0;
+    if encrypted {
+        *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED;
+    }
+
     match &attribute.form {
         AttributeForm::Resident(resident) => {
+            if compressed {
+                *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
+                return Err(45);
+            }
+
             if output_file.write_all(&resident.value).is_err() {
                 return Err(44);
             }
-            Ok((resident.value.len() as u64, false))
+            Ok((resident.value.len() as u64, encrypted))
+        }
+        AttributeForm::NonResident(non_resident) if compressed && !encrypted => {
+            recover_non_resident_compressed_data(
+                session,
+                boot,
+                non_resident,
+                output_file,
+                diagnostics_flags,
+            )
         }
         AttributeForm::NonResident(non_resident) => {
             recover_non_resident_data(session, boot, non_resident, output_file, diagnostics_flags)
+                .map(|(written, partial)| (written, partial || encrypted))
         }
     }
 }
@@ -954,6 +970,349 @@ fn is_windows_reserved_name(value: &str) -> bool {
             | "LPT8"
             | "LPT9"
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompressedUnitRunSlice {
+    lcn: Option<i64>,
+    cluster_count: u64,
+}
+
+fn recover_non_resident_compressed_data(
+    session: &mut fr_winio::ReadSession,
+    boot: &fr_ntfs::NtfsBootSector,
+    non_resident: &fr_mft::NonResidentAttribute,
+    output_file: &mut File,
+    diagnostics_flags: &mut u32,
+) -> Result<(u64, bool), i32> {
+    let cluster_size = boot.cluster_size_bytes() as u64;
+    if cluster_size == 0 {
+        return Err(32);
+    }
+
+    let Some(compression_unit_clusters) =
+        compression_unit_cluster_count(non_resident.compression_unit_size)
+    else {
+        *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
+        return Err(45);
+    };
+
+    let Some(unit_size_bytes) = compression_unit_clusters.checked_mul(cluster_size) else {
+        return Err(33);
+    };
+
+    let mut bytes_written = 0u64;
+    let mut remaining = non_resident.data_size;
+    let mut partial = false;
+    let mut scratch = vec![0u8; 1024 * 1024];
+    let zero_chunk = vec![0u8; 64 * 1024];
+
+    let mut run_index = 0usize;
+    let mut run_cluster_offset = 0u64;
+
+    while remaining > 0 {
+        let mut unit_slices: Vec<CompressedUnitRunSlice> = Vec::new();
+        let mut consumed_clusters = 0u64;
+
+        while consumed_clusters < compression_unit_clusters {
+            let Some(run) = non_resident.data_runs.get(run_index) else {
+                break;
+            };
+
+            if run_cluster_offset >= run.cluster_count {
+                run_index = run_index.saturating_add(1);
+                run_cluster_offset = 0;
+                continue;
+            }
+
+            let available_in_run = run.cluster_count - run_cluster_offset;
+            let needed = compression_unit_clusters - consumed_clusters;
+            let take = available_in_run.min(needed);
+
+            let adjusted_lcn = match run.lcn {
+                Some(base_lcn) => {
+                    let Ok(offset_i64) = i64::try_from(run_cluster_offset) else {
+                        return Err(33);
+                    };
+                    match base_lcn.checked_add(offset_i64) {
+                        Some(v) => Some(v),
+                        None => return Err(33),
+                    }
+                }
+                None => None,
+            };
+
+            unit_slices.push(CompressedUnitRunSlice {
+                lcn: adjusted_lcn,
+                cluster_count: take,
+            });
+
+            consumed_clusters = consumed_clusters.saturating_add(take);
+            run_cluster_offset = run_cluster_offset.saturating_add(take);
+
+            if run_cluster_offset >= run.cluster_count {
+                run_index = run_index.saturating_add(1);
+                run_cluster_offset = 0;
+            }
+        }
+
+        if consumed_clusters == 0 {
+            partial = true;
+            break;
+        }
+
+        let target_bytes_for_unit = remaining.min(unit_size_bytes);
+        let physical_clusters = unit_slices
+            .iter()
+            .filter_map(|slice| slice.lcn.map(|_| slice.cluster_count))
+            .fold(0u64, |acc, count| acc.saturating_add(count));
+        let sparse_clusters = consumed_clusters.saturating_sub(physical_clusters);
+
+        if physical_clusters == 0 {
+            *diagnostics_flags |= RECOVERY_DIAG_SPARSE_ZERO_FILLED;
+            let mut left = target_bytes_for_unit;
+            while left > 0 {
+                let chunk = left.min(zero_chunk.len() as u64) as usize;
+                if output_file.write_all(&zero_chunk[..chunk]).is_err() {
+                    return Err(44);
+                }
+                bytes_written = bytes_written.saturating_add(chunk as u64);
+                left -= chunk as u64;
+            }
+            remaining -= target_bytes_for_unit;
+            continue;
+        }
+
+        let raw_unit_possible =
+            sparse_clusters == 0 && physical_clusters == compression_unit_clusters;
+
+        let mut compressed_source = Vec::new();
+        let Some(raw_source_capacity) = physical_clusters.checked_mul(cluster_size) else {
+            return Err(33);
+        };
+        let Ok(raw_source_capacity_usize) = usize::try_from(raw_source_capacity) else {
+            return Err(33);
+        };
+        compressed_source.reserve(raw_source_capacity_usize);
+
+        let mut unit_read_failed = false;
+        for slice in unit_slices {
+            let Some(lcn) = slice.lcn else {
+                continue;
+            };
+            if lcn < 0 {
+                unit_read_failed = true;
+                partial = true;
+                break;
+            }
+
+            let Some(source_offset) = (lcn as u64).checked_mul(cluster_size) else {
+                return Err(33);
+            };
+            let Some(slice_bytes) = slice.cluster_count.checked_mul(cluster_size) else {
+                return Err(33);
+            };
+
+            let mut copied = 0u64;
+            while copied < slice_bytes {
+                let left = slice_bytes - copied;
+                let chunk_len = left.min(scratch.len() as u64) as usize;
+                let Some(current_offset) = source_offset.checked_add(copied) else {
+                    return Err(33);
+                };
+
+                match read_from_session(session, current_offset, &mut scratch[..chunk_len]) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        partial = true;
+                        unit_read_failed = true;
+                        break;
+                    }
+                    Err(_) => {
+                        partial = true;
+                        unit_read_failed = true;
+                        break;
+                    }
+                }
+
+                compressed_source.extend_from_slice(&scratch[..chunk_len]);
+                copied += chunk_len as u64;
+            }
+
+            if unit_read_failed {
+                break;
+            }
+        }
+
+        if unit_read_failed {
+            break;
+        }
+
+        if raw_unit_possible {
+            let Ok(target_len) = usize::try_from(target_bytes_for_unit) else {
+                return Err(33);
+            };
+            if compressed_source.len() < target_len {
+                partial = true;
+                break;
+            }
+            if output_file
+                .write_all(&compressed_source[..target_len])
+                .is_err()
+            {
+                return Err(44);
+            }
+            bytes_written = bytes_written.saturating_add(target_bytes_for_unit);
+            remaining -= target_bytes_for_unit;
+            continue;
+        }
+
+        let decompression_input = trim_lznt1_stream_padding(&compressed_source);
+        if decompression_input.is_empty() {
+            *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
+            partial = true;
+            break;
+        }
+
+        let Ok(unit_uncompressed_len) = usize::try_from(unit_size_bytes) else {
+            return Err(33);
+        };
+        let Some(mut decompressed) =
+            try_decompress_lznt1_unit(decompression_input, unit_uncompressed_len)
+        else {
+            *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
+            partial = true;
+            break;
+        };
+
+        let Ok(target_len) = usize::try_from(target_bytes_for_unit) else {
+            return Err(33);
+        };
+        if decompressed.len() < target_len {
+            partial = true;
+            *diagnostics_flags |= RECOVERY_DIAG_UNSUPPORTED_COMPRESSED;
+        }
+
+        if decompressed.len() > target_len {
+            decompressed.truncate(target_len);
+        }
+
+        if output_file.write_all(&decompressed).is_err() {
+            return Err(44);
+        }
+
+        bytes_written = bytes_written.saturating_add(decompressed.len() as u64);
+        remaining = remaining.saturating_sub(decompressed.len() as u64);
+
+        if decompressed.len() < target_len {
+            break;
+        }
+    }
+
+    if remaining > 0 {
+        partial = true;
+    }
+
+    Ok((bytes_written, partial))
+}
+
+fn compression_unit_cluster_count(compression_unit_size: u16) -> Option<u64> {
+    if compression_unit_size > NTFS_MAX_REASONABLE_COMPRESSION_UNIT_EXPONENT {
+        return None;
+    }
+
+    1u64.checked_shl(compression_unit_size as u32)
+}
+
+fn trim_lznt1_stream_padding(bytes: &[u8]) -> &[u8] {
+    let mut cursor = 0usize;
+    while cursor + 2 <= bytes.len() {
+        let header = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        if header == 0 {
+            break;
+        }
+
+        let signature = header & 0x7000;
+        if signature != 0x3000 {
+            break;
+        }
+
+        let chunk_len = ((header & 0x0FFF) as usize).saturating_add(1);
+        let Some(next_cursor) = cursor.checked_add(2).and_then(|v| v.checked_add(chunk_len)) else {
+            break;
+        };
+        if next_cursor > bytes.len() {
+            break;
+        }
+
+        cursor = next_cursor;
+    }
+
+    &bytes[..cursor]
+}
+
+fn try_decompress_lznt1_unit(compressed: &[u8], expected_output_len: usize) -> Option<Vec<u8>> {
+    if expected_output_len == 0 {
+        return Some(Vec::new());
+    }
+
+    #[cfg(windows)]
+    {
+        let Ok(expected_output_len_u32) = u32::try_from(expected_output_len) else {
+            return None;
+        };
+        let Ok(compressed_len_u32) = u32::try_from(compressed.len()) else {
+            return None;
+        };
+        if compressed_len_u32 == 0 {
+            return None;
+        }
+
+        let mut workspace_size = 0u32;
+        let mut fragment_workspace_size = 0u32;
+        let workspace_status = unsafe {
+            RtlGetCompressionWorkSpaceSize(
+                NTFS_COMPRESSION_FORMAT_LZNT1,
+                &mut workspace_size,
+                &mut fragment_workspace_size,
+            )
+        };
+        if workspace_status < 0 {
+            return None;
+        }
+
+        let mut workspace = vec![0u8; workspace_size as usize];
+        let mut output = vec![0u8; expected_output_len];
+        let mut final_uncompressed_size = 0u32;
+
+        let status = unsafe {
+            RtlDecompressBufferEx(
+                NTFS_COMPRESSION_FORMAT_LZNT1,
+                output.as_mut_ptr(),
+                expected_output_len_u32,
+                compressed.as_ptr(),
+                compressed_len_u32,
+                &mut final_uncompressed_size,
+                workspace.as_mut_ptr() as *mut core::ffi::c_void,
+            )
+        };
+        if status < 0 {
+            return None;
+        }
+
+        let final_size = final_uncompressed_size as usize;
+        if final_size > output.len() {
+            return None;
+        }
+        output.truncate(final_size);
+        return Some(output);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = compressed;
+        None
+    }
 }
 
 fn recover_non_resident_data(
@@ -1199,6 +1558,8 @@ fn map_winio_error(err: fr_winio::WinIoError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn health_check_returns_zero() {
@@ -1236,5 +1597,864 @@ mod tests {
             second.file_name().and_then(|name| name.to_str()),
             Some("file.txt.ads-zone.identifier-2")
         );
+    }
+
+    #[test]
+    fn ffi_quick_scan_candidates_include_confidence_and_flags() {
+        let image = build_test_ntfs_image_with_named_records();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        let open_status = fr_open_source_session_readonly(
+            image_path_cstr.as_ptr(),
+            2,
+            &mut session_id,
+            &mut size_bytes,
+        );
+        assert_eq!(open_status, 0);
+        assert!(session_id > 0);
+        assert!(size_bytes >= image.len() as u64);
+
+        let mut out_written = 0u32;
+        let mut candidates = vec![
+            FrNtfsQuickScanCandidate {
+                record_number: 0,
+                flags: 0,
+                parent_record_number: 0,
+                confidence_tier: 0,
+                name: [0u8; 128],
+                reconstructed_path: [0u8; 256],
+                confidence_reason: [0u8; 256],
+            };
+            8
+        ];
+
+        let scan_status = fr_get_ntfs_quick_scan_candidates_from_session(
+            session_id,
+            16,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut out_written,
+        );
+        assert_eq!(scan_status, 0);
+        assert_eq!(out_written, 2);
+
+        let result_slice = &candidates[..out_written as usize];
+        let deleted = result_slice
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .expect("deleted record candidate must be present");
+        let parent = result_slice
+            .iter()
+            .find(|candidate| candidate.record_number == 5)
+            .expect("parent record candidate must be present");
+
+        assert_ne!(deleted.flags & CANDIDATE_FLAG_DELETED, 0);
+        assert_eq!(deleted.flags & CANDIDATE_FLAG_DIRECTORY, 0);
+        assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_NAME, 0);
+        assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_PATH, 0);
+        assert_eq!(
+            deleted.confidence_tier,
+            confidence_tier_code(ConfidenceTier::VeryHigh)
+        );
+        let deleted_reason = c_string_bytes_to_string(&deleted.confidence_reason);
+        assert!(deleted_reason.starts_with("Score "));
+        assert!(deleted_reason.contains("MFT metadata present"));
+
+        assert_eq!(parent.flags & CANDIDATE_FLAG_DELETED, 0);
+        assert_ne!(parent.flags & CANDIDATE_FLAG_DIRECTORY, 0);
+        assert_eq!(
+            parent.confidence_tier,
+            confidence_tier_code(ConfidenceTier::VeryHigh)
+        );
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_exports_default_and_named_streams() {
+        let record_number = 42u32;
+        let default_bytes = b"default-stream".to_vec();
+        let named_bytes = b"named-stream".to_vec();
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![
+                build_resident_data_attribute(1, None, 0, &default_bytes),
+                build_resident_data_attribute(2, Some("Zone.Identifier"), 0, &named_bytes),
+            ],
+        );
+        let image = build_test_ntfs_image_with_record(&record);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-default-named-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(written, (default_bytes.len() + named_bytes.len()) as u64);
+        assert_ne!(diagnostics & RECOVERY_DIAG_HAS_NAMED_DATA_STREAM, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS, 0);
+        assert_eq!(diagnostics & RECOVERY_DIAG_NO_DEFAULT_DATA_STREAM, 0);
+        assert_eq!(fs::read(&output_path).unwrap(), default_bytes);
+
+        let sidecar_path = output_path.with_file_name("recovered.bin.ads-Zone.Identifier");
+        assert_eq!(fs::read(&sidecar_path).unwrap(), named_bytes);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&sidecar_path).unwrap();
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_named_only_sets_partial_and_no_default_flag() {
+        let record_number = 77u32;
+        let named_bytes = b"only-named".to_vec();
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![build_resident_data_attribute(
+                1,
+                Some("Zone.Identifier"),
+                0,
+                &named_bytes,
+            )],
+        );
+        let image = build_test_ntfs_image_with_record(&record);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-named-only-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
+        assert_eq!(written, named_bytes.len() as u64);
+        assert_ne!(diagnostics & RECOVERY_DIAG_NO_DEFAULT_DATA_STREAM, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_HAS_NAMED_DATA_STREAM, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS, 0);
+
+        let sidecar_path = output_path.with_file_name("recovered.bin.ads-Zone.Identifier");
+        assert_eq!(fs::read(&sidecar_path).unwrap(), named_bytes);
+        assert!(!output_path.exists());
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&sidecar_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_skips_compressed_named_stream_and_marks_partial() {
+        let record_number = 88u32;
+        let default_bytes = b"default-stream".to_vec();
+        let named_bytes = b"named-stream".to_vec();
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![
+                build_resident_data_attribute(1, None, 0, &default_bytes),
+                build_resident_data_attribute(
+                    2,
+                    Some("Zone.Identifier"),
+                    NTFS_ATTRIBUTE_FLAG_COMPRESSED,
+                    &named_bytes,
+                ),
+            ],
+        );
+        let image = build_test_ntfs_image_with_record(&record);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-named-skip-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
+        assert_eq!(written, default_bytes.len() as u64);
+        assert_ne!(diagnostics & RECOVERY_DIAG_HAS_NAMED_DATA_STREAM, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_COMPRESSED_ATTRIBUTE, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_UNSUPPORTED_COMPRESSED, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_SKIPPED_NAMED_DATA_STREAMS, 0);
+        assert_eq!(diagnostics & RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS, 0);
+        assert_eq!(fs::read(&output_path).unwrap(), default_bytes);
+
+        let sidecar_path = output_path.with_file_name("recovered.bin.ads-Zone.Identifier");
+        assert!(!sidecar_path.exists());
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_decompresses_non_resident_compressed_default_stream() {
+        let record_number = 89u32;
+        let default_bytes = b"compressed-default-stream".to_vec();
+
+        let mut compressed_cluster = vec![0u8; 512];
+        let header = 0x3000u16 | ((default_bytes.len() as u16).saturating_sub(1));
+        compressed_cluster[..2].copy_from_slice(&header.to_le_bytes());
+        compressed_cluster[2..2 + default_bytes.len()].copy_from_slice(&default_bytes);
+
+        let compressed_attribute = build_non_resident_data_attribute(
+            1,
+            None,
+            NTFS_ATTRIBUTE_FLAG_COMPRESSED,
+            4,
+            default_bytes.len() as u64,
+            &[(1, Some(8)), (15, None)],
+            512,
+            None,
+        );
+
+        let record = build_record_with_data_attributes(record_number, vec![compressed_attribute]);
+        let mut image = build_test_ntfs_image_with_record(&record);
+        let cluster_offset = 8usize * 512usize;
+        image[cluster_offset..cluster_offset + compressed_cluster.len()]
+            .copy_from_slice(&compressed_cluster);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-compressed-default-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(written, default_bytes.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), default_bytes);
+        assert_ne!(diagnostics & RECOVERY_DIAG_COMPRESSED_ATTRIBUTE, 0);
+        assert_eq!(diagnostics & RECOVERY_DIAG_UNSUPPORTED_COMPRESSED, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_decompresses_non_resident_compressed_named_stream() {
+        let record_number = 91u32;
+        let default_bytes = b"default-stream".to_vec();
+        let named_bytes = b"compressed-named-stream".to_vec();
+
+        let mut compressed_cluster = vec![0u8; 512];
+        let header = 0x3000u16 | ((named_bytes.len() as u16).saturating_sub(1));
+        compressed_cluster[..2].copy_from_slice(&header.to_le_bytes());
+        compressed_cluster[2..2 + named_bytes.len()].copy_from_slice(&named_bytes);
+
+        let compressed_named_attribute = build_non_resident_data_attribute(
+            2,
+            Some("Zone.Identifier"),
+            NTFS_ATTRIBUTE_FLAG_COMPRESSED,
+            4,
+            named_bytes.len() as u64,
+            &[(1, Some(8)), (15, None)],
+            512,
+            None,
+        );
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![
+                build_resident_data_attribute(1, None, 0, &default_bytes),
+                compressed_named_attribute,
+            ],
+        );
+        let mut image = build_test_ntfs_image_with_record(&record);
+        let cluster_offset = 8usize * 512usize;
+        image[cluster_offset..cluster_offset + compressed_cluster.len()]
+            .copy_from_slice(&compressed_cluster);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-compressed-named-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(written, (default_bytes.len() + named_bytes.len()) as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), default_bytes);
+
+        let sidecar_path = output_path.with_file_name("recovered.bin.ads-Zone.Identifier");
+        assert_eq!(fs::read(&sidecar_path).unwrap(), named_bytes);
+        assert_ne!(diagnostics & RECOVERY_DIAG_HAS_NAMED_DATA_STREAM, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_COMPRESSED_ATTRIBUTE, 0);
+        assert_eq!(diagnostics & RECOVERY_DIAG_UNSUPPORTED_COMPRESSED, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&sidecar_path).unwrap();
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_exports_encrypted_default_stream_as_partial_raw_data() {
+        let record_number = 90u32;
+        let encrypted_bytes = b"encrypted-bytes".to_vec();
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![build_resident_data_attribute(
+                1,
+                None,
+                NTFS_ATTRIBUTE_FLAG_ENCRYPTED,
+                &encrypted_bytes,
+            )],
+        );
+        let image = build_test_ntfs_image_with_record(&record);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-encrypted-default-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
+        assert_eq!(written, encrypted_bytes.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), encrypted_bytes);
+        assert_ne!(diagnostics & RECOVERY_DIAG_ENCRYPTED_ATTRIBUTE, 0);
+        assert_ne!(diagnostics & RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    fn c_string_bytes_to_string(bytes: &[u8]) -> String {
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    }
+
+    fn build_test_ntfs_image_with_named_records() -> Vec<u8> {
+        let mut image = vec![0u8; 12 * 1024];
+
+        image[0x03..0x0B].copy_from_slice(b"NTFS    ");
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u64(&mut image, 0x28, 24_000);
+        write_u64(&mut image, 0x30, 4);
+        write_u64(&mut image, 0x38, 2);
+        image[0x40] = (-10i8) as u8;
+        image[0x44] = 1;
+        write_u16(&mut image, 0x1FE, 0xAA55);
+
+        let mft_offset = 4 * 512;
+        let parent = build_named_record(5, 0x0003, "Docs", 0);
+        let child_deleted = build_named_record(6, 0x0000, "report.txt", 5);
+
+        image[mft_offset..mft_offset + parent.len()].copy_from_slice(&parent);
+        image[mft_offset + 1024..mft_offset + 1024 + child_deleted.len()]
+            .copy_from_slice(&child_deleted);
+
+        image
+    }
+
+    fn build_test_ntfs_image_with_record(record: &[u8]) -> Vec<u8> {
+        let mut image = vec![0u8; 12 * 1024];
+
+        image[0x03..0x0B].copy_from_slice(b"NTFS    ");
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u64(&mut image, 0x28, 24_000);
+        write_u64(&mut image, 0x30, 4);
+        write_u64(&mut image, 0x38, 2);
+        image[0x40] = (-10i8) as u8;
+        image[0x44] = 1;
+        write_u16(&mut image, 0x1FE, 0xAA55);
+
+        let mft_offset = 4 * 512;
+        image[mft_offset..mft_offset + record.len()].copy_from_slice(record);
+        image
+    }
+
+    fn build_record_with_data_attributes(record_number: u32, attributes: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut record = vec![0u8; 1024];
+        record[0x00..0x04].copy_from_slice(b"FILE");
+        write_u16(&mut record, 0x04, 0x30);
+        write_u16(&mut record, 0x06, 3);
+        write_u16(&mut record, 0x10, 1);
+        write_u16(&mut record, 0x12, 1);
+        write_u16(&mut record, 0x14, 0x38);
+        write_u16(&mut record, 0x16, 0x0001);
+        write_u32(&mut record, 0x1C, 1024);
+        write_u32(&mut record, 0x2C, record_number);
+
+        write_u16(&mut record, 0x30, 0xAAAA);
+        write_u16(&mut record, 0x32, 0x1111);
+        write_u16(&mut record, 0x34, 0x2222);
+        write_u16(&mut record, 510, 0xAAAA);
+        write_u16(&mut record, 1022, 0xAAAA);
+
+        let mut cursor = 0x38usize;
+        for attribute in attributes {
+            record[cursor..cursor + attribute.len()].copy_from_slice(&attribute);
+            cursor += attribute.len();
+        }
+
+        write_u32(&mut record, cursor, 0xFFFF_FFFF);
+        write_u32(&mut record, 0x18, (cursor + 4) as u32);
+        record
+    }
+
+    fn build_resident_data_attribute(
+        attribute_id: u16,
+        name: Option<&str>,
+        flags: u16,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let name_utf16 = name.map(|n| n.encode_utf16().collect::<Vec<u16>>());
+        let name_bytes_len = name_utf16
+            .as_ref()
+            .map(|units| units.len() * 2)
+            .unwrap_or(0);
+        let name_len_chars = name_utf16.as_ref().map(|units| units.len()).unwrap_or(0);
+
+        let name_offset = if name_bytes_len == 0 { 0 } else { 0x18 };
+        let value_offset = 0x18 + name_bytes_len;
+        let attr_len = (value_offset + value.len() + 7) & !7;
+        let mut attr = vec![0u8; attr_len];
+
+        write_u32(&mut attr, 0x00, ATTRIBUTE_TYPE_DATA);
+        write_u32(&mut attr, 0x04, attr_len as u32);
+        attr[0x08] = 0;
+        attr[0x09] = name_len_chars as u8;
+        write_u16(&mut attr, 0x0A, name_offset as u16);
+        write_u16(&mut attr, 0x0C, flags);
+        write_u16(&mut attr, 0x0E, attribute_id);
+        write_u32(&mut attr, 0x10, value.len() as u32);
+        write_u16(&mut attr, 0x14, value_offset as u16);
+        attr[0x16] = 0;
+        attr[0x17] = 0;
+
+        if let Some(name_utf16) = name_utf16 {
+            let mut cursor = name_offset;
+            for code in name_utf16 {
+                attr[cursor..cursor + 2].copy_from_slice(&code.to_le_bytes());
+                cursor += 2;
+            }
+        }
+
+        attr[value_offset..value_offset + value.len()].copy_from_slice(value);
+        attr
+    }
+
+    fn build_non_resident_data_attribute(
+        attribute_id: u16,
+        name: Option<&str>,
+        flags: u16,
+        compression_unit_size: u16,
+        data_size: u64,
+        runs: &[(u64, Option<i64>)],
+        cluster_size: u64,
+        compressed_size: Option<u64>,
+    ) -> Vec<u8> {
+        let name_utf16 = name.map(|n| n.encode_utf16().collect::<Vec<u16>>());
+        let name_bytes_len = name_utf16
+            .as_ref()
+            .map(|units| units.len() * 2)
+            .unwrap_or(0);
+        let name_len_chars = name_utf16.as_ref().map(|units| units.len()).unwrap_or(0);
+
+        let mut mapping_pairs = encode_mapping_pairs(runs);
+        mapping_pairs.push(0);
+
+        let header_len = 0x48usize;
+        let name_offset = if name_bytes_len == 0 {
+            0
+        } else {
+            header_len as u16
+        };
+        let mapping_pairs_offset = header_len + name_bytes_len;
+        let attr_len = (mapping_pairs_offset + mapping_pairs.len() + 7) & !7;
+        let mut attr = vec![0u8; attr_len];
+
+        write_u32(&mut attr, 0x00, ATTRIBUTE_TYPE_DATA);
+        write_u32(&mut attr, 0x04, attr_len as u32);
+        attr[0x08] = 1;
+        attr[0x09] = name_len_chars as u8;
+        write_u16(&mut attr, 0x0A, name_offset);
+        write_u16(&mut attr, 0x0C, flags);
+        write_u16(&mut attr, 0x0E, attribute_id);
+
+        let total_clusters = runs
+            .iter()
+            .map(|(cluster_count, _)| *cluster_count)
+            .fold(0u64, |acc, cluster_count| acc.saturating_add(cluster_count));
+        let highest_vcn = total_clusters.saturating_sub(1);
+        write_u64(&mut attr, 0x10, 0);
+        write_u64(&mut attr, 0x18, highest_vcn);
+        write_u16(&mut attr, 0x20, mapping_pairs_offset as u16);
+        write_u16(&mut attr, 0x22, compression_unit_size);
+        write_u32(&mut attr, 0x24, 0);
+        let allocated_size = total_clusters.saturating_mul(cluster_size);
+        write_u64(&mut attr, 0x28, allocated_size);
+        write_u64(&mut attr, 0x30, data_size);
+        write_u64(&mut attr, 0x38, data_size);
+        write_u64(
+            &mut attr,
+            0x40,
+            compressed_size.unwrap_or(allocated_size.min(data_size.max(1))),
+        );
+
+        if let Some(name_utf16) = name_utf16 {
+            let mut cursor = header_len;
+            for code in name_utf16 {
+                attr[cursor..cursor + 2].copy_from_slice(&code.to_le_bytes());
+                cursor += 2;
+            }
+        }
+
+        attr[mapping_pairs_offset..mapping_pairs_offset + mapping_pairs.len()]
+            .copy_from_slice(&mapping_pairs);
+        attr
+    }
+
+    fn encode_mapping_pairs(runs: &[(u64, Option<i64>)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut current_lcn = 0i64;
+
+        for (cluster_count, maybe_lcn) in runs {
+            let length_bytes = encode_unsigned_le(*cluster_count);
+            let (offset_bytes, next_lcn) = match maybe_lcn {
+                Some(target_lcn) => {
+                    let delta = target_lcn.saturating_sub(current_lcn);
+                    let encoded = encode_signed_le(delta);
+                    (encoded, *target_lcn)
+                }
+                None => (Vec::new(), current_lcn),
+            };
+
+            let header = ((offset_bytes.len() as u8) << 4) | (length_bytes.len() as u8);
+            bytes.push(header);
+            bytes.extend_from_slice(&length_bytes);
+            bytes.extend_from_slice(&offset_bytes);
+            current_lcn = next_lcn;
+        }
+
+        bytes
+    }
+
+    fn encode_unsigned_le(value: u64) -> Vec<u8> {
+        let mut encoded = value.to_le_bytes().to_vec();
+        while encoded.len() > 1 && encoded.last() == Some(&0) {
+            encoded.pop();
+        }
+        encoded
+    }
+
+    fn encode_signed_le(value: i64) -> Vec<u8> {
+        let bytes = value.to_le_bytes();
+        let mut length = 8usize;
+        while length > 1 {
+            let last = bytes[length - 1];
+            let next = bytes[length - 2];
+            let can_shrink_positive = last == 0x00 && (next & 0x80) == 0;
+            let can_shrink_negative = last == 0xFF && (next & 0x80) != 0;
+            if can_shrink_positive || can_shrink_negative {
+                length -= 1;
+                continue;
+            }
+            break;
+        }
+        bytes[..length].to_vec()
+    }
+
+    fn build_named_record(
+        record_number: u32,
+        flags: u16,
+        file_name: &str,
+        parent_record: u64,
+    ) -> Vec<u8> {
+        let mut record = vec![0u8; 1024];
+        record[0x00..0x04].copy_from_slice(b"FILE");
+        write_u16(&mut record, 0x04, 0x30);
+        write_u16(&mut record, 0x06, 3);
+        write_u16(&mut record, 0x10, 1);
+        write_u16(&mut record, 0x12, 1);
+        write_u16(&mut record, 0x14, 0x38);
+        write_u16(&mut record, 0x16, flags);
+        write_u32(&mut record, 0x1C, 1024);
+        write_u32(&mut record, 0x2C, record_number);
+
+        write_u16(&mut record, 0x30, 0xAAAA);
+        write_u16(&mut record, 0x32, 0x1111);
+        write_u16(&mut record, 0x34, 0x2222);
+        write_u16(&mut record, 510, 0xAAAA);
+        write_u16(&mut record, 1022, 0xAAAA);
+
+        let attr_offset = 0x38usize;
+        let file_name_attr = build_file_name_attribute(file_name, parent_record);
+        record[attr_offset..attr_offset + file_name_attr.len()].copy_from_slice(&file_name_attr);
+
+        let end_offset = attr_offset + file_name_attr.len();
+        write_u32(&mut record, end_offset, 0xFFFF_FFFF);
+        write_u32(&mut record, 0x18, (end_offset + 4) as u32);
+
+        record
+    }
+
+    fn build_file_name_attribute(file_name: &str, parent_record: u64) -> Vec<u8> {
+        let utf16: Vec<u16> = file_name.encode_utf16().collect();
+        let name_len = utf16.len() as u8;
+        let value_len = 0x42usize + utf16.len() * 2;
+        let attr_len = 0x18usize + value_len;
+        let attr_len = (attr_len + 7) & !7;
+
+        let mut attr = vec![0u8; attr_len];
+        write_u32(&mut attr, 0x00, 0x30);
+        write_u32(&mut attr, 0x04, attr_len as u32);
+        attr[0x08] = 0;
+        attr[0x09] = 0;
+        write_u16(&mut attr, 0x0A, 0);
+        write_u16(&mut attr, 0x0C, 0);
+        write_u16(&mut attr, 0x0E, 1);
+        write_u32(&mut attr, 0x10, value_len as u32);
+        write_u16(&mut attr, 0x14, 0x18);
+
+        write_u64(&mut attr, 0x18, parent_record & 0x0000_FFFF_FFFF_FFFF);
+        attr[0x18 + 0x40] = name_len;
+        attr[0x18 + 0x41] = 1;
+
+        let mut cursor = 0x18 + 0x42;
+        for code in utf16 {
+            attr[cursor..cursor + 2].copy_from_slice(&code.to_le_bytes());
+            cursor += 2;
+        }
+
+        attr
+    }
+
+    fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

@@ -1,4 +1,6 @@
-param()
+param(
+  [switch]$IncludeHostIntegration
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -111,4 +113,10 @@ if ($cargoPath) {
   }
 } else {
   Write-Warning "Skipping Rust checks because cargo is not installed."
+}
+
+if ($IncludeHostIntegration) {
+  Invoke-External -Description "host NTFS stream validation" -Command {
+    & "$PSScriptRoot\run-host-ntfs-stream-validation.ps1" -NoBuild
+  }
 }

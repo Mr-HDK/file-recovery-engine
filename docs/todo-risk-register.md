@@ -2,9 +2,7 @@
 
 ## Active TODOs
 
-1. Add Rust FFI integration coverage for quick-scan candidate confidence/status payloads once local `cargo` is available.
-2. Add Rust recovery integration tests for ADS sidecar export behavior (default stream present/absent, partial skips) once local `cargo` is available.
-3. Implement decompression/decryption-aware export paths for compressed/EFS-protected NTFS streams beyond current diagnostics + guarded failure handling.
+1. Run the gated host integration harness (`scripts/run-host-ntfs-stream-validation.ps1`) on an elevated Windows host and archive the resulting evidence/logs as baseline validation artifacts.
 
 ## Recently completed
 
@@ -18,6 +16,14 @@
 8. Added per-session human-readable recovery report generation (`.recovery-report.md`) with candidate-level status/diagnostics details.
 9. Added SQLite session retention policy (30-day + max-session cap) with explicit DB compaction (`VACUUM`) support and UI maintenance trigger.
 10. Added safety-validator coverage for nested mount-point layouts to verify longest-prefix volume resolution and same-volume blocking.
+11. Added SetupAPI-backed partition fallback enumeration that probes discovered disks for mounted and unmounted/offline partition candidates when WMI is unavailable.
+12. Added Rust FFI quick-scan integration coverage validating candidate confidence tier/reason payloads and status flags via session-level image scan tests.
+13. Added Rust FFI recovery integration tests for ADS sidecar flows (default + named export, named-only partial export, compressed named-stream skip diagnostics).
+14. Implemented non-resident NTFS compressed-stream export decompression in `fr-ffi` (LZNT1 decode via Windows `RtlDecompressBufferEx`) with guarded partial fallback.
+15. Implemented encrypted-stream-aware export behavior in `fr-ffi`: encrypted data streams now export raw bytes with explicit partial + diagnostics signaling instead of hard failure on default stream.
+16. Added Rust FFI integration coverage for compressed non-resident default-stream recovery and encrypted default-stream raw export diagnostics.
+17. Added gated Windows host integration test coverage (`HostNtfsStreamRecoveryTests`) that provisions an NTFS VHD fixture and validates compressed+encrypted deleted-file recovery paths through .NET engine probe APIs.
+18. Added `scripts/run-host-ntfs-stream-validation.ps1` for elevated, focused execution of host integration stream-recovery validation.
 
 ## Active risks
 
@@ -31,4 +37,4 @@
 
 3. **R3 - Offline/unmounted partition visibility on restricted systems**
 - Impact: fallback enumeration covers mounted volumes but may miss unmounted partitions if WMI is blocked.
-- Mitigation: add SetupAPI-based disk/partition walk to complement current Win32 mounted-volume fallback.
+- Mitigation: SetupAPI disk-interface fallback is now implemented and probes partition device paths to surface mounted/unmounted candidates; continue adding host integration tests for restricted environments.

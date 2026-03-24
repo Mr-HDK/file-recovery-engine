@@ -125,16 +125,33 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
         {
             try
             {
-                var fallbackPartitions = EnumeratePartitionsFromVolumesFallback(cancellationToken, driveSnapshots).ToList();
-                partitions.AddRange(fallbackPartitions);
-                if (fallbackPartitions.Count > 0)
+                var setupApiFallbackPartitions = EnumeratePartitionsSetupApiFallback(cancellationToken, driveSnapshots).ToList();
+                partitions.AddRange(setupApiFallbackPartitions);
+                if (setupApiFallbackPartitions.Count > 0)
                 {
-                    warnings.Add("Partition enumeration used Win32 fallback from mounted volumes (WMI returned no results).");
+                    warnings.Add("Partition enumeration used SetupAPI fallback (WMI returned no results).");
                 }
             }
             catch (Exception ex)
             {
-                warnings.Add($"Partition fallback enumeration failed: {ex.Message}");
+                warnings.Add($"Partition SetupAPI fallback enumeration failed: {ex.Message}");
+            }
+        }
+
+        if (partitions.Count == 0)
+        {
+            try
+            {
+                var volumeFallbackPartitions = EnumeratePartitionsFromVolumesFallback(cancellationToken, driveSnapshots).ToList();
+                partitions.AddRange(volumeFallbackPartitions);
+                if (volumeFallbackPartitions.Count > 0)
+                {
+                    warnings.Add("Partition enumeration used mounted-volume fallback (WMI/SetupAPI returned no results).");
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Partition mounted-volume fallback enumeration failed: {ex.Message}");
             }
         }
 
@@ -461,6 +478,275 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
         }
     }
 
+    private IEnumerable<SourceCandidate> EnumeratePartitionsSetupApiFallback(
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, DriveSnapshot> driveSnapshots)
+    {
+        var mountedPartitions = BuildMountedPartitionSnapshotMap(driveSnapshots);
+        var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var diskIndex in EnumeratePresentDiskIndexesFromSetupApi(cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            for (var partitionNumber = 1; partitionNumber <= 256; partitionNumber++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var partitionPath = $@"\\.\Harddisk{diskIndex}Partition{partitionNumber}";
+                using var handle = TryOpenMetadataHandle(partitionPath, out var openErrorCode);
+                if (handle is null)
+                {
+                    if (openErrorCode == ERROR_ACCESS_DENIED)
+                    {
+                        // Access denied likely indicates an existing but protected partition.
+                        var accessDeniedKey = $"{diskIndex}:{partitionNumber}";
+                        if (!emitted.Add(accessDeniedKey))
+                        {
+                            continue;
+                        }
+
+                        mountedPartitions.TryGetValue(accessDeniedKey, out var mountedSnapshot);
+                        var mountedPathsForDenied = mountedSnapshot?.MountPaths
+                            .Where(path => !string.IsNullOrWhiteSpace(path))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToArray() ?? [];
+
+                        yield return new SourceCandidate(
+                            Id: $"partition-setupapi-{diskIndex}-{partitionNumber}",
+                            Kind: RecoverySourceKind.Partition,
+                            DisplayName: $"Partition D{diskIndex}:P{partitionNumber} (metadata requires elevation)",
+                            DevicePath: partitionPath,
+                            FileSystem: mountedSnapshot?.FileSystem,
+                            SizeBytes: mountedSnapshot?.TotalSize,
+                            SectorSizeBytes: mountedSnapshot?.SectorSizeBytes,
+                            DiskIndex: diskIndex,
+                            VolumeIdentity: mountedSnapshot?.VolumeIdentity,
+                            SourcePath: mountedSnapshot?.RootPath,
+                            ReadOnlyEnforced: true,
+                            VolumeLabel: mountedSnapshot?.VolumeLabel,
+                            MountedPaths: string.Join(";", mountedPathsForDenied),
+                            PartitionInfo: "SetupAPI fallback (access denied)");
+                    }
+
+                    continue;
+                }
+
+                if (!TryQueryStorageDeviceNumber(handle, out var resolvedDisk, out var resolvedPartition))
+                {
+                    continue;
+                }
+
+                if (resolvedDisk < 0 || resolvedPartition <= 0)
+                {
+                    continue;
+                }
+
+                var partitionKey = $"{resolvedDisk}:{resolvedPartition}";
+                if (!emitted.Add(partitionKey))
+                {
+                    continue;
+                }
+
+                long? sizeBytes = null;
+                int? sectorSizeBytes = null;
+                if (TryQueryDiskGeometry(handle, out var geometrySize, out var geometrySector))
+                {
+                    sizeBytes = geometrySize;
+                    sectorSizeBytes = geometrySector;
+                }
+
+                mountedPartitions.TryGetValue(partitionKey, out var mountedSnapshotForPartition);
+                var mountedPaths = mountedSnapshotForPartition?.MountPaths
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray() ?? [];
+
+                var displaySize = sizeBytes ?? mountedSnapshotForPartition?.TotalSize;
+
+                yield return new SourceCandidate(
+                    Id: $"partition-setupapi-{resolvedDisk}-{resolvedPartition}",
+                    Kind: RecoverySourceKind.Partition,
+                    DisplayName: $"Partition D{resolvedDisk}:P{resolvedPartition} ({FormatBytes(displaySize)})",
+                    DevicePath: $@"\\.\Harddisk{resolvedDisk}Partition{resolvedPartition}",
+                    FileSystem: mountedSnapshotForPartition?.FileSystem,
+                    SizeBytes: sizeBytes ?? mountedSnapshotForPartition?.TotalSize,
+                    SectorSizeBytes: sectorSizeBytes ?? mountedSnapshotForPartition?.SectorSizeBytes,
+                    DiskIndex: resolvedDisk,
+                    VolumeIdentity: mountedSnapshotForPartition?.VolumeIdentity,
+                    SourcePath: mountedSnapshotForPartition?.RootPath,
+                    ReadOnlyEnforced: true,
+                    VolumeLabel: mountedSnapshotForPartition?.VolumeLabel,
+                    MountedPaths: string.Join(";", mountedPaths),
+                    PartitionInfo: mountedSnapshotForPartition is null
+                        ? "SetupAPI fallback (unmounted/offline candidate)"
+                        : "SetupAPI fallback (matched mounted volume)");
+            }
+        }
+    }
+
+    private IEnumerable<int> EnumeratePresentDiskIndexesFromSetupApi(CancellationToken cancellationToken)
+    {
+        var diskInterfaceGuid = GuidDevinterfaceDisk;
+        var deviceInfoSet = SetupDiGetClassDevs(
+            ref diskInterfaceGuid,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+
+        if (deviceInfoSet == InvalidDeviceInfoSetHandle)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "SetupDiGetClassDevs failed for disk interfaces.");
+        }
+
+        try
+        {
+            var indexes = new HashSet<int>();
+            uint memberIndex = 0;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var interfaceData = new SP_DEVICE_INTERFACE_DATA
+                {
+                    cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>(),
+                };
+
+                var success = SetupDiEnumDeviceInterfaces(
+                    deviceInfoSet,
+                    IntPtr.Zero,
+                    ref diskInterfaceGuid,
+                    memberIndex,
+                    ref interfaceData);
+
+                if (!success)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == ERROR_NO_MORE_ITEMS)
+                    {
+                        break;
+                    }
+
+                    throw new Win32Exception(error, "SetupDiEnumDeviceInterfaces failed.");
+                }
+
+                memberIndex++;
+                var interfacePath = TryGetDeviceInterfacePath(deviceInfoSet, interfaceData);
+                if (string.IsNullOrWhiteSpace(interfacePath))
+                {
+                    continue;
+                }
+
+                using var handle = TryOpenMetadataHandle(interfacePath, out _);
+                if (handle is null)
+                {
+                    continue;
+                }
+
+                if (TryQueryStorageDeviceNumber(handle, out var diskIndex, out _)
+                    && diskIndex >= 0)
+                {
+                    indexes.Add(diskIndex);
+                }
+            }
+
+            return indexes.OrderBy(index => index).ToArray();
+        }
+        finally
+        {
+            _ = SetupDiDestroyDeviceInfoList(deviceInfoSet);
+        }
+    }
+
+    private static string? TryGetDeviceInterfacePath(IntPtr deviceInfoSet, SP_DEVICE_INTERFACE_DATA interfaceData)
+    {
+        var firstPass = SetupDiGetDeviceInterfaceDetail(
+            deviceInfoSet,
+            ref interfaceData,
+            IntPtr.Zero,
+            0,
+            out var requiredSize,
+            IntPtr.Zero);
+
+        if (firstPass || requiredSize == 0)
+        {
+            return null;
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        if (error != ERROR_INSUFFICIENT_BUFFER)
+        {
+            return null;
+        }
+
+        var detailBuffer = Marshal.AllocHGlobal((int)requiredSize);
+        try
+        {
+            var cbSize = IntPtr.Size == 8 ? 8 : 6;
+            Marshal.WriteInt32(detailBuffer, cbSize);
+
+            var success = SetupDiGetDeviceInterfaceDetail(
+                deviceInfoSet,
+                ref interfaceData,
+                detailBuffer,
+                requiredSize,
+                out _,
+                IntPtr.Zero);
+
+            if (!success)
+            {
+                return null;
+            }
+
+            var candidatePath = Marshal.PtrToStringUni(IntPtr.Add(detailBuffer, 4));
+            if (!string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return candidatePath;
+            }
+
+            return Marshal.PtrToStringUni(IntPtr.Add(detailBuffer, cbSize));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(detailBuffer);
+        }
+    }
+
+    private static Dictionary<string, DriveSnapshot> BuildMountedPartitionSnapshotMap(
+        IReadOnlyDictionary<string, DriveSnapshot> driveSnapshots)
+    {
+        var map = new Dictionary<string, DriveSnapshot>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var snapshot in driveSnapshots.Values)
+        {
+            var openPath = ResolveVolumeOpenPath(snapshot);
+            if (openPath is null)
+            {
+                continue;
+            }
+
+            using var handle = TryOpenMetadataHandle(openPath, out _);
+            if (handle is null)
+            {
+                continue;
+            }
+
+            if (!TryQueryStorageDeviceNumber(handle, out var diskIndex, out var partitionNumber))
+            {
+                continue;
+            }
+
+            if (diskIndex < 0 || partitionNumber < 0)
+            {
+                continue;
+            }
+
+            map[$"{diskIndex}:{partitionNumber}"] = snapshot;
+        }
+
+        return map;
+    }
+
     private static int? ParsePhysicalDiskIndex(string deviceName)
     {
         if (!deviceName.StartsWith("PhysicalDrive", StringComparison.OrdinalIgnoreCase))
@@ -652,9 +938,14 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
     private const uint FILE_SHARE_DELETE = 0x00000004;
     private const uint OPEN_EXISTING = 3;
     private const int ERROR_ACCESS_DENIED = 5;
+    private const int ERROR_NO_MORE_ITEMS = 259;
     private const int ERROR_INSUFFICIENT_BUFFER = 122;
     private const uint IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0;
     private const uint IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x002D1080;
+    private const uint DIGCF_PRESENT = 0x00000002;
+    private const uint DIGCF_DEVICEINTERFACE = 0x00000010;
+    private static readonly Guid GuidDevinterfaceDisk = new("53f56307-b6bf-11d0-94f2-00a0c91efb8b");
+    private static readonly IntPtr InvalidDeviceInfoSetHandle = new(-1);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(
@@ -684,8 +975,47 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
         [Out] char[] lpTargetPath,
         int ucchMax);
 
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern IntPtr SetupDiGetClassDevs(
+        ref Guid classGuid,
+        IntPtr enumerator,
+        IntPtr hwndParent,
+        uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiEnumDeviceInterfaces(
+        IntPtr deviceInfoSet,
+        IntPtr deviceInfoData,
+        ref Guid interfaceClassGuid,
+        uint memberIndex,
+        ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData);
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiGetDeviceInterfaceDetail(
+        IntPtr deviceInfoSet,
+        ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData,
+        IntPtr deviceInterfaceDetailData,
+        uint deviceInterfaceDetailDataSize,
+        out uint requiredSize,
+        IntPtr deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
+
     [GeneratedRegex(@"Partition #(\d+)", RegexOptions.IgnoreCase)]
     private static partial Regex PartitionNumberRegex();
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SP_DEVICE_INTERFACE_DATA
+    {
+        public int cbSize;
+        public Guid interfaceClassGuid;
+        public int flags;
+        public IntPtr reserved;
+    }
 
     private static string FormatBytes(long? bytes)
     {

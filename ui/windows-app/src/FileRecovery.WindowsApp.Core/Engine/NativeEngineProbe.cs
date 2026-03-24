@@ -606,7 +606,7 @@ public static class NativeEngineProbe
             42 => "Candidate record does not expose a recoverable data attribute.",
             43 => "Recovery destination path is invalid.",
             44 => "Failed writing recovered output file.",
-            45 => "Compressed NTFS data stream is not yet supported for export.",
+            45 => "Compressed NTFS data stream could not be decompressed for export in this mode.",
             46 => "Encrypted NTFS data stream requires decryption keys and is not recoverable in this mode.",
             47 => "No exportable data stream was recovered (default stream unavailable and named streams were skipped).",
             10 => "Invalid source path.",
@@ -685,11 +685,11 @@ public static class NativeEngineProbe
         }
         if ((flags & RecoveryDiagUnsupportedCompressed) != 0)
         {
-            details.Add("Compressed attribute not exported");
+            details.Add("Compressed attribute decompression failed or was skipped");
         }
         if ((flags & RecoveryDiagUnsupportedEncrypted) != 0)
         {
-            details.Add("Encrypted attribute not exported");
+            details.Add("Encrypted attribute exported without decryption");
         }
         if ((flags & RecoveryDiagSparseZeroFilled) != 0)
         {
