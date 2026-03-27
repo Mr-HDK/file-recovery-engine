@@ -5,7 +5,7 @@ use fr_mft::{
 };
 use fr_ntfs::{parse_boot_sector, BootSectorParseError, NtfsBootSector};
 use fr_types::{EvidenceSource, RecoverySourceKind, ScanSessionState};
-use fr_usn::UsnRecord;
+use fr_usn::{UsnRecord, USN_REASON_FILE_CREATE, USN_REASON_RENAME_NEW_NAME};
 use fr_winio::{ReadSession, WinIoError};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -524,21 +524,57 @@ pub fn apply_usn_evidence(
         return 0;
     }
 
-    let mut by_name: HashMap<String, u32> = HashMap::new();
+    const NTFS_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    #[derive(Debug, Clone)]
+    struct UsnAggregate {
+        reason_mask: u32,
+        latest_usn: i64,
+        latest_reason: u32,
+        latest_name: String,
+        latest_parent_record: u64,
+    }
+
+    let mut by_record_number: HashMap<u64, UsnAggregate> = HashMap::new();
+    let mut by_name_parent: HashMap<(String, u64), u32> = HashMap::new();
     let mut by_path: HashMap<String, u32> = HashMap::new();
+
     for record in usn_records {
+        let record_number = record.file_reference_number & NTFS_RECORD_MASK;
+        let parent_record = record.parent_file_reference_number & NTFS_RECORD_MASK;
         let normalized_name = normalize_case_key(&record.file_name);
-        let reason_entry = by_name.entry(normalized_name).or_insert(0);
-        *reason_entry |= record.reason;
+
+        by_record_number
+            .entry(record_number)
+            .and_modify(|aggregate| {
+                aggregate.reason_mask |= record.reason;
+                if record.usn >= aggregate.latest_usn {
+                    aggregate.latest_usn = record.usn;
+                    aggregate.latest_reason = record.reason;
+                    aggregate.latest_name = record.file_name.clone();
+                    aggregate.latest_parent_record = parent_record;
+                }
+            })
+            .or_insert_with(|| UsnAggregate {
+                reason_mask: record.reason,
+                latest_usn: record.usn,
+                latest_reason: record.reason,
+                latest_name: record.file_name.clone(),
+                latest_parent_record: parent_record,
+            });
+
+        let name_parent_entry = by_name_parent
+            .entry((normalized_name.clone(), parent_record))
+            .or_insert(0);
+        *name_parent_entry |= record.reason;
     }
 
     for candidate in candidates.iter() {
         if let Some(path) = &candidate.reconstructed_path {
             let normalized_path = normalize_case_key(path);
-            if let Some(reason) = candidate
-                .name
-                .as_ref()
-                .and_then(|name| by_name.get(&normalize_case_key(name)).copied())
+            if let Some(reason) = by_record_number
+                .get(&(candidate.record_number as u64))
+                .map(|aggregate| aggregate.reason_mask)
             {
                 by_path.entry(normalized_path).or_insert(reason);
             }
@@ -546,18 +582,46 @@ pub fn apply_usn_evidence(
     }
 
     let mut enriched = 0usize;
+    let mut path_reconstruction_dirty = false;
     for candidate in candidates.iter_mut() {
         let mut matched_reason = 0u32;
+        let record_number = candidate.record_number as u64;
 
-        if let Some(path) = &candidate.reconstructed_path {
-            if let Some(reason) = by_path.get(&normalize_case_key(path)).copied() {
-                matched_reason |= reason;
+        if let Some(record_match) = by_record_number.get(&record_number) {
+            matched_reason |= record_match.reason_mask;
+
+            if should_apply_rename_hint(record_match.latest_reason)
+                && !record_match.latest_name.trim().is_empty()
+            {
+                let rename_changed_name = candidate.name.as_ref() != Some(&record_match.latest_name);
+                let rename_changed_parent =
+                    candidate.parent_record_number != Some(record_match.latest_parent_record);
+                if rename_changed_name || rename_changed_parent {
+                    candidate.name = Some(record_match.latest_name.clone());
+                    candidate.parent_record_number = Some(record_match.latest_parent_record);
+                    path_reconstruction_dirty = true;
+                }
             }
         }
 
-        if let Some(name) = &candidate.name {
-            if let Some(reason) = by_name.get(&normalize_case_key(name)).copied() {
-                matched_reason |= reason;
+        if matched_reason == 0 {
+            if let Some(path) = &candidate.reconstructed_path {
+                if let Some(reason) = by_path.get(&normalize_case_key(path)).copied() {
+                    matched_reason |= reason;
+                }
+            }
+
+            if let Some(name) = &candidate.name {
+                let normalized_name = normalize_case_key(name);
+
+                if let Some(parent_record) = candidate.parent_record_number {
+                    if let Some(reason) = by_name_parent
+                        .get(&(normalized_name.clone(), parent_record & NTFS_RECORD_MASK))
+                        .copied()
+                    {
+                        matched_reason |= reason;
+                    }
+                }
             }
         }
 
@@ -572,7 +636,15 @@ pub fn apply_usn_evidence(
         enriched = enriched.saturating_add(1);
     }
 
+    if path_reconstruction_dirty {
+        reconstruct_paths(candidates);
+    }
+
     enriched
+}
+
+fn should_apply_rename_hint(reason_mask: u32) -> bool {
+    reason_mask & (USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_CREATE) != 0
 }
 
 fn normalize_case_key(value: &str) -> String {
@@ -773,6 +845,99 @@ mod tests {
             deleted.usn_reason_mask,
             Some(fr_usn::USN_REASON_FILE_DELETE | fr_usn::USN_REASON_CLOSE)
         );
+    }
+
+    #[test]
+    fn apply_usn_evidence_prefers_record_number_over_name_collision() {
+        let image = build_test_ntfs_image_with_named_records();
+        let mut summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        summary.candidates.push(QuickScanCandidate {
+            record_index: 99,
+            record_number: 77,
+            in_use: false,
+            deleted: true,
+            is_directory: false,
+            has_non_resident_data: false,
+            has_named_data_streams: false,
+            has_compressed_data: false,
+            has_sparse_data: false,
+            has_encrypted_data: false,
+            usn_reason_mask: None,
+            name: Some("report.txt".to_string()),
+            parent_record_number: Some(123),
+            reconstructed_path: Some(r"Elsewhere\report.txt".to_string()),
+            evidence_sources: vec![EvidenceSource::Mft],
+        });
+
+        let usn_records = vec![UsnRecord {
+            major_version: 2,
+            minor_version: 0,
+            file_reference_number: 6,
+            parent_file_reference_number: 5,
+            usn: 100,
+            timestamp_100ns: 10,
+            reason: fr_usn::USN_REASON_FILE_DELETE,
+            source_info: 0,
+            security_id: 0,
+            file_attributes: 0,
+            file_name: "report.txt".to_string(),
+        }];
+
+        let enriched = apply_usn_evidence(&mut summary.candidates, &usn_records);
+        assert_eq!(enriched, 1);
+
+        let fr6 = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+        assert!(fr6.evidence_sources.contains(&EvidenceSource::Usn));
+
+        let fr77 = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 77)
+            .unwrap();
+        assert!(!fr77.evidence_sources.contains(&EvidenceSource::Usn));
+        assert_eq!(fr77.usn_reason_mask, None);
+    }
+
+    #[test]
+    fn apply_usn_evidence_applies_rename_hints_to_path_reconstruction() {
+        let image = build_test_ntfs_image_with_named_records();
+        let mut summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let usn_records = vec![UsnRecord {
+            major_version: 2,
+            minor_version: 0,
+            file_reference_number: 6,
+            parent_file_reference_number: 5,
+            usn: 200,
+            timestamp_100ns: 20,
+            reason: fr_usn::USN_REASON_RENAME_NEW_NAME,
+            source_info: 0,
+            security_id: 0,
+            file_attributes: 0,
+            file_name: "report-renamed.txt".to_string(),
+        }];
+
+        let enriched = apply_usn_evidence(&mut summary.candidates, &usn_records);
+        assert_eq!(enriched, 1);
+
+        let renamed = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+        assert_eq!(renamed.name.as_deref(), Some("report-renamed.txt"));
+        assert_eq!(
+            renamed.reconstructed_path.as_deref(),
+            Some(r"Docs\report-renamed.txt")
+        );
+        assert!(renamed.evidence_sources.contains(&EvidenceSource::Usn));
     }
 
     #[cfg(windows)]

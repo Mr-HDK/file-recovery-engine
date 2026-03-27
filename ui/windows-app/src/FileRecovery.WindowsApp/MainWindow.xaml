@@ -222,6 +222,24 @@
                           ScrollViewer.IsDeferredScrollingEnabled="True"
                           CellEditEnding="QuickScanCandidatesDataGrid_CellEditEnding"
                           CurrentCellChanged="QuickScanCandidatesDataGrid_CurrentCellChanged">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding CandidateStatusCode}" Value="full">
+                                    <Setter Property="Background" Value="#ECFDF5"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding CandidateStatusCode}" Value="partial">
+                                    <Setter Property="Background" Value="#FFF7ED"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding CandidateStatusCode}" Value="overwritten-risk">
+                                    <Setter Property="Background" Value="#FEF3C7"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding CandidateStatusCode}" Value="invalid">
+                                    <Setter Property="Background" Value="#FEF2F2"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <DataGridCheckBoxColumn Header="Select" Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
                         <DataGridTextColumn Header="Record" Binding="{Binding RecordNumber}" Width="70" IsReadOnly="True"/>
@@ -238,6 +256,7 @@
                         <DataGridTextColumn Header="Parent Record" Binding="{Binding ParentRecord}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Evidence" Binding="{Binding EvidenceSource}" Width="90" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceTier}" Width="90" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Confidence Reason" Binding="{Binding ConfidenceReason}" Width="220" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Status" Binding="{Binding CandidateStatusCode}" Width="110" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Recover Code" Binding="{Binding RecoveryStatusCodeDisplay}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Diag Flags" Binding="{Binding RecoveryDiagnosticsFlagsDisplay}" Width="95" IsReadOnly="True"/>
