@@ -35,6 +35,16 @@ Optional elevated host-integration validation (provisions a temporary NTFS VHD a
 ./scripts/test.ps1 -IncludeHostIntegration
 ```
 
+By default, host-validation evidence is archived under `artifacts/host-validation/<timestamp>/` with:
+- `host-ntfs-stream-validation.trx`
+- `host-validation-manifest.json`
+
+To skip artifact archiving:
+
+```powershell
+./scripts/run-host-ntfs-stream-validation.ps1 -NoArchive
+```
+
 ## Rust toolchain setup (Windows)
 
 ```powershell

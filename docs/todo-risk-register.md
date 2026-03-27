@@ -2,7 +2,7 @@
 
 ## Active TODOs
 
-1. Run the gated host integration harness (`scripts/run-host-ntfs-stream-validation.ps1`) on an elevated Windows host and archive the resulting evidence/logs as baseline validation artifacts.
+1. Execute host NTFS stream validation on at least two additional Windows host profiles (different storage/controller layouts) and compare artifact manifests/TRX outputs for drift.
 
 ## Recently completed
 
@@ -24,6 +24,7 @@
 16. Added Rust FFI integration coverage for compressed non-resident default-stream recovery and encrypted default-stream raw export diagnostics.
 17. Added gated Windows host integration test coverage (`HostNtfsStreamRecoveryTests`) that provisions an NTFS VHD fixture and validates compressed+encrypted deleted-file recovery paths through .NET engine probe APIs.
 18. Added `scripts/run-host-ntfs-stream-validation.ps1` for elevated, focused execution of host integration stream-recovery validation.
+19. Added automatic host-validation artifact archiving (`artifacts/host-validation/<timestamp>`) including TRX output and a JSON manifest with environment + git metadata.
 
 ## Active risks
 
