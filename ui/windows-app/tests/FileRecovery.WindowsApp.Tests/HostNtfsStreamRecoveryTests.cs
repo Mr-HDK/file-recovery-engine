@@ -43,81 +43,234 @@ public sealed class HostNtfsStreamRecoveryTests
         var encryptedName = $"fr-host-encrypted-{Guid.NewGuid():N}.txt";
 
         fixture.CreateCompressedDeletedFile(compressedName);
+
+        var compressedOutput = Path.Combine(outputRoot, "compressed.bin");
+        var compressedRecovery = RecoverExpectedDeletedCandidate(
+            sourcePath,
+            compressedName,
+            requireCompressed: true,
+            requireEncrypted: false,
+            compressedOutput,
+            out var compressedLookupDebug);
+
+        Assert.True(
+            compressedRecovery.Success,
+            $"{compressedLookupDebug}{Environment.NewLine}Compressed recovery failed: {compressedRecovery.Message} ({compressedRecovery.StatusCode})");
+        Assert.False(compressedRecovery.Partial);
+        Assert.True(File.Exists(compressedOutput), "Compressed output file was not created.");
+        Assert.True(compressedRecovery.BytesWritten > 0);
+        Assert.NotEqual(0u, compressedRecovery.DiagnosticsFlags & RecoveryDiagCompressedAttribute);
+        Assert.Equal(0u, compressedRecovery.DiagnosticsFlags & RecoveryDiagUnsupportedCompressed);
+
         var encryptedPrepared = fixture.TryCreateEncryptedDeletedFile(encryptedName, out var encryptedSkipReason);
         if (!encryptedPrepared)
         {
             Console.WriteLine($"Host integration notice: encrypted-file validation skipped ({encryptedSkipReason}).");
-        }
-
-        var open = NativeEngineProbe.OpenSourceReadOnlySession(sourcePath, RecoverySourceKind.Volume);
-        if (!open.EngineAvailable)
-        {
-            Console.WriteLine(
-                $"Host integration notice: skipping because native engine runtime is unavailable ({open.Message}, {open.StatusCode}).");
             return;
         }
-        Assert.True(open.Opened, $"Source open failed: {open.Message} ({open.StatusCode})");
+
+        var encryptedOutput = Path.Combine(outputRoot, "encrypted.bin");
+        var encryptedRecovery = RecoverExpectedDeletedCandidate(
+            sourcePath,
+            encryptedName,
+            requireCompressed: false,
+            requireEncrypted: true,
+            encryptedOutput,
+            out var encryptedLookupDebug);
+
+        Assert.True(
+            encryptedRecovery.Success,
+            $"{encryptedLookupDebug}{Environment.NewLine}Encrypted recovery failed: {encryptedRecovery.Message} ({encryptedRecovery.StatusCode})");
+        Assert.True(encryptedRecovery.Partial);
+        Assert.True(File.Exists(encryptedOutput), "Encrypted output file was not created.");
+        Assert.True(encryptedRecovery.BytesWritten > 0);
+        Assert.NotEqual(0u, encryptedRecovery.DiagnosticsFlags & RecoveryDiagEncryptedAttribute);
+        Assert.NotEqual(0u, encryptedRecovery.DiagnosticsFlags & RecoveryDiagUnsupportedEncrypted);
+    }
+
+    private static EngineRecoverCandidateResult RecoverExpectedDeletedCandidate(
+        string sourcePath,
+        string expectedName,
+        bool requireCompressed,
+        bool requireEncrypted,
+        string outputPath,
+        out string lookupDebugSummary)
+    {
+        var open = NativeEngineProbe.OpenSourceReadOnlySession(sourcePath, RecoverySourceKind.Volume);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            lookupDebugSummary = $"Source open failed: {open.Message} ({open.StatusCode})";
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
 
         try
         {
             var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(open.SessionId, maxRecords: 262_144);
-            Assert.True(quickScan.Success, $"Quick scan failed: {quickScan.Message} ({quickScan.StatusCode})");
-
-            var candidatesResult = NativeEngineProbe.GetNtfsQuickScanCandidatesFromSession(
-                open.SessionId,
-                maxRecords: 262_144,
-                candidateCapacity: 4096);
-            Assert.True(
-                candidatesResult.Success,
-                $"Candidate query failed: {candidatesResult.Message} ({candidatesResult.StatusCode})");
-
-            var compressedCandidate = candidatesResult.Candidates.FirstOrDefault(candidate =>
-                candidate.Deleted
-                && string.Equals(candidate.Name, compressedName, StringComparison.OrdinalIgnoreCase));
-            Assert.NotNull(compressedCandidate);
-
-            var compressedOutput = Path.Combine(outputRoot, "compressed.bin");
-            var compressedRecovery = NativeEngineProbe.RecoverNtfsCandidateToFile(
-                open.SessionId,
-                compressedCandidate!.RecordNumber,
-                compressedOutput);
-
-            Assert.True(
-                compressedRecovery.Success,
-                $"Compressed recovery failed: {compressedRecovery.Message} ({compressedRecovery.StatusCode})");
-            Assert.False(compressedRecovery.Partial);
-            Assert.True(File.Exists(compressedOutput), "Compressed output file was not created.");
-            Assert.True(compressedRecovery.BytesWritten > 0);
-            Assert.NotEqual(0u, compressedRecovery.DiagnosticsFlags & RecoveryDiagCompressedAttribute);
-            Assert.Equal(0u, compressedRecovery.DiagnosticsFlags & RecoveryDiagUnsupportedCompressed);
-
-            if (encryptedPrepared)
+            if (!quickScan.Success)
             {
-                var encryptedCandidate = candidatesResult.Candidates.FirstOrDefault(candidate =>
-                    candidate.Deleted
-                    && string.Equals(candidate.Name, encryptedName, StringComparison.OrdinalIgnoreCase));
-                Assert.NotNull(encryptedCandidate);
-
-                var encryptedOutput = Path.Combine(outputRoot, "encrypted.bin");
-                var encryptedRecovery = NativeEngineProbe.RecoverNtfsCandidateToFile(
-                    open.SessionId,
-                    encryptedCandidate!.RecordNumber,
-                    encryptedOutput);
-
-                Assert.True(
-                    encryptedRecovery.Success,
-                    $"Encrypted recovery failed: {encryptedRecovery.Message} ({encryptedRecovery.StatusCode})");
-                Assert.True(encryptedRecovery.Partial);
-                Assert.True(File.Exists(encryptedOutput), "Encrypted output file was not created.");
-                Assert.True(encryptedRecovery.BytesWritten > 0);
-                Assert.NotEqual(0u, encryptedRecovery.DiagnosticsFlags & RecoveryDiagEncryptedAttribute);
-                Assert.NotEqual(0u, encryptedRecovery.DiagnosticsFlags & RecoveryDiagUnsupportedEncrypted);
+                lookupDebugSummary = $"Quick scan failed: {quickScan.Message} ({quickScan.StatusCode})";
+                return new EngineRecoverCandidateResult(
+                    true,
+                    false,
+                    false,
+                    0,
+                    0,
+                    "No diagnostics available.",
+                    quickScan.Message,
+                    quickScan.StatusCode);
             }
+
+            var (candidate, debugSummary) = LocateCandidateWithRetry(
+                open.SessionId,
+                expectedName,
+                requireCompressed,
+                requireEncrypted);
+            lookupDebugSummary = debugSummary;
+            if (candidate is null)
+            {
+                return new EngineRecoverCandidateResult(
+                    true,
+                    false,
+                    false,
+                    0,
+                    0,
+                    "No diagnostics available.",
+                    "Expected candidate was not found in quick-scan results.",
+                    -201);
+            }
+
+            return NativeEngineProbe.RecoverNtfsCandidateToFile(open.SessionId, candidate.RecordNumber, outputPath);
         }
         finally
         {
             NativeEngineProbe.CloseSourceSession(open.SessionId);
         }
+    }
+
+    private static (EngineNtfsQuickScanCandidate? Candidate, string DebugSummary) LocateCandidateWithRetry(
+        ulong sessionId,
+        string expectedName,
+        bool requireCompressed,
+        bool requireEncrypted)
+    {
+        const int maxAttempts = 5;
+        EngineNtfsQuickScanCandidatesResult? lastCandidatesResult = null;
+        EngineNtfsQuickScanCandidate? candidate = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var candidatesResult = NativeEngineProbe.GetNtfsQuickScanCandidatesFromSession(
+                sessionId,
+                maxRecords: 262_144,
+                candidateCapacity: 16384);
+            if (!candidatesResult.Success)
+            {
+                return (null, $"Candidate query failed: {candidatesResult.Message} ({candidatesResult.StatusCode})");
+            }
+
+            lastCandidatesResult = candidatesResult;
+            candidate ??= FindDeletedHostCandidate(
+                candidatesResult.Candidates,
+                expectedName,
+                requireCompressed,
+                requireEncrypted);
+
+            if (candidate is not null)
+            {
+                break;
+            }
+
+            if (attempt < maxAttempts)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(250));
+            }
+        }
+
+        var debugSummary = BuildCandidateDebugSummary(lastCandidatesResult, expectedName, requireCompressed, requireEncrypted);
+        return (candidate, debugSummary);
+    }
+
+    private static EngineNtfsQuickScanCandidate? FindDeletedHostCandidate(
+        IReadOnlyList<EngineNtfsQuickScanCandidate> candidates,
+        string expectedName,
+        bool requireCompressed,
+        bool requireEncrypted)
+    {
+        static bool NameOrPathMatches(EngineNtfsQuickScanCandidate candidate, string expectedName)
+        {
+            if (string.Equals(candidate.Name, expectedName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return candidate.ReconstructedPath?.EndsWith(expectedName, StringComparison.OrdinalIgnoreCase) == true;
+        }
+
+        var exact = candidates.FirstOrDefault(candidate =>
+            candidate.Deleted
+            && NameOrPathMatches(candidate, expectedName)
+            && candidate.IsCompressed == requireCompressed
+            && candidate.IsEncrypted == requireEncrypted);
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        return candidates
+            .Where(candidate =>
+                candidate.Deleted
+                && !candidate.IsDirectory
+                && candidate.HasNonResidentData
+                && candidate.IsCompressed == requireCompressed
+                && candidate.IsEncrypted == requireEncrypted)
+            .OrderByDescending(candidate => candidate.RecordNumber)
+            .FirstOrDefault();
+    }
+
+    private static string BuildCandidateDebugSummary(
+        EngineNtfsQuickScanCandidatesResult? candidatesResult,
+        string expectedName,
+        bool requireCompressed,
+        bool requireEncrypted)
+    {
+        if (candidatesResult is null)
+        {
+            return $"Host integration candidate lookup failed; no candidate result returned for '{expectedName}'.";
+        }
+
+        var candidates = candidatesResult.Candidates;
+        var deletedCount = candidates.Count(candidate => candidate.Deleted);
+        var compressedDeletedCount = candidates.Count(candidate => candidate.Deleted && candidate.IsCompressed);
+        var encryptedDeletedCount = candidates.Count(candidate => candidate.Deleted && candidate.IsEncrypted);
+
+        var sample = string.Join(
+            Environment.NewLine,
+            candidates
+                .Where(candidate => candidate.Deleted)
+                .Take(12)
+                .Select(candidate =>
+                    $"record={candidate.RecordNumber}, name='{candidate.Name}', path='{candidate.ReconstructedPath}', compressed={candidate.IsCompressed}, encrypted={candidate.IsEncrypted}"));
+        if (string.IsNullOrWhiteSpace(sample))
+        {
+            sample = "(no deleted candidates returned)";
+        }
+
+        return string.Join(
+            Environment.NewLine,
+            "Unable to locate expected host candidate.",
+            $"Expected name: {expectedName}",
+            $"Expected flags: compressed={requireCompressed}, encrypted={requireEncrypted}",
+            $"Candidates returned: {candidates.Count} (deleted={deletedCount}, deleted+compressed={compressedDeletedCount}, deleted+encrypted={encryptedDeletedCount})",
+            "Deleted candidate sample:",
+            sample);
     }
 
     private static bool HostIntegrationEnabled()

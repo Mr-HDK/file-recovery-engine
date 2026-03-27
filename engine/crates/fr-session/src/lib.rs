@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 const MAX_NTFS_FILE_RECORD_SIZE: usize = 1024 * 1024;
+const MAX_CONSECUTIVE_EMPTY_MFT_RECORDS: usize = 16_384;
 
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
@@ -172,6 +173,7 @@ pub fn quick_scan_ntfs_metadata(
     let mut records_with_non_resident_data = 0usize;
     let mut candidates = Vec::new();
     let mut record_errors = Vec::new();
+    let mut consecutive_empty_records = 0usize;
 
     for index in 0..config.max_records {
         let Some(offset) = mft_offset.checked_add(index.saturating_mul(record_size)) else {
@@ -188,8 +190,13 @@ pub fn quick_scan_ntfs_metadata(
 
         let record_bytes = &source_bytes[offset..end];
         if record_bytes.iter().all(|b| *b == 0) {
-            break;
+            consecutive_empty_records = consecutive_empty_records.saturating_add(1);
+            if consecutive_empty_records >= MAX_CONSECUTIVE_EMPTY_MFT_RECORDS {
+                break;
+            }
+            continue;
         }
+        consecutive_empty_records = 0;
 
         match parse_mft_record(record_bytes, boot_sector.bytes_per_sector as usize) {
             Ok(record) => {
@@ -284,6 +291,7 @@ pub fn quick_scan_ntfs_from_read_session(
     let mut candidates = Vec::new();
     let mut record_errors = Vec::new();
     let mut record_buffer = vec![0u8; record_size];
+    let mut consecutive_empty_records = 0usize;
 
     let mft_offset = boot_sector
         .mft_offset_bytes()
@@ -304,8 +312,13 @@ pub fn quick_scan_ntfs_from_read_session(
         }
 
         if record_buffer.iter().all(|b| *b == 0) {
-            break;
+            consecutive_empty_records = consecutive_empty_records.saturating_add(1);
+            if consecutive_empty_records >= MAX_CONSECUTIVE_EMPTY_MFT_RECORDS {
+                break;
+            }
+            continue;
         }
+        consecutive_empty_records = 0;
 
         match parse_mft_record(&record_buffer, boot_sector.bytes_per_sector as usize) {
             Ok(record) => {
@@ -635,6 +648,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quick_scan_skips_zero_record_gap_before_later_records() {
+        let image = build_test_ntfs_image_with_named_records_at_indexes(0, 20);
+
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 64 }).unwrap();
+
+        assert_eq!(summary.parsed_records, 2);
+        assert_eq!(summary.deleted_records, 1);
+        assert_eq!(summary.named_records, 2);
+
+        let deleted = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+        assert!(deleted.deleted);
+        assert_eq!(
+            deleted.reconstructed_path.as_deref(),
+            Some(r"Docs\report.txt")
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn quick_scan_from_image_source_reads_named_candidates() {
@@ -716,7 +752,16 @@ mod tests {
     }
 
     fn build_test_ntfs_image_with_named_records() -> Vec<u8> {
-        let mut image = vec![0u8; 12 * 1024];
+        build_test_ntfs_image_with_named_records_at_indexes(0, 1)
+    }
+
+    fn build_test_ntfs_image_with_named_records_at_indexes(
+        parent_record_index: usize,
+        child_record_index: usize,
+    ) -> Vec<u8> {
+        let highest_record_index = parent_record_index.max(child_record_index);
+        let image_len = (8 + highest_record_index + 1) * 1024;
+        let mut image = vec![0u8; image_len];
 
         image[0x03..0x0B].copy_from_slice(b"NTFS    ");
         write_u16(&mut image, 0x0B, 512);
@@ -731,10 +776,11 @@ mod tests {
         let mft_offset = 4 * 512;
         let parent = build_named_record(5, 0x0003, "Docs", 0);
         let child_deleted = build_named_record(6, 0x0000, "report.txt", 5);
+        let parent_offset = mft_offset + parent_record_index * 1024;
+        let child_offset = mft_offset + child_record_index * 1024;
 
-        image[mft_offset..mft_offset + parent.len()].copy_from_slice(&parent);
-        image[mft_offset + 1024..mft_offset + 1024 + child_deleted.len()]
-            .copy_from_slice(&child_deleted);
+        image[parent_offset..parent_offset + parent.len()].copy_from_slice(&parent);
+        image[child_offset..child_offset + child_deleted.len()].copy_from_slice(&child_deleted);
 
         image
     }

@@ -86,6 +86,7 @@ const RECOVERY_DIAG_NO_DEFAULT_DATA_STREAM: u32 = 0x0100;
 const RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS: u32 = 0x0200;
 const NTFS_MAX_REASONABLE_COMPRESSION_UNIT_EXPONENT: u16 = 8;
 const NTFS_COMPRESSION_FORMAT_LZNT1: u16 = 0x0002;
+const MAX_CONSECUTIVE_EMPTY_MFT_RECORDS: usize = 16_384;
 
 #[cfg(windows)]
 #[link(name = "ntdll")]
@@ -545,6 +546,7 @@ fn fr_recover_ntfs_candidate_to_file_impl(
     let max_records = 262_144usize;
     let mut record_buffer = vec![0u8; record_size];
     let mut target_record: Option<fr_mft::MftRecord> = None;
+    let mut consecutive_empty_records = 0usize;
 
     for _ in 0..max_records {
         match read_from_session(session, record_offset, &mut record_buffer) {
@@ -554,8 +556,17 @@ fn fr_recover_ntfs_candidate_to_file_impl(
         }
 
         if record_buffer.iter().all(|b| *b == 0) {
-            break;
+            consecutive_empty_records = consecutive_empty_records.saturating_add(1);
+            if consecutive_empty_records >= MAX_CONSECUTIVE_EMPTY_MFT_RECORDS {
+                break;
+            }
+            let Some(next_offset) = record_offset.checked_add(record_size as u64) else {
+                return 33;
+            };
+            record_offset = next_offset;
+            continue;
         }
+        consecutive_empty_records = 0;
 
         if let Ok(record) = parse_mft_record(&record_buffer, boot.bytes_per_sector as usize) {
             if record.header.record_number == record_number {
@@ -672,6 +683,8 @@ fn fr_recover_ntfs_candidate_to_file_impl(
                 exported_named_stream_count = exported_named_stream_count.saturating_add(1);
             }
             Err(_) => {
+                drop(sidecar_file);
+                let _ = fs::remove_file(&sidecar_path);
                 skipped_named_streams = skipped_named_streams.saturating_add(1);
                 partial = true;
             }
@@ -2142,6 +2155,66 @@ mod tests {
         fs::remove_dir_all(&temp_dir).unwrap();
     }
 
+    #[test]
+    fn ffi_recover_finds_record_after_zero_gap() {
+        let record_number = 123u32;
+        let payload = b"gap-test-payload".to_vec();
+
+        let record = build_record_with_data_attributes(
+            record_number,
+            vec![build_resident_data_attribute(1, None, 0, &payload)],
+        );
+        let image = build_test_ntfs_image_with_record_at_index(&record, 24);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-gap-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
     fn c_string_bytes_to_string(bytes: &[u8]) -> String {
         let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
         String::from_utf8_lossy(&bytes[..end]).into_owned()
@@ -2172,7 +2245,12 @@ mod tests {
     }
 
     fn build_test_ntfs_image_with_record(record: &[u8]) -> Vec<u8> {
-        let mut image = vec![0u8; 12 * 1024];
+        build_test_ntfs_image_with_record_at_index(record, 0)
+    }
+
+    fn build_test_ntfs_image_with_record_at_index(record: &[u8], record_index: usize) -> Vec<u8> {
+        let image_len = (8 + record_index + 1) * 1024;
+        let mut image = vec![0u8; image_len];
 
         image[0x03..0x0B].copy_from_slice(b"NTFS    ");
         write_u16(&mut image, 0x0B, 512);
@@ -2185,7 +2263,8 @@ mod tests {
         write_u16(&mut image, 0x1FE, 0xAA55);
 
         let mft_offset = 4 * 512;
-        image[mft_offset..mft_offset + record.len()].copy_from_slice(record);
+        let record_offset = mft_offset + record_index * 1024;
+        image[record_offset..record_offset + record.len()].copy_from_slice(record);
         image
     }
 
