@@ -45,6 +45,25 @@ To skip artifact archiving:
 ./scripts/run-host-ntfs-stream-validation.ps1 -NoArchive
 ```
 
+## UI run/release helpers
+
+Prefer the helper scripts below to avoid stale locked binaries:
+
+```powershell
+# Build + launch Debug UI (auto-stops running instance, syncs engine DLL if available)
+./scripts/run-ui-debug.ps1
+```
+
+```powershell
+# Rebuild Release package safely (auto-stops running instance, builds engine + UI)
+./scripts/rebuild-ui-release.ps1
+```
+
+```powershell
+# Rebuild Release and launch it
+./scripts/rebuild-ui-release.ps1 -Launch
+```
+
 ## Rust toolchain setup (Windows)
 
 ```powershell

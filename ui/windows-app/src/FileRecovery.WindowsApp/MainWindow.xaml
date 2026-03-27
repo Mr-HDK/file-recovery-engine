@@ -5,15 +5,18 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="File Recovery" Height="760" Width="1180" MinHeight="620" MinWidth="980">
+    <ScrollViewer VerticalScrollBarVisibility="Visible"
+                  HorizontalScrollBarVisibility="Disabled"
+                  CanContentScroll="False">
     <Grid Margin="16">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
         <Border Grid.Row="0" BorderThickness="1" CornerRadius="6" Padding="12" BorderBrush="#CCD2DD">
             <DockPanel>
@@ -70,6 +73,9 @@
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               SelectionMode="Single"
+                              Height="200"
+                              ScrollViewer.VerticalScrollBarVisibility="Auto"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               SelectionChanged="SourcesDataGrid_SelectionChanged">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Type" Binding="{Binding Kind}" Width="120"/>
@@ -115,43 +121,107 @@
         </Grid>
 
         <GroupBox Grid.Row="3" Margin="0,14,0,0" Header="Validation Output" Padding="8">
-            <ListBox x:Name="ValidationListBox" Height="130"/>
+            <ListBox x:Name="ValidationListBox" Height="70"/>
         </GroupBox>
 
         <GroupBox Grid.Row="4" Margin="0,14,0,0" Header="Session and Diagnostics" Padding="8">
             <Grid>
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="2*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="160"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="260"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
+                <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                    <TextBlock FontWeight="SemiBold" Text="Session Log"/>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button Content="Copy Log" Width="90" Margin="0,0,8,0" Click="CopySessionLogButton_Click"/>
+                        <Button Content="Clear Log" Width="90" Click="ClearSessionLogButton_Click"/>
+                    </StackPanel>
+                </DockPanel>
+
                 <TextBox x:Name="SessionOutputTextBox"
-                         Grid.Row="0"
+                         Grid.Row="1"
                          IsReadOnly="True"
-                         TextWrapping="Wrap"
+                         MinHeight="110"
+                         FontFamily="Consolas"
+                         FontSize="12"
+                         TextWrapping="NoWrap"
                          AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto"/>
+                         HorizontalScrollBarVisibility="Auto"
+                         VerticalScrollBarVisibility="Auto"
+                         PreviewMouseWheel="SessionOutputTextBox_PreviewMouseWheel"/>
 
-                <TextBlock Grid.Row="1"
-                           Margin="0,8,0,6"
-                           FontWeight="SemiBold"
-                           Text="Quick Scan Candidates"/>
+                <GridSplitter Grid.Row="2"
+                              Height="6"
+                              Margin="0,6,0,6"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Center"
+                              ResizeDirection="Rows"
+                              ResizeBehavior="PreviousAndNext"
+                              ShowsPreview="True"
+                              Background="#D6DBE6"/>
 
-                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
+                <DockPanel Grid.Row="3" Margin="0,0,0,6">
+                    <TextBlock FontWeight="SemiBold" Text="Quick Scan Candidates"/>
+                    <TextBlock x:Name="CandidateSummaryTextBlock"
+                               DockPanel.Dock="Right"
+                               VerticalAlignment="Center"
+                               Foreground="#4B5563"/>
+                </DockPanel>
+
+                <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,6">
                     <Button Content="Select All" Width="90" Margin="0,0,8,0" Click="SelectAllCandidatesButton_Click"/>
+                    <Button Content="Select Recoverable" Width="130" Margin="0,0,8,0" Click="SelectRecoverableCandidatesButton_Click"/>
                     <Button Content="Clear Selection" Width="110" Margin="0,0,8,0" Click="ClearCandidateSelectionButton_Click"/>
                     <Button Content="Recover Selected" Width="120" Margin="0,0,8,0" Click="RecoverSelectedCandidatesButton_Click"/>
                     <Button Content="Export Selected" Width="120" Margin="0,0,8,0" Click="ExportSelectedCandidatesButton_Click"/>
                     <Button Content="Session DB Maintenance" Width="170" Click="SessionMaintenanceButton_Click"/>
                 </StackPanel>
 
+                <Border Grid.Row="5" Margin="0,0,0,6" Padding="8" BorderThickness="1" CornerRadius="4" BorderBrush="#D6DBE6" Background="#F8FAFC">
+                    <DockPanel LastChildFill="True">
+                        <StackPanel Orientation="Horizontal">
+                            <CheckBox x:Name="FilterDeletedCheckBox" Content="Deleted only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                            <CheckBox x:Name="FilterRecoverableCheckBox" Content="Recoverable only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                            <CheckBox x:Name="FilterSelectedCheckBox" Content="Selected only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBox x:Name="CandidateSearchTextBox" Width="220" Margin="0,0,8,0" TextChanged="CandidateSearchTextBox_TextChanged"/>
+                            <Button Content="Reset View" Width="90" Click="ResetCandidateFiltersButton_Click"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+
                 <DataGrid x:Name="QuickScanCandidatesDataGrid"
-                          Grid.Row="3"
+                          Grid.Row="6"
                           AutoGenerateColumns="False"
                           IsReadOnly="False"
-                          SelectionMode="Single">
+                          MinHeight="180"
+                          SelectionMode="Single"
+                          SelectionUnit="FullRow"
+                          CanUserSortColumns="True"
+                          CanUserReorderColumns="True"
+                          CanUserResizeColumns="True"
+                          CanUserAddRows="False"
+                          CanUserDeleteRows="False"
+                          FrozenColumnCount="2"
+                          AlternatingRowBackground="#F8FAFC"
+                          GridLinesVisibility="Horizontal"
+                          RowHeaderWidth="0"
+                          EnableRowVirtualization="True"
+                          EnableColumnVirtualization="True"
+                          ScrollViewer.VerticalScrollBarVisibility="Auto"
+                          ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                          ScrollViewer.IsDeferredScrollingEnabled="True"
+                          CellEditEnding="QuickScanCandidatesDataGrid_CellEditEnding"
+                          CurrentCellChanged="QuickScanCandidatesDataGrid_CurrentCellChanged">
                     <DataGrid.Columns>
                         <DataGridCheckBoxColumn Header="Select" Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
                         <DataGridTextColumn Header="Record" Binding="{Binding RecordNumber}" Width="70" IsReadOnly="True"/>
@@ -174,6 +244,28 @@
                         <DataGridTextColumn Header="Write Diagnostics" Binding="{Binding RecoveryDiagnostics}" Width="260" IsReadOnly="True"/>
                     </DataGrid.Columns>
                 </DataGrid>
+
+                <Expander Grid.Row="7" Margin="0,8,0,0" Header="Table Activity Log" IsExpanded="False">
+                    <Grid Margin="0,6,0,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="120"/>
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                            <TextBlock Foreground="#4B5563" Text="Recent table actions"/>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button Content="Copy Activity" Width="95" Margin="0,0,8,0" Click="CopyCandidateActivityButton_Click"/>
+                                <Button Content="Clear Activity" Width="95" Click="ClearCandidateActivityButton_Click"/>
+                            </StackPanel>
+                        </DockPanel>
+
+                        <ListBox x:Name="CandidateActivityListBox"
+                                 Grid.Row="1"
+                                 FontFamily="Consolas"
+                                 FontSize="12"/>
+                    </Grid>
+                </Expander>
             </Grid>
         </GroupBox>
 
@@ -183,4 +275,5 @@
             </StatusBarItem>
         </StatusBar>
     </Grid>
+    </ScrollViewer>
 </Window>

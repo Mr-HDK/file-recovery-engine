@@ -13,4 +13,25 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
+  <Target Name="CopyNativeEngineDll" AfterTargets="Build">
+    <PropertyGroup>
+      <EngineReleaseDll>$(MSBuildThisFileDirectory)..\..\..\..\engine\target\release\fr_ffi.dll</EngineReleaseDll>
+      <EngineDebugDll>$(MSBuildThisFileDirectory)..\..\..\..\engine\target\debug\fr_ffi.dll</EngineDebugDll>
+      <EngineOutputDll>$(TargetDir)file_recovery_engine.dll</EngineOutputDll>
+    </PropertyGroup>
+
+    <Copy SourceFiles="$(EngineReleaseDll)"
+          DestinationFiles="$(EngineOutputDll)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(EngineReleaseDll)')" />
+
+    <Copy SourceFiles="$(EngineDebugDll)"
+          DestinationFiles="$(EngineOutputDll)"
+          SkipUnchangedFiles="true"
+          Condition="!Exists('$(EngineReleaseDll)') and Exists('$(EngineDebugDll)')" />
+
+    <Warning Text="Native engine DLL not found. Build engine first: cargo build -p fr-ffi --release"
+             Condition="!Exists('$(EngineReleaseDll)') and !Exists('$(EngineDebugDll)')" />
+  </Target>
+
 </Project>

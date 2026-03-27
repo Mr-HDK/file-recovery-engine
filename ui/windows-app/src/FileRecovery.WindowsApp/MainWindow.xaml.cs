@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Data;
 using WinForms = System.Windows.Forms;
 
 namespace FileRecovery.WindowsApp;
@@ -62,15 +63,23 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SourceCandidate> _sources = [];
     private readonly ObservableCollection<string> _validationOutput = [];
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
+    private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
+    private const string UiBuildTag = "ui-scroll-fix-20260328-0006";
+    private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
     private SourceCandidate? _selectedSource;
+    private ICollectionView? _quickScanCandidatesView;
     private CancellationTokenSource? _previewReadCts;
     private CancellationTokenSource? _refreshCts;
     private CancellationTokenSource? _operationCts;
     private Guid? _activeSessionId;
     private bool _isElevated;
     private bool _elevationWarningLogged;
+    private bool _filterDeletedOnly;
+    private bool _filterRecoverableOnly;
+    private bool _filterSelectedOnly;
+    private string _candidateSearchTerm = string.Empty;
 
     public MainWindow()
     {
@@ -86,9 +95,16 @@ public partial class MainWindow : Window
 
         SourcesDataGrid.ItemsSource = _sources;
         ValidationListBox.ItemsSource = _validationOutput;
-        QuickScanCandidatesDataGrid.ItemsSource = _quickScanCandidates;
+        CandidateActivityListBox.ItemsSource = _candidateActivity;
+
+        _quickScanCandidates.CollectionChanged += (_, _) => UpdateCandidateSummary();
+        _quickScanCandidatesView = CollectionViewSource.GetDefaultView(_quickScanCandidates);
+        _quickScanCandidatesView.Filter = FilterQuickScanCandidate;
+        QuickScanCandidatesDataGrid.ItemsSource = _quickScanCandidatesView;
+
         ScanModeComboBox.ItemsSource = Enum.GetValues<ScanMode>();
         ScanModeComboBox.SelectedItem = ScanMode.Quick;
+        UpdateCandidateSummary();
 
         var version = NativeEngineProbe.GetVersionDisplay();
         var health = NativeEngineProbe.IsHealthy() ? "healthy" : "mock";
@@ -106,6 +122,7 @@ public partial class MainWindow : Window
             await RunSessionStoreMaintenanceAsync(userInitiated: false, compactDatabase: false, CancellationToken.None);
             await RefreshSourcesAsync(CancellationToken.None);
             await LoadLatestPersistedCandidatesAsync(CancellationToken.None);
+            AppendSessionMessage($"UI build: {UiBuildTag}");
             AppendSessionMessage($"Session DB: {_sessionStore.DatabasePath}");
             StatusTextBlock.Text = "Ready";
         }
@@ -441,6 +458,8 @@ public partial class MainWindow : Window
         if (!result.Success)
         {
             _quickScanCandidates.Clear();
+            RefreshCandidateView();
+            AppendCandidateActivity("Candidate load failed: engine result was not successful.");
             return;
         }
 
@@ -505,6 +524,83 @@ public partial class MainWindow : Window
                 LastRecoveryPartial = candidate.LastRecoveryPartial,
                 RecoveryDiagnostics = candidate.RecoveryDiagnostics ?? string.Empty,
             });
+        }
+
+        RefreshCandidateView();
+        AppendCandidateActivity($"Loaded {_quickScanCandidates.Count} candidate rows.");
+    }
+
+    private bool FilterQuickScanCandidate(object rowObject)
+    {
+        if (rowObject is not QuickScanCandidateRow row)
+        {
+            return false;
+        }
+
+        if (_filterDeletedOnly && !row.Deleted)
+        {
+            return false;
+        }
+
+        if (_filterRecoverableOnly && !IsRecoverableCandidate(row))
+        {
+            return false;
+        }
+
+        if (_filterSelectedOnly && !row.IsSelected)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_candidateSearchTerm))
+        {
+            return true;
+        }
+
+        return row.Name.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.OriginalPath.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.RecordNumber.ToString(CultureInfo.InvariantCulture).Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.EvidenceSource.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.CandidateStatusCode.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.RecoveryDiagnostics.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRecoverableCandidate(QuickScanCandidateRow row)
+    {
+        return !row.Directory && row.CandidateStatus != RecoveryCandidateStatus.Invalid;
+    }
+
+    private void RefreshCandidateView()
+    {
+        _quickScanCandidatesView?.Refresh();
+        UpdateCandidateSummary();
+    }
+
+    private void UpdateCandidateSummary()
+    {
+        var total = _quickScanCandidates.Count;
+        var selected = _quickScanCandidates.Count(candidate => candidate.IsSelected);
+        var deleted = _quickScanCandidates.Count(candidate => candidate.Deleted);
+        var recoverable = _quickScanCandidates.Count(IsRecoverableCandidate);
+        var visible = _quickScanCandidatesView?.Cast<object>().Count() ?? total;
+
+        CandidateSummaryTextBlock.Text =
+            $"Visible {visible}/{total} | Selected {selected} | Deleted {deleted} | Recoverable {recoverable}";
+    }
+
+    private void AppendCandidateActivity(string message)
+    {
+        var line = $"[{DateTimeOffset.Now:HH:mm:ss}] {message}";
+        _candidateActivity.Add(line);
+
+        while (_candidateActivity.Count > MaxUiActivityLogEntries)
+        {
+            _candidateActivity.RemoveAt(0);
+        }
+
+        if (_candidateActivity.Count > 0)
+        {
+            CandidateActivityListBox.ScrollIntoView(_candidateActivity[^1]);
         }
     }
 
@@ -608,6 +704,85 @@ public partial class MainWindow : Window
         }
     }
 
+    private void CopySessionLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            System.Windows.Clipboard.SetText(SessionOutputTextBox.Text ?? string.Empty);
+            StatusTextBlock.Text = "Session log copied";
+        }
+        catch (Exception ex)
+        {
+            AppendSessionMessage($"Session log copy failed: {ex.Message}");
+            StatusTextBlock.Text = "Session log copy failed";
+        }
+    }
+
+    private void ClearSessionLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        SessionOutputTextBox.Clear();
+        StatusTextBlock.Text = "Session log cleared";
+    }
+
+    private void CopyCandidateActivityButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, _candidateActivity));
+            StatusTextBlock.Text = "Table activity copied";
+        }
+        catch (Exception ex)
+        {
+            AppendSessionMessage($"Table activity copy failed: {ex.Message}");
+            StatusTextBlock.Text = "Table activity copy failed";
+        }
+    }
+
+    private void ClearCandidateActivityButton_Click(object sender, RoutedEventArgs e)
+    {
+        _candidateActivity.Clear();
+        StatusTextBlock.Text = "Table activity cleared";
+    }
+
+    private void CandidateFilterChanged(object sender, RoutedEventArgs e)
+    {
+        _filterDeletedOnly = FilterDeletedCheckBox.IsChecked == true;
+        _filterRecoverableOnly = FilterRecoverableCheckBox.IsChecked == true;
+        _filterSelectedOnly = FilterSelectedCheckBox.IsChecked == true;
+        RefreshCandidateView();
+        AppendCandidateActivity("Candidate filters updated.");
+    }
+
+    private void CandidateSearchTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        _candidateSearchTerm = CandidateSearchTextBox.Text.Trim();
+        RefreshCandidateView();
+    }
+
+    private void ResetCandidateFiltersButton_Click(object sender, RoutedEventArgs e)
+    {
+        FilterDeletedCheckBox.IsChecked = false;
+        FilterRecoverableCheckBox.IsChecked = false;
+        FilterSelectedCheckBox.IsChecked = false;
+        CandidateSearchTextBox.Text = string.Empty;
+        _filterDeletedOnly = false;
+        _filterRecoverableOnly = false;
+        _filterSelectedOnly = false;
+        _candidateSearchTerm = string.Empty;
+        RefreshCandidateView();
+        AppendCandidateActivity("Candidate view reset.");
+    }
+
+    private void QuickScanCandidatesDataGrid_CellEditEnding(object sender, System.Windows.Controls.DataGridCellEditEndingEventArgs e)
+    {
+        Dispatcher.BeginInvoke(new Action(RefreshCandidateView), System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void QuickScanCandidatesDataGrid_CurrentCellChanged(object? sender, EventArgs e)
+    {
+        UpdateCandidateSummary();
+    }
+
     private void SelectAllCandidatesButton_Click(object sender, RoutedEventArgs e)
     {
         foreach (var row in _quickScanCandidates)
@@ -615,8 +790,26 @@ public partial class MainWindow : Window
             row.IsSelected = true;
         }
 
-        QuickScanCandidatesDataGrid.Items.Refresh();
+        RefreshCandidateView();
         AppendSessionMessage($"Selected {_quickScanCandidates.Count} candidates.");
+        AppendCandidateActivity($"Selected all {_quickScanCandidates.Count} candidates.");
+    }
+
+    private void SelectRecoverableCandidatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = 0;
+        foreach (var row in _quickScanCandidates)
+        {
+            row.IsSelected = IsRecoverableCandidate(row);
+            if (row.IsSelected)
+            {
+                selected++;
+            }
+        }
+
+        RefreshCandidateView();
+        AppendSessionMessage($"Selected {selected} recoverable candidates.");
+        AppendCandidateActivity($"Selected recoverable candidates: {selected}.");
     }
 
     private void ClearCandidateSelectionButton_Click(object sender, RoutedEventArgs e)
@@ -626,8 +819,9 @@ public partial class MainWindow : Window
             row.IsSelected = false;
         }
 
-        QuickScanCandidatesDataGrid.Items.Refresh();
+        RefreshCandidateView();
         AppendSessionMessage("Candidate selection cleared.");
+        AppendCandidateActivity("Selection cleared.");
     }
 
     private async void ExportSelectedCandidatesButton_Click(object sender, RoutedEventArgs e)
@@ -638,12 +832,14 @@ public partial class MainWindow : Window
             if (selected.Length == 0)
             {
                 AppendSessionMessage("No candidates selected for export.");
+                AppendCandidateActivity("Export skipped: no candidates selected.");
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(DestinationPathTextBox.Text))
             {
                 AppendSessionMessage("Export blocked: destination path is missing.");
+                AppendCandidateActivity("Export blocked: destination path missing.");
                 return;
             }
 
@@ -651,6 +847,7 @@ public partial class MainWindow : Window
             if (!Directory.Exists(destination))
             {
                 AppendSessionMessage("Export blocked: destination folder does not exist.");
+                AppendCandidateActivity("Export blocked: destination folder does not exist.");
                 return;
             }
 
@@ -713,11 +910,13 @@ public partial class MainWindow : Window
             }
 
             AppendSessionMessage($"Exported {selected.Length} candidates to {jsonPath} and {csvPath}.");
+            AppendCandidateActivity($"Exported {selected.Length} candidates.");
             StatusTextBlock.Text = "Candidate export completed";
         }
         catch (Exception ex)
         {
             AppendSessionMessage($"Candidate export failed: {ex.Message}");
+            AppendCandidateActivity("Candidate export failed.");
             StatusTextBlock.Text = "Candidate export failed";
         }
     }
@@ -740,12 +939,14 @@ public partial class MainWindow : Window
             if (selected.Length == 0)
             {
                 AppendSessionMessage("No candidates selected for recovery.");
+                AppendCandidateActivity("Recovery skipped: no candidates selected.");
                 return;
             }
 
             if (_selectedSource is null)
             {
                 AppendSessionMessage("Recovery blocked: source is not selected.");
+                AppendCandidateActivity("Recovery blocked: no source selected.");
                 return;
             }
 
@@ -753,12 +954,14 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(sourcePath))
             {
                 AppendSessionMessage("Recovery blocked: source path is unavailable.");
+                AppendCandidateActivity("Recovery blocked: source path unavailable.");
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(DestinationPathTextBox.Text))
             {
                 AppendSessionMessage("Recovery blocked: destination path is missing.");
+                AppendCandidateActivity("Recovery blocked: destination path missing.");
                 return;
             }
 
@@ -766,6 +969,7 @@ public partial class MainWindow : Window
             if (!Directory.Exists(destination))
             {
                 AppendSessionMessage("Recovery blocked: destination folder does not exist.");
+                AppendCandidateActivity("Recovery blocked: destination folder does not exist.");
                 return;
             }
 
@@ -855,7 +1059,7 @@ public partial class MainWindow : Window
                 await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
             }
 
-            QuickScanCandidatesDataGrid.Items.Refresh();
+            RefreshCandidateView();
             StatusTextBlock.Text = "Recovery execution completed";
 
             if (_activeSessionId.HasValue)
@@ -907,11 +1111,13 @@ public partial class MainWindow : Window
             }
 
             AppendSessionMessage($"Recovery summary: full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}.");
+            AppendCandidateActivity($"Recovery summary full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}.");
         }
         catch (OperationCanceledException)
         {
-            QuickScanCandidatesDataGrid.Items.Refresh();
+            RefreshCandidateView();
             AppendSessionMessage("Recovery execution canceled.");
+            AppendCandidateActivity("Recovery canceled.");
             StatusTextBlock.Text = "Recovery execution canceled";
 
             if (_activeSessionId.HasValue)
@@ -924,6 +1130,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppendSessionMessage($"Recovery execution failed: {ex.Message}");
+            AppendCandidateActivity("Recovery execution failed.");
             StatusTextBlock.Text = "Recovery execution failed";
 
             if (_activeSessionId.HasValue)
@@ -1191,6 +1398,58 @@ public partial class MainWindow : Window
     {
         SessionOutputTextBox.AppendText($"[{DateTimeOffset.Now:HH:mm:ss}] {message}{Environment.NewLine}");
         SessionOutputTextBox.ScrollToEnd();
+    }
+
+    private void SessionOutputTextBox_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.TextBox textBox)
+        {
+            return;
+        }
+
+        var scrollViewer = FindDescendantScrollViewer(textBox);
+        if (scrollViewer is null)
+        {
+            return;
+        }
+
+        if (e.Delta < 0)
+        {
+            if (scrollViewer.VerticalOffset < scrollViewer.ScrollableHeight)
+            {
+                scrollViewer.LineDown();
+                e.Handled = true;
+            }
+
+            return;
+        }
+
+        if (e.Delta > 0 && scrollViewer.VerticalOffset > 0)
+        {
+            scrollViewer.LineUp();
+            e.Handled = true;
+        }
+    }
+
+    private static System.Windows.Controls.ScrollViewer? FindDescendantScrollViewer(System.Windows.DependencyObject parent)
+    {
+        if (parent is System.Windows.Controls.ScrollViewer directScrollViewer)
+        {
+            return directScrollViewer;
+        }
+
+        var children = System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (var index = 0; index < children; index++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(parent, index);
+            var found = FindDescendantScrollViewer(child);
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     private async Task RunPreviewReadAsync(SourceCandidate source, Guid sessionId)
