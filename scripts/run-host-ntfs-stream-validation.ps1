@@ -94,10 +94,13 @@ try {
       Write-Host "Host validation artifacts: $([System.IO.Path]::GetFullPath($artifactDirectory))"
     }
   }
-  finally {
-    Pop-Location
-  }
 }
 finally {
+  try {
+    Pop-Location
+  }
+  catch {
+    # best-effort location restore
+  }
   [Environment]::SetEnvironmentVariable("FR_RUN_HOST_INTEGRATION", $previous, "Process")
 }
