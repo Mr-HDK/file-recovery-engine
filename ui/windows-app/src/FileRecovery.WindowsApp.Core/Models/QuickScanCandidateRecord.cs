@@ -13,6 +13,7 @@ public sealed record QuickScanCandidateRecord(
     bool IsCompressed = false,
     bool IsSparse = false,
     bool IsEncrypted = false,
+    string EvidenceSources = "MFT",
     string ConfidenceTier = "Medium",
     string ConfidenceReason = "Metadata-backed candidate from MFT.",
     RecoveryCandidateStatus CandidateStatus = RecoveryCandidateStatus.Partial,

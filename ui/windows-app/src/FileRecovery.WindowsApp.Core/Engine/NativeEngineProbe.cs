@@ -79,6 +79,7 @@ public sealed record EngineNtfsQuickScanCandidate(
     ulong? ParentRecordNumber,
     string? Name,
     string? ReconstructedPath,
+    string EvidenceSources,
     string ConfidenceTier,
     string ConfidenceReason
 );
@@ -420,6 +421,7 @@ public static class NativeEngineProbe
                     candidate.ParentRecordNumber == 0 ? null : candidate.ParentRecordNumber,
                     name,
                     path,
+                    MapEvidenceSources(flags),
                     MapConfidenceTier(candidate.ConfidenceTier),
                     confidenceReason));
             }
@@ -593,6 +595,42 @@ public static class NativeEngineProbe
         };
     }
 
+    private static string MapEvidenceSources(uint flags)
+    {
+        var sources = new List<string>(capacity: 5);
+        if ((flags & CandidateFlagEvidenceMft) != 0)
+        {
+            sources.Add("MFT");
+        }
+
+        if ((flags & CandidateFlagEvidenceDirectoryIndex) != 0)
+        {
+            sources.Add("Directory index");
+        }
+
+        if ((flags & CandidateFlagEvidenceUsn) != 0)
+        {
+            sources.Add("USN");
+        }
+
+        if ((flags & CandidateFlagEvidenceVss) != 0)
+        {
+            sources.Add("VSS");
+        }
+
+        if ((flags & CandidateFlagEvidenceCarve) != 0)
+        {
+            sources.Add("Carve");
+        }
+
+        if (sources.Count == 0)
+        {
+            return "MFT";
+        }
+
+        return string.Join(", ", sources);
+    }
+
     private static string MapRecoverStatusMessage(int statusCode)
     {
         return statusCode switch
@@ -736,6 +774,11 @@ public static class NativeEngineProbe
     private const uint CandidateFlagCompressed = 0x0080;
     private const uint CandidateFlagSparse = 0x0100;
     private const uint CandidateFlagEncrypted = 0x0200;
+    private const uint CandidateFlagEvidenceMft = 0x1000;
+    private const uint CandidateFlagEvidenceDirectoryIndex = 0x2000;
+    private const uint CandidateFlagEvidenceUsn = 0x4000;
+    private const uint CandidateFlagEvidenceVss = 0x8000;
+    private const uint CandidateFlagEvidenceCarve = 0x0001_0000;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
     private const uint RecoveryDiagCompressedAttribute = 0x0004;

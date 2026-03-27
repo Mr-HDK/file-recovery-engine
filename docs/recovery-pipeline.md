@@ -27,6 +27,7 @@
 - Parse USN records and merge rename/move evidence.
 - Prepare integration seam for `$LogFile` reconstruction.
 - Mark supporting evidence per candidate.
+- Current implementation now includes a concrete `fr-usn` parser for USN v2/v3 records plus `fr-session` evidence enrichment hooks (`apply_usn_evidence`) that annotate quick-scan candidates with USN evidence and reason masks.
 
 6. Snapshot augmentation
 - Enumerate VSS snapshots.
@@ -68,7 +69,7 @@ Each recovery candidate carries evidence entries from:
 - `Carve`
 
 Confidence is computed from evidence quality, data integrity checks, and overwrite risk.
-Current implementation includes weighted scoring + reason generation in `fr-scoring` and FFI/UI propagation for candidate confidence display.
+Current implementation includes weighted scoring + reason generation in `fr-scoring`, candidate-level evidence propagation over FFI/UI (`MFT`, `USN`, etc.), and persisted evidence summaries in SQLite session candidate records.
 
 ## Cancellation/resume model
 

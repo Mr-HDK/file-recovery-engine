@@ -4,7 +4,8 @@ use fr_mft::{
     ATTRIBUTE_TYPE_FILE_NAME,
 };
 use fr_ntfs::{parse_boot_sector, BootSectorParseError, NtfsBootSector};
-use fr_types::{RecoverySourceKind, ScanSessionState};
+use fr_types::{EvidenceSource, RecoverySourceKind, ScanSessionState};
+use fr_usn::UsnRecord;
 use fr_winio::{ReadSession, WinIoError};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -98,9 +99,11 @@ pub struct QuickScanCandidate {
     pub has_compressed_data: bool,
     pub has_sparse_data: bool,
     pub has_encrypted_data: bool,
+    pub usn_reason_mask: Option<u32>,
     pub name: Option<String>,
     pub parent_record_number: Option<u64>,
     pub reconstructed_path: Option<String>,
+    pub evidence_sources: Vec<EvidenceSource>,
 }
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
@@ -426,9 +429,11 @@ fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidat
         has_compressed_data,
         has_sparse_data,
         has_encrypted_data,
+        usn_reason_mask: None,
         name,
         parent_record_number,
         reconstructed_path: None,
+        evidence_sources: vec![EvidenceSource::Mft],
     }
 }
 
@@ -509,6 +514,69 @@ fn reconstruct_paths(candidates: &mut [QuickScanCandidate]) {
         segments.reverse();
         candidate.reconstructed_path = Some(segments.join("\\"));
     }
+}
+
+pub fn apply_usn_evidence(
+    candidates: &mut [QuickScanCandidate],
+    usn_records: &[UsnRecord],
+) -> usize {
+    if candidates.is_empty() || usn_records.is_empty() {
+        return 0;
+    }
+
+    let mut by_name: HashMap<String, u32> = HashMap::new();
+    let mut by_path: HashMap<String, u32> = HashMap::new();
+    for record in usn_records {
+        let normalized_name = normalize_case_key(&record.file_name);
+        let reason_entry = by_name.entry(normalized_name).or_insert(0);
+        *reason_entry |= record.reason;
+    }
+
+    for candidate in candidates.iter() {
+        if let Some(path) = &candidate.reconstructed_path {
+            let normalized_path = normalize_case_key(path);
+            if let Some(reason) = candidate
+                .name
+                .as_ref()
+                .and_then(|name| by_name.get(&normalize_case_key(name)).copied())
+            {
+                by_path.entry(normalized_path).or_insert(reason);
+            }
+        }
+    }
+
+    let mut enriched = 0usize;
+    for candidate in candidates.iter_mut() {
+        let mut matched_reason = 0u32;
+
+        if let Some(path) = &candidate.reconstructed_path {
+            if let Some(reason) = by_path.get(&normalize_case_key(path)).copied() {
+                matched_reason |= reason;
+            }
+        }
+
+        if let Some(name) = &candidate.name {
+            if let Some(reason) = by_name.get(&normalize_case_key(name)).copied() {
+                matched_reason |= reason;
+            }
+        }
+
+        if matched_reason == 0 {
+            continue;
+        }
+
+        if !candidate.evidence_sources.contains(&EvidenceSource::Usn) {
+            candidate.evidence_sources.push(EvidenceSource::Usn);
+        }
+        candidate.usn_reason_mask = Some(candidate.usn_reason_mask.unwrap_or(0) | matched_reason);
+        enriched = enriched.saturating_add(1);
+    }
+
+    enriched
+}
+
+fn normalize_case_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 fn read_from_session(
@@ -668,6 +736,42 @@ mod tests {
         assert_eq!(
             deleted.reconstructed_path.as_deref(),
             Some(r"Docs\report.txt")
+        );
+    }
+
+    #[test]
+    fn apply_usn_evidence_marks_matching_candidate() {
+        let image = build_test_ntfs_image_with_named_records();
+        let mut summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let usn_records = vec![UsnRecord {
+            major_version: 2,
+            minor_version: 0,
+            file_reference_number: 6,
+            parent_file_reference_number: 5,
+            usn: 9,
+            timestamp_100ns: 10,
+            reason: fr_usn::USN_REASON_FILE_DELETE | fr_usn::USN_REASON_CLOSE,
+            source_info: 0,
+            security_id: 0,
+            file_attributes: 0,
+            file_name: "report.txt".to_string(),
+        }];
+
+        let enriched = apply_usn_evidence(&mut summary.candidates, &usn_records);
+        assert_eq!(enriched, 1);
+
+        let deleted = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+        assert!(deleted.evidence_sources.contains(&EvidenceSource::Mft));
+        assert!(deleted.evidence_sources.contains(&EvidenceSource::Usn));
+        assert_eq!(
+            deleted.usn_reason_mask,
+            Some(fr_usn::USN_REASON_FILE_DELETE | fr_usn::USN_REASON_CLOSE)
         );
     }
 

@@ -9,5 +9,6 @@ fr-types = { path = "../fr-types" }
 fr-ntfs = { path = "../fr-ntfs" }
 fr-mft = { path = "../fr-mft" }
 fr-winio = { path = "../fr-winio" }
+fr-usn = { path = "../fr-usn" }
 chrono.workspace = true
 thiserror.workspace = true

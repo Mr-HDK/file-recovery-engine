@@ -20,6 +20,7 @@ Thumbs.db
 # Logs and runtime output
 *.log
 *.jsonl
+/artifacts/
 
 # Local app data snapshots
 /local-runtime/

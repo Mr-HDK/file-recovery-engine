@@ -143,6 +143,7 @@ dependencies = [
  "fr-mft",
  "fr-ntfs",
  "fr-types",
+ "fr-usn",
  "fr-winio",
  "thiserror",
 ]

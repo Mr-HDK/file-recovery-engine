@@ -56,6 +56,7 @@
 - Contract versioning starts at `0.1.0` and will be semver-gated.
 - Read-only source sessions expose open/read/close operations with alignment metadata so UI orchestration can keep chunk reads bounded and cancellation-friendly.
 - Engine now includes NTFS boot sector parsing and MFT record parsing (including resident/non-resident attribute decoding and mapping-pairs data-run parsing) as standalone parser primitives for Phase 2 integration.
+- Engine now includes concrete USN v2/v3 record parsing (`fr-usn`) and evidence-source propagation flags over the FFI quick-scan candidate boundary.
 - Recovery export now includes non-resident NTFS compressed-stream decompression and encrypted-stream raw export with explicit diagnostics/partial signaling through the FFI boundary.
 
 ## Observability

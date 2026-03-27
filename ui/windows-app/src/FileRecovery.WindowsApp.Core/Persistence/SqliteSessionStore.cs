@@ -50,6 +50,7 @@ public sealed class SqliteSessionStore
               name TEXT NULL,
               original_path TEXT NULL,
               parent_record_number INTEGER NULL,
+              evidence_sources TEXT NOT NULL DEFAULT 'MFT',
               confidence_tier TEXT NOT NULL DEFAULT 'Medium',
               confidence_reason TEXT NOT NULL DEFAULT '',
               candidate_status TEXT NOT NULL DEFAULT 'partial',
@@ -108,6 +109,7 @@ public sealed class SqliteSessionStore
                   name,
                   original_path,
                   parent_record_number,
+                  evidence_sources,
                   confidence_tier,
                   confidence_reason,
                   candidate_status,
@@ -131,6 +133,7 @@ public sealed class SqliteSessionStore
                   $name,
                   $original_path,
                   $parent_record_number,
+                  $evidence_sources,
                   $confidence_tier,
                   $confidence_reason,
                   $candidate_status,
@@ -158,6 +161,7 @@ public sealed class SqliteSessionStore
             insert.Parameters.AddWithValue(
                 "$parent_record_number",
                 candidate.ParentRecordNumber.HasValue ? (object)(long)candidate.ParentRecordNumber.Value : DBNull.Value);
+            insert.Parameters.AddWithValue("$evidence_sources", candidate.EvidenceSources);
             insert.Parameters.AddWithValue("$confidence_tier", candidate.ConfidenceTier);
             insert.Parameters.AddWithValue("$confidence_reason", candidate.ConfidenceReason);
             insert.Parameters.AddWithValue("$candidate_status", candidate.CandidateStatus.ToStorageCode());
@@ -345,6 +349,7 @@ public sealed class SqliteSessionStore
               name,
               original_path,
               parent_record_number,
+              evidence_sources,
               confidence_tier,
               confidence_reason,
               candidate_status,
@@ -378,16 +383,17 @@ public sealed class SqliteSessionStore
             var name = reader.IsDBNull(9) ? null : reader.GetString(9);
             var originalPath = reader.IsDBNull(10) ? null : reader.GetString(10);
             ulong? parentRecord = reader.IsDBNull(11) ? null : checked((ulong?)reader.GetInt64(11));
-            var confidenceTier = reader.IsDBNull(12) ? "Medium" : reader.GetString(12);
-            var confidenceReason = reader.IsDBNull(13) ? string.Empty : reader.GetString(13);
+            var evidenceSources = reader.IsDBNull(12) ? "MFT" : reader.GetString(12);
+            var confidenceTier = reader.IsDBNull(13) ? "Medium" : reader.GetString(13);
+            var confidenceReason = reader.IsDBNull(14) ? string.Empty : reader.GetString(14);
             var candidateStatus = RecoveryCandidateStatusExtensions.FromStorageCode(
-                reader.IsDBNull(14) ? null : reader.GetString(14));
-            var recoveryDiagnostics = reader.IsDBNull(15) ? null : reader.GetString(15);
-            var lastRecoveryStatusCode = reader.IsDBNull(16) ? null : (int?)reader.GetInt32(16);
-            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(17) ? null : checked((uint?)reader.GetInt64(17));
-            ulong? lastRecoveryBytes = reader.IsDBNull(18) ? null : checked((ulong?)reader.GetInt64(18));
-            var lastRecoveryPartial = reader.IsDBNull(19) ? null : (bool?)(reader.GetInt32(19) != 0);
-            var lastRecoveryUtc = reader.IsDBNull(20) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(20));
+                reader.IsDBNull(15) ? null : reader.GetString(15));
+            var recoveryDiagnostics = reader.IsDBNull(16) ? null : reader.GetString(16);
+            var lastRecoveryStatusCode = reader.IsDBNull(17) ? null : (int?)reader.GetInt32(17);
+            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(18) ? null : checked((uint?)reader.GetInt64(18));
+            ulong? lastRecoveryBytes = reader.IsDBNull(19) ? null : checked((ulong?)reader.GetInt64(19));
+            var lastRecoveryPartial = reader.IsDBNull(20) ? null : (bool?)(reader.GetInt32(20) != 0);
+            var lastRecoveryUtc = reader.IsDBNull(21) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(21));
 
             rows.Add(new QuickScanCandidateRecord(
                 Ordinal: ordinal,
@@ -402,6 +408,7 @@ public sealed class SqliteSessionStore
                 Name: name,
                 OriginalPath: originalPath,
                 ParentRecordNumber: parentRecord,
+                EvidenceSources: evidenceSources,
                 ConfidenceTier: confidenceTier,
                 ConfidenceReason: confidenceReason,
                 CandidateStatus: candidateStatus,
@@ -573,6 +580,11 @@ public sealed class SqliteSessionStore
             connection,
             "is_encrypted",
             "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "evidence_sources",
+            "TEXT NOT NULL DEFAULT 'MFT'",
             cancellationToken);
         await EnsureQuickScanCandidateColumnAsync(
             connection,

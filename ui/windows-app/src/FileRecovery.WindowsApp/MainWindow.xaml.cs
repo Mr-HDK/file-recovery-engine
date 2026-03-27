@@ -354,6 +354,7 @@ public partial class MainWindow : Window
                         Name: candidate.Name,
                         OriginalPath: candidate.ReconstructedPath,
                         ParentRecordNumber: candidate.ParentRecordNumber,
+                        EvidenceSources: candidate.EvidenceSources,
                         ConfidenceTier: candidate.ConfidenceTier,
                         ConfidenceReason: candidate.ConfidenceReason,
                         CandidateStatus: ComputeCandidateStatus(
@@ -457,6 +458,7 @@ public partial class MainWindow : Window
                 Name: candidate.Name,
                 OriginalPath: candidate.ReconstructedPath,
                 ParentRecordNumber: candidate.ParentRecordNumber,
+                EvidenceSources: candidate.EvidenceSources,
                 ConfidenceTier: candidate.ConfidenceTier,
                 ConfidenceReason: candidate.ConfidenceReason,
                 CandidateStatus: ComputeCandidateStatus(
@@ -493,7 +495,7 @@ public partial class MainWindow : Window
                 Name = candidate.Name ?? "(unknown)",
                 OriginalPath = candidate.OriginalPath ?? "(unresolved)",
                 ParentRecord = candidate.ParentRecordNumber?.ToString() ?? string.Empty,
-                EvidenceSource = "MFT",
+                EvidenceSource = candidate.EvidenceSources,
                 ConfidenceTier = candidate.ConfidenceTier,
                 CandidateStatus = candidate.CandidateStatus,
                 ConfidenceReason = candidate.ConfidenceReason,

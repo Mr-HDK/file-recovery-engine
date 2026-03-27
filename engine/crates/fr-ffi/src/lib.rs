@@ -69,6 +69,11 @@ const CANDIDATE_FLAG_HAS_NAMED_DATA_STREAM: u32 = 0x0040;
 const CANDIDATE_FLAG_COMPRESSED: u32 = 0x0080;
 const CANDIDATE_FLAG_SPARSE: u32 = 0x0100;
 const CANDIDATE_FLAG_ENCRYPTED: u32 = 0x0200;
+const CANDIDATE_FLAG_EVIDENCE_MFT: u32 = 0x1000;
+const CANDIDATE_FLAG_EVIDENCE_DIRECTORY_INDEX: u32 = 0x2000;
+const CANDIDATE_FLAG_EVIDENCE_USN: u32 = 0x4000;
+const CANDIDATE_FLAG_EVIDENCE_VSS: u32 = 0x8000;
+const CANDIDATE_FLAG_EVIDENCE_CARVE: u32 = 0x0001_0000;
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
@@ -746,6 +751,7 @@ struct QuickScanCandidateInternal {
     has_compressed_data: bool,
     has_sparse_data: bool,
     has_encrypted_data: bool,
+    evidence_sources: Vec<EvidenceSource>,
     parent_record_number: Option<u64>,
     name: Option<String>,
     reconstructed_path: Option<String>,
@@ -766,6 +772,7 @@ fn build_internal_candidate_from_quick_scan(
         has_compressed_data: candidate.has_compressed_data,
         has_sparse_data: candidate.has_sparse_data,
         has_encrypted_data: candidate.has_encrypted_data,
+        evidence_sources: candidate.evidence_sources,
         parent_record_number: candidate.parent_record_number,
         name: candidate.name,
         reconstructed_path: candidate.reconstructed_path,
@@ -787,7 +794,7 @@ fn score_internal_candidates(candidates: &mut [QuickScanCandidateInternal]) {
             original_path: candidate.reconstructed_path.clone(),
             recovered_path: None,
             size_bytes: 0,
-            evidence: vec![EvidenceSource::Mft],
+            evidence: candidate.evidence_sources.clone(),
             confidence: ConfidenceTier::Medium,
             partial,
         };
@@ -843,6 +850,15 @@ fn encode_candidate(candidate: QuickScanCandidateInternal) -> FrNtfsQuickScanCan
     }
     if candidate.has_encrypted_data {
         flags |= CANDIDATE_FLAG_ENCRYPTED;
+    }
+    for evidence_source in &candidate.evidence_sources {
+        flags |= match evidence_source {
+            EvidenceSource::Mft => CANDIDATE_FLAG_EVIDENCE_MFT,
+            EvidenceSource::DirectoryIndex => CANDIDATE_FLAG_EVIDENCE_DIRECTORY_INDEX,
+            EvidenceSource::Usn => CANDIDATE_FLAG_EVIDENCE_USN,
+            EvidenceSource::Vss => CANDIDATE_FLAG_EVIDENCE_VSS,
+            EvidenceSource::Carve => CANDIDATE_FLAG_EVIDENCE_CARVE,
+        };
     }
 
     let mut out = FrNtfsQuickScanCandidate {
@@ -1678,6 +1694,7 @@ mod tests {
         assert_eq!(deleted.flags & CANDIDATE_FLAG_DIRECTORY, 0);
         assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_NAME, 0);
         assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_PATH, 0);
+        assert_ne!(deleted.flags & CANDIDATE_FLAG_EVIDENCE_MFT, 0);
         assert_eq!(
             deleted.confidence_tier,
             confidence_tier_code(ConfidenceTier::VeryHigh)
@@ -1688,6 +1705,7 @@ mod tests {
 
         assert_eq!(parent.flags & CANDIDATE_FLAG_DELETED, 0);
         assert_ne!(parent.flags & CANDIDATE_FLAG_DIRECTORY, 0);
+        assert_ne!(parent.flags & CANDIDATE_FLAG_EVIDENCE_MFT, 0);
         assert_eq!(
             parent.confidence_tier,
             confidence_tier_code(ConfidenceTier::VeryHigh)

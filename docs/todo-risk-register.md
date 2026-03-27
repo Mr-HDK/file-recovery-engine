@@ -25,6 +25,8 @@
 17. Added gated Windows host integration test coverage (`HostNtfsStreamRecoveryTests`) that provisions an NTFS VHD fixture and validates compressed+encrypted deleted-file recovery paths through .NET engine probe APIs.
 18. Added `scripts/run-host-ntfs-stream-validation.ps1` for elevated, focused execution of host integration stream-recovery validation.
 19. Added automatic host-validation artifact archiving (`artifacts/host-validation/<timestamp>`) including TRX output and a JSON manifest with environment + git metadata.
+20. Implemented concrete `fr-usn` journal parser support for USN v2/v3 record streams with reason decoding and parser test coverage.
+21. Added `fr-session` USN evidence enrichment hook (`apply_usn_evidence`) and threaded candidate evidence-source propagation through `fr-ffi`, .NET probe mapping, and SQLite candidate persistence.
 
 ## Active risks
 
