@@ -72,6 +72,8 @@ public partial class MainWindow : Window
             : string.Empty;
         public string EvidenceSource { get; init; } = "MFT";
         public string ConfidenceTier { get; init; } = "Medium";
+        public int ConfidenceScore => ComputeConfidenceScore(ConfidenceTier, ConfidenceReason);
+        public string ConfidenceScoreDisplay => ConfidenceScore.ToString(CultureInfo.InvariantCulture);
         public RecoveryCandidateStatus CandidateStatus { get; set; } = RecoveryCandidateStatus.Partial;
         public string CandidateStatusCode => CandidateStatus.ToStorageCode();
         public string ConfidenceReason { get; init; } = string.Empty;
@@ -113,6 +115,29 @@ public partial class MainWindow : Window
                 return string.Empty;
             }
         }
+
+        private static int ComputeConfidenceScore(string tier, string reason)
+        {
+            var reasonMatch = Regex.Match(
+                reason ?? string.Empty,
+                "(?i)\\bscore\\s*(?<score>\\d{1,3})\\b",
+                RegexOptions.CultureInvariant);
+            if (reasonMatch.Success
+                && int.TryParse(reasonMatch.Groups["score"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return Math.Clamp(parsed, 0, 100);
+            }
+
+            return tier.Trim().ToLowerInvariant() switch
+            {
+                "very high" => 92,
+                "high" => 78,
+                "medium" => 60,
+                "low" => 38,
+                "very low" => 20,
+                _ => 50,
+            };
+        }
     }
 
     private sealed record DirectoryRecoverySelection(
@@ -131,7 +156,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
-    private const string UiBuildTag = "phase6-postprocess-20260328-0012";
+    private const string UiBuildTag = "phase7-polish-complete-20260328-0013";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
     private const ulong FullScanCarveMaxBytes = 64UL * 1024UL * 1024UL;
@@ -156,6 +181,12 @@ public partial class MainWindow : Window
     private string _filterStatus = "All";
     private string _filterEvidence = "All";
     private string _filterConfidence = "All";
+    private ulong? _filterMinSizeBytes;
+    private ulong? _filterMaxSizeBytes;
+    private DateTime? _filterModifiedFromUtc;
+    private DateTime? _filterModifiedToUtc;
+    private DateTime? _filterDeletedFromUtc;
+    private DateTime? _filterDeletedToUtc;
     private int _candidateClusterCount;
     private int _candidateDedupedCount;
 
@@ -181,6 +212,7 @@ public partial class MainWindow : Window
         _quickScanCandidatesView.Filter = FilterQuickScanCandidate;
         QuickScanCandidatesDataGrid.ItemsSource = _quickScanCandidatesView;
         InitializeCandidateFilterControls();
+        InitializeSafetyWarningsPage();
         ClearPreviewPanel();
         OperationProgressBar.Value = 0;
         ThroughputStatusTextBlock.Text = "Throughput: -";
@@ -604,6 +636,11 @@ public partial class MainWindow : Window
         summary.Append("Validation completed. ");
         summary.Append(result.IsValid ? "Safe to initialize session." : "Blocked until issues are fixed.");
         AppendSessionMessage(summary.ToString());
+
+        var warningLines = result.Issues
+            .Select(issue => $"{issue.Severity}: {issue.Message}")
+            .ToArray();
+        SafetyWarningsListBox.ItemsSource = BuildSafetyWarnings(warningLines);
     }
 
     private void RenderQuickScanCandidates(EngineNtfsQuickScanCandidatesResult result)
@@ -915,6 +952,30 @@ public partial class MainWindow : Window
         FilterConfidenceComboBox.SelectedIndex = 0;
     }
 
+    private void InitializeSafetyWarningsPage()
+    {
+        SafetyWarningsListBox.ItemsSource = BuildSafetyWarnings(Array.Empty<string>());
+        DiagnosticsPageTextBox.Text = "Diagnostics page initialized." + Environment.NewLine;
+    }
+
+    private static IReadOnlyList<string> BuildSafetyWarnings(IReadOnlyList<string> validationIssues)
+    {
+        var warnings = new List<string>
+        {
+            "Source access remains read-only. No writes are performed to the source device.",
+            "Recovered files are written only to destination folders outside the source volume.",
+            "Do not recover to the same disk/partition to avoid overwrite risk.",
+            "Encrypted/EFS/BitLocker content may require credentials and can produce partial recovery."
+        };
+
+        foreach (var issue in validationIssues)
+        {
+            warnings.Add(issue);
+        }
+
+        return warnings;
+    }
+
     private static string DetermineFileType(QuickScanCandidateRecord candidate)
     {
         if (!string.IsNullOrWhiteSpace(candidate.CarveFormat))
@@ -946,6 +1007,45 @@ public partial class MainWindow : Window
 
         parsed = Math.Clamp(raw, min, max);
         return raw == parsed;
+    }
+
+    private static bool TryParseOptionalUlong(string? value, out ulong? parsed)
+    {
+        parsed = null;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (!ulong.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var numeric))
+        {
+            return false;
+        }
+
+        parsed = numeric;
+        return true;
+    }
+
+    private static DateTime? ToUtcStartOfDay(DateTime? date)
+    {
+        if (!date.HasValue)
+        {
+            return null;
+        }
+
+        var local = DateTime.SpecifyKind(date.Value.Date, DateTimeKind.Local);
+        return local.ToUniversalTime();
+    }
+
+    private static DateTime? ToUtcEndOfDay(DateTime? date)
+    {
+        if (!date.HasValue)
+        {
+            return null;
+        }
+
+        var local = DateTime.SpecifyKind(date.Value.Date.AddDays(1).AddTicks(-1), DateTimeKind.Local);
+        return local.ToUniversalTime();
     }
 
     private int GetQuickScanMaxRecords()
@@ -1064,6 +1164,51 @@ public partial class MainWindow : Window
             && !string.Equals(row.ConfidenceTier, _filterConfidence, StringComparison.OrdinalIgnoreCase))
         {
             return false;
+        }
+
+        var rowSize = row.DataSizeBytes ?? row.CarveLengthBytes ?? 0UL;
+        if (_filterMinSizeBytes.HasValue && rowSize < _filterMinSizeBytes.Value)
+        {
+            return false;
+        }
+
+        if (_filterMaxSizeBytes.HasValue && rowSize > _filterMaxSizeBytes.Value)
+        {
+            return false;
+        }
+
+        var modifiedUtc = TryConvertFileTimeUtc(row.ModifiedFileTimeUtc);
+        if (_filterModifiedFromUtc.HasValue
+            && (!modifiedUtc.HasValue || modifiedUtc.Value < _filterModifiedFromUtc.Value))
+        {
+            return false;
+        }
+
+        if (_filterModifiedToUtc.HasValue
+            && (!modifiedUtc.HasValue || modifiedUtc.Value > _filterModifiedToUtc.Value))
+        {
+            return false;
+        }
+
+        if (_filterDeletedFromUtc.HasValue || _filterDeletedToUtc.HasValue)
+        {
+            if (!row.Deleted)
+            {
+                return false;
+            }
+
+            var deletedProxyUtc = TryConvertFileTimeUtc(row.MftModifiedFileTimeUtc) ?? TryConvertFileTimeUtc(row.ModifiedFileTimeUtc);
+            if (_filterDeletedFromUtc.HasValue
+                && (!deletedProxyUtc.HasValue || deletedProxyUtc.Value < _filterDeletedFromUtc.Value))
+            {
+                return false;
+            }
+
+            if (_filterDeletedToUtc.HasValue
+                && (!deletedProxyUtc.HasValue || deletedProxyUtc.Value > _filterDeletedToUtc.Value))
+            {
+                return false;
+            }
         }
 
         if (string.IsNullOrWhiteSpace(_candidateSearchTerm))
@@ -1536,6 +1681,16 @@ public partial class MainWindow : Window
 
     private void CandidateFilterChanged(object sender, RoutedEventArgs e)
     {
+        ApplyCandidateFilters(logActivity: true);
+    }
+
+    private void CandidateFilterValueChanged(object sender, RoutedEventArgs e)
+    {
+        ApplyCandidateFilters(logActivity: false);
+    }
+
+    private void ApplyCandidateFilters(bool logActivity)
+    {
         _filterDeletedOnly = FilterDeletedCheckBox.IsChecked == true;
         _filterRecoverableOnly = FilterRecoverableCheckBox.IsChecked == true;
         _filterSelectedOnly = FilterSelectedCheckBox.IsChecked == true;
@@ -1543,8 +1698,21 @@ public partial class MainWindow : Window
         _filterStatus = FilterStatusComboBox.SelectedItem?.ToString() ?? "All";
         _filterEvidence = FilterEvidenceComboBox.SelectedItem?.ToString() ?? "All";
         _filterConfidence = FilterConfidenceComboBox.SelectedItem?.ToString() ?? "All";
+        _filterMinSizeBytes = TryParseOptionalUlong(FilterMinSizeBytesTextBox.Text, out var minBytes)
+            ? minBytes
+            : null;
+        _filterMaxSizeBytes = TryParseOptionalUlong(FilterMaxSizeBytesTextBox.Text, out var maxBytes)
+            ? maxBytes
+            : null;
+        _filterModifiedFromUtc = ToUtcStartOfDay(FilterModifiedFromDatePicker.SelectedDate);
+        _filterModifiedToUtc = ToUtcEndOfDay(FilterModifiedToDatePicker.SelectedDate);
+        _filterDeletedFromUtc = ToUtcStartOfDay(FilterDeletedFromDatePicker.SelectedDate);
+        _filterDeletedToUtc = ToUtcEndOfDay(FilterDeletedToDatePicker.SelectedDate);
         RefreshCandidateView();
-        AppendCandidateActivity("Candidate filters updated.");
+        if (logActivity)
+        {
+            AppendCandidateActivity("Candidate filters updated.");
+        }
     }
 
     private void CandidateSearchTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
@@ -1562,6 +1730,12 @@ public partial class MainWindow : Window
         FilterStatusComboBox.SelectedIndex = 0;
         FilterEvidenceComboBox.SelectedIndex = 0;
         FilterConfidenceComboBox.SelectedIndex = 0;
+        FilterMinSizeBytesTextBox.Text = string.Empty;
+        FilterMaxSizeBytesTextBox.Text = string.Empty;
+        FilterModifiedFromDatePicker.SelectedDate = null;
+        FilterModifiedToDatePicker.SelectedDate = null;
+        FilterDeletedFromDatePicker.SelectedDate = null;
+        FilterDeletedToDatePicker.SelectedDate = null;
         CandidateSearchTextBox.Text = string.Empty;
         _filterDeletedOnly = false;
         _filterRecoverableOnly = false;
@@ -1570,6 +1744,12 @@ public partial class MainWindow : Window
         _filterStatus = "All";
         _filterEvidence = "All";
         _filterConfidence = "All";
+        _filterMinSizeBytes = null;
+        _filterMaxSizeBytes = null;
+        _filterModifiedFromUtc = null;
+        _filterModifiedToUtc = null;
+        _filterDeletedFromUtc = null;
+        _filterDeletedToUtc = null;
         _candidateSearchTerm = string.Empty;
         RefreshCandidateView();
         AppendCandidateActivity("Candidate view reset.");
@@ -1637,6 +1817,31 @@ public partial class MainWindow : Window
         AppendCandidateActivity("Selection cleared.");
     }
 
+    private bool ShowOperationWizard(
+        string title,
+        IReadOnlyList<string> checklistSteps,
+        string summary)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(summary);
+        builder.AppendLine();
+        builder.AppendLine("Checklist:");
+        for (var index = 0; index < checklistSteps.Count; index++)
+        {
+            builder.AppendLine($"{index + 1}. {checklistSteps[index]}");
+        }
+        builder.AppendLine();
+        builder.AppendLine("Continue?");
+
+        var result = System.Windows.MessageBox.Show(
+            builder.ToString(),
+            title,
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No);
+        return result == MessageBoxResult.Yes;
+    }
+
     private async void ExportSelectedCandidatesButton_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -1661,6 +1866,21 @@ public partial class MainWindow : Window
             {
                 AppendSessionMessage("Export blocked: destination folder does not exist.");
                 AppendCandidateActivity("Export blocked: destination folder does not exist.");
+                return;
+            }
+
+            if (!ShowOperationWizard(
+                    "Export Wizard",
+                    new[]
+                    {
+                        "Review selected candidates and active filters.",
+                        "Confirm destination is on a separate volume from source.",
+                        "Generate JSON and CSV export manifests for this session."
+                    },
+                    $"Export {selected.Length} selected candidate(s) to {destination}."))
+            {
+                AppendSessionMessage("Export canceled in wizard confirmation.");
+                AppendCandidateActivity("Export canceled in wizard.");
                 return;
             }
 
@@ -1703,6 +1923,7 @@ public partial class MainWindow : Window
                     accessed_filetime_utc = candidate.AccessedFileTimeUtc,
                     evidence_source = candidate.EvidenceSource,
                     confidence_tier = candidate.ConfidenceTier,
+                    confidence_score = candidate.ConfidenceScore,
                     confidence_reason = candidate.ConfidenceReason,
                     status = candidate.CandidateStatus.ToStorageCode(),
                     recovery_status_code = candidate.LastRecoveryStatusCode,
@@ -1796,6 +2017,21 @@ public partial class MainWindow : Window
             {
                 AppendSessionMessage("Recovery blocked: destination folder does not exist.");
                 AppendCandidateActivity("Recovery blocked: destination folder does not exist.");
+                return;
+            }
+
+            if (!ShowOperationWizard(
+                    "Recovery Wizard",
+                    new[]
+                    {
+                        "Verify destination is not the same source disk/volume.",
+                        "Review recoverable selection and candidate status.",
+                        "Proceed with read-only source recovery and write results to destination."
+                    },
+                    $"Recover {selected.Length} selected candidate(s) to {destination}."))
+            {
+                AppendSessionMessage("Recovery canceled in wizard confirmation.");
+                AppendCandidateActivity("Recovery canceled in wizard.");
                 return;
             }
 
@@ -2188,8 +2424,8 @@ public partial class MainWindow : Window
         builder.AppendLine();
         builder.AppendLine("## Candidate Details");
         builder.AppendLine();
-        builder.AppendLine("| Cluster | Dedupe | Evidence | Record | Name | Type | Original Path | Recovered Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
-        builder.AppendLine("|---|---:|---|---|---|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
+        builder.AppendLine("| Cluster | Dedupe | Evidence | Record | Name | Type | Original Path | Recovered Path | Data Size | Modified UTC | Attr | Confidence | Score | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
+        builder.AppendLine("|---|---:|---|---|---|---|---|---|---:|---|---|---|---:|---|---:|---:|---:|---|---|");
 
         foreach (var candidate in selected)
         {
@@ -2215,7 +2451,7 @@ public partial class MainWindow : Window
                 : "-";
 
             builder.AppendLine(
-                $"| {EscapeMarkdownCell(candidate.ClusterDisplay)} | {dedupe} | {EscapeMarkdownCell(candidate.EvidenceSource)} | {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.FileType)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {EscapeMarkdownCell(candidate.RecoveredPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
+                $"| {EscapeMarkdownCell(candidate.ClusterDisplay)} | {dedupe} | {EscapeMarkdownCell(candidate.EvidenceSource)} | {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.FileType)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {EscapeMarkdownCell(candidate.RecoveredPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.ConfidenceTier)} | {candidate.ConfidenceScoreDisplay} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
         }
 
         return builder.ToString();
@@ -2225,7 +2461,7 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "cluster_id,cluster_size,deduplicated_count,record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,file_type,original_path,recovered_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "cluster_id,cluster_size,deduplicated_count,record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,file_type,original_path,recovered_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,confidence_score,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
@@ -2260,6 +2496,7 @@ public partial class MainWindow : Window
                 EscapeCsv(candidate.CarveFormat),
                 EscapeCsv(candidate.EvidenceSource),
                 EscapeCsv(candidate.ConfidenceTier),
+                EscapeCsv(candidate.ConfidenceScoreDisplay),
                 EscapeCsv(candidate.CandidateStatus.ToStorageCode()),
                 EscapeCsv(candidate.LastRecoveryStatusCode?.ToString(CultureInfo.InvariantCulture)),
                 EscapeCsv(candidate.LastRecoveryDiagnosticsFlags?.ToString(CultureInfo.InvariantCulture)),
@@ -3096,8 +3333,11 @@ public partial class MainWindow : Window
 
     private void AppendSessionMessage(string message)
     {
-        SessionOutputTextBox.AppendText($"[{DateTimeOffset.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+        var line = $"[{DateTimeOffset.Now:HH:mm:ss}] {message}{Environment.NewLine}";
+        SessionOutputTextBox.AppendText(line);
         SessionOutputTextBox.ScrollToEnd();
+        DiagnosticsPageTextBox.AppendText(line);
+        DiagnosticsPageTextBox.ScrollToEnd();
     }
 
     private void SessionOutputTextBox_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)

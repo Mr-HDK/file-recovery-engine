@@ -172,6 +172,8 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="260"/>
                     <RowDefinition Height="200"/>
+                    <RowDefinition Height="140"/>
+                    <RowDefinition Height="120"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
@@ -249,7 +251,19 @@
                             <TextBlock Text="Evidence:" VerticalAlignment="Center" Margin="0,0,6,0"/>
                             <ComboBox x:Name="FilterEvidenceComboBox" Width="130" Margin="0,0,10,0" SelectionChanged="CandidateFilterChanged"/>
                             <TextBlock Text="Confidence:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <ComboBox x:Name="FilterConfidenceComboBox" Width="130" SelectionChanged="CandidateFilterChanged"/>
+                            <ComboBox x:Name="FilterConfidenceComboBox" Width="130" Margin="0,0,10,0" SelectionChanged="CandidateFilterChanged"/>
+                            <TextBlock Text="Size Min:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBox x:Name="FilterMinSizeBytesTextBox" Width="90" Margin="0,0,10,0" TextChanged="CandidateFilterValueChanged"/>
+                            <TextBlock Text="Size Max:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBox x:Name="FilterMaxSizeBytesTextBox" Width="90" Margin="0,0,10,0" TextChanged="CandidateFilterValueChanged"/>
+                            <TextBlock Text="Modified From:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <DatePicker x:Name="FilterModifiedFromDatePicker" Width="128" Margin="0,0,10,0" SelectedDateChanged="CandidateFilterValueChanged"/>
+                            <TextBlock Text="Modified To:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <DatePicker x:Name="FilterModifiedToDatePicker" Width="128" Margin="0,0,10,0" SelectedDateChanged="CandidateFilterValueChanged"/>
+                            <TextBlock Text="Deleted From (MFT):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <DatePicker x:Name="FilterDeletedFromDatePicker" Width="138" Margin="0,0,10,0" SelectedDateChanged="CandidateFilterValueChanged"/>
+                            <TextBlock Text="Deleted To (MFT):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <DatePicker x:Name="FilterDeletedToDatePicker" Width="138" SelectedDateChanged="CandidateFilterValueChanged"/>
                         </WrapPanel>
                     </Grid>
                 </Border>
@@ -322,6 +336,7 @@
                         <DataGridTextColumn Header="Deduped" Binding="{Binding DedupDisplay}" Width="72" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Evidence" Binding="{Binding EvidenceSource}" Width="90" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceTier}" Width="90" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Confidence Score" Binding="{Binding ConfidenceScoreDisplay}" Width="110" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence Reason" Binding="{Binding ConfidenceReason}" Width="220" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Status" Binding="{Binding CandidateStatusCode}" Width="110" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Recover Code" Binding="{Binding RecoveryStatusCodeDisplay}" Width="95" IsReadOnly="True"/>
@@ -398,6 +413,18 @@
                                  FontSize="12"/>
                     </Grid>
                 </Expander>
+
+                <GroupBox Grid.Row="9" Header="Diagnostics Page" Margin="0,8,0,0" Padding="8">
+                    <TextBox x:Name="DiagnosticsPageTextBox"
+                             IsReadOnly="True"
+                             FontFamily="Consolas"
+                             TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto"/>
+                </GroupBox>
+
+                <GroupBox Grid.Row="10" Header="Safety Warnings Page" Margin="0,8,0,0" Padding="8">
+                    <ListBox x:Name="SafetyWarningsListBox"/>
+                </GroupBox>
             </Grid>
         </GroupBox>
 
