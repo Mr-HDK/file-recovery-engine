@@ -29,5 +29,6 @@ public sealed record QuickScanCandidateRecord(
     ulong? CreatedFileTimeUtc = null,
     ulong? ModifiedFileTimeUtc = null,
     ulong? MftModifiedFileTimeUtc = null,
-    ulong? AccessedFileTimeUtc = null
+    ulong? AccessedFileTimeUtc = null,
+    bool IsGhostRecord = false
 );

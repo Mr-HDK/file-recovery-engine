@@ -62,6 +62,8 @@ public sealed record EngineNtfsQuickScanResult(
     uint DirectoryRecords,
     uint NamedRecords,
     uint RecordsWithNonResidentData,
+    uint UsnEnrichedRecords,
+    uint UsnGhostRecords,
     string Message,
     int StatusCode
 );
@@ -70,6 +72,7 @@ public sealed record EngineNtfsQuickScanCandidate(
     uint RecordNumber,
     bool InUse,
     bool Deleted,
+    bool IsGhostRecord,
     bool IsDirectory,
     bool HasNonResidentData,
     bool HasNamedDataStreams,
@@ -332,6 +335,8 @@ public static class NativeEngineProbe
                     nativeSummary.DirectoryRecords,
                     nativeSummary.NamedRecords,
                     nativeSummary.RecordsWithNonResidentData,
+                    nativeSummary.UsnEnrichedRecords,
+                    nativeSummary.UsnGhostRecords,
                     "NTFS metadata quick scan completed.",
                     status);
             }
@@ -347,16 +352,18 @@ public static class NativeEngineProbe
                 0,
                 0,
                 0,
+                0,
+                0,
                 MapNtfsStatusMessage(status),
                 status);
         }
         catch (DllNotFoundException)
         {
-            return new EngineNtfsQuickScanResult(false, false, 0, 0, 0, 0, 0, 0, 0, 0, "Engine unavailable", -100);
+            return new EngineNtfsQuickScanResult(false, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "Engine unavailable", -100);
         }
         catch (EntryPointNotFoundException)
         {
-            return new EngineNtfsQuickScanResult(false, false, 0, 0, 0, 0, 0, 0, 0, 0, "Engine ABI mismatch", -101);
+            return new EngineNtfsQuickScanResult(false, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "Engine ABI mismatch", -101);
         }
     }
 
@@ -364,6 +371,32 @@ public static class NativeEngineProbe
         ulong sessionId,
         uint maxRecords,
         int candidateCapacity = 128)
+    {
+        return GetNtfsQuickScanCandidatesFromSessionCore(
+            sessionId,
+            maxRecords,
+            candidateCapacity,
+            usnJournalBytes: null);
+    }
+
+    public static EngineNtfsQuickScanCandidatesResult GetNtfsQuickScanCandidatesFromSessionWithUsn(
+        ulong sessionId,
+        uint maxRecords,
+        byte[] usnJournalBytes,
+        int candidateCapacity = 128)
+    {
+        return GetNtfsQuickScanCandidatesFromSessionCore(
+            sessionId,
+            maxRecords,
+            candidateCapacity,
+            usnJournalBytes);
+    }
+
+    private static EngineNtfsQuickScanCandidatesResult GetNtfsQuickScanCandidatesFromSessionCore(
+        ulong sessionId,
+        uint maxRecords,
+        int candidateCapacity,
+        byte[]? usnJournalBytes)
     {
         if (candidateCapacity < 0)
         {
@@ -388,12 +421,28 @@ public static class NativeEngineProbe
                 }
             }
 
-            var status = fr_get_ntfs_quick_scan_candidates_from_session(
-                sessionId,
-                maxRecords,
-                buffer,
-                (uint)buffer.Length,
-                out var written);
+            int status;
+            uint written;
+            if (usnJournalBytes is { Length: > 0 })
+            {
+                status = fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
+                    sessionId,
+                    maxRecords,
+                    buffer,
+                    (uint)buffer.Length,
+                    out written,
+                    usnJournalBytes,
+                    (uint)usnJournalBytes.Length);
+            }
+            else
+            {
+                status = fr_get_ntfs_quick_scan_candidates_from_session(
+                    sessionId,
+                    maxRecords,
+                    buffer,
+                    (uint)buffer.Length,
+                    out written);
+            }
 
             if (status != 0)
             {
@@ -420,6 +469,7 @@ public static class NativeEngineProbe
                     candidate.RecordNumber,
                     (flags & CandidateFlagInUse) != 0,
                     (flags & CandidateFlagDeleted) != 0,
+                    (flags & CandidateFlagGhostRecord) != 0,
                     (flags & CandidateFlagDirectory) != 0,
                     (flags & CandidateFlagNonResidentData) != 0,
                     (flags & CandidateFlagHasNamedDataStream) != 0,
@@ -593,6 +643,9 @@ public static class NativeEngineProbe
             14 => "Windows I/O error.",
             15 => "Invalid read offset.",
             16 => "Misaligned read parameters.",
+            51 => "USN journal payload is truncated.",
+            52 => "USN journal payload is malformed.",
+            53 => "USN journal version is unsupported.",
             _ => "Unknown engine response.",
         };
     }
@@ -795,6 +848,7 @@ public static class NativeEngineProbe
     private const uint CandidateFlagEvidenceVss = 0x8000;
     private const uint CandidateFlagEvidenceCarve = 0x0001_0000;
     private const uint CandidateFlagHasFileMetadata = 0x0002_0000;
+    private const uint CandidateFlagGhostRecord = 0x0004_0000;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
     private const uint RecoveryDiagCompressedAttribute = 0x0004;
@@ -832,6 +886,8 @@ public static class NativeEngineProbe
         public uint DirectoryRecords;
         public uint NamedRecords;
         public uint RecordsWithNonResidentData;
+        public uint UsnEnrichedRecords;
+        public uint UsnGhostRecords;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -911,6 +967,16 @@ public static class NativeEngineProbe
         [Out] NativeNtfsQuickScanCandidate[] candidates,
         uint candidateCapacity,
         out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
+        ulong sessionId,
+        uint maxRecords,
+        [Out] NativeNtfsQuickScanCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written,
+        [In] byte[] usnJournalBytes,
+        uint usnJournalLength);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_recover_ntfs_candidate_to_file(

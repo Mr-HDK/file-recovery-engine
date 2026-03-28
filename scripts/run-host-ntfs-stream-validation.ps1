@@ -20,6 +20,47 @@ if (-not $isAdmin) {
   throw "Run this script from an elevated Administrator PowerShell."
 }
 
+function Resolve-ToolPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  $command = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($command) {
+    return $command.Source
+  }
+
+  $fallback = Join-Path $env:USERPROFILE ".cargo\bin\$Name.exe"
+  if (Test-Path $fallback) {
+    return $fallback
+  }
+
+  return $null
+}
+
+function Sync-EngineRuntimeDll {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SourceDll,
+    [Parameter(Mandatory = $true)]
+    [string[]]$DestinationPaths
+  )
+
+  if (-not (Test-Path $SourceDll)) {
+    throw "Engine DLL not found at $SourceDll"
+  }
+
+  foreach ($destination in $DestinationPaths) {
+    $destinationDir = Split-Path -Parent $destination
+    if (-not (Test-Path $destinationDir)) {
+      New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+    }
+
+    Copy-Item $SourceDll $destination -Force
+  }
+}
+
 $previous = [Environment]::GetEnvironmentVariable("FR_RUN_HOST_INTEGRATION", "Process")
 [Environment]::SetEnvironmentVariable("FR_RUN_HOST_INTEGRATION", "1", "Process")
 
@@ -36,6 +77,39 @@ $validationError = $null
 try {
   Push-Location "$PSScriptRoot\.."
   try {
+    $repoRoot = (Get-Location).Path
+    $engineReleaseDll = Join-Path $repoRoot "engine\target\release\fr_ffi.dll"
+    $engineDestinations = @(
+      (Join-Path $repoRoot "ui\windows-app\tests\FileRecovery.WindowsApp.Tests\bin\Release\net8.0-windows\file_recovery_engine.dll"),
+      (Join-Path $repoRoot "ui\windows-app\src\FileRecovery.WindowsApp\bin\Release\net8.0-windows\file_recovery_engine.dll"),
+      (Join-Path $repoRoot "ui\windows-app\src\FileRecovery.WindowsApp.Core\bin\Release\net8.0-windows\file_recovery_engine.dll")
+    )
+
+    if (-not $NoBuild) {
+      $cargoPath = Resolve-ToolPath -Name "cargo"
+      if (-not $cargoPath) {
+        throw "cargo not found. Install Rust toolchain before running host validation."
+      }
+
+      Push-Location (Join-Path $repoRoot "engine")
+      try {
+        & $cargoPath build -p fr-ffi --release
+        if ($LASTEXITCODE -ne 0) {
+          throw "cargo build -p fr-ffi --release failed with exit code $LASTEXITCODE."
+        }
+      }
+      finally {
+        Pop-Location
+      }
+
+      & dotnet build "ui/windows-app/FileRecovery.WindowsApp.sln" -c Release
+      if ($LASTEXITCODE -ne 0) {
+        throw "Release build failed with exit code $LASTEXITCODE."
+      }
+    }
+
+    Sync-EngineRuntimeDll -SourceDll $engineReleaseDll -DestinationPaths $engineDestinations
+
     if ($archiveEnabled) {
       New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
     }
@@ -51,9 +125,7 @@ try {
       "-c", "Release",
       "--filter", "Category=HostIntegration"
     )
-    if ($NoBuild) {
-      $args += "--no-build"
-    }
+    $args += "--no-build"
     if ($archiveEnabled) {
       $args += "--logger"
       $args += "trx;LogFileName=$trxFileName"

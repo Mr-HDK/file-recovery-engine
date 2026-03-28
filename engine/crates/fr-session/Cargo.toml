@@ -10,5 +10,6 @@ fr-ntfs = { path = "../fr-ntfs" }
 fr-mft = { path = "../fr-mft" }
 fr-winio = { path = "../fr-winio" }
 fr-usn = { path = "../fr-usn" }
+fr-logfile = { path = "../fr-logfile" }
 chrono.workspace = true
 thiserror.workspace = true

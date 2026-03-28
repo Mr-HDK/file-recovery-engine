@@ -64,6 +64,7 @@ public sealed class SqliteSessionStoreTests
                 Ordinal: 1,
                 RecordNumber: 5,
                 Deleted: false,
+                IsGhostRecord: true,
                 Directory: true,
                 NonResidentData: false,
                 HasNamedDataStreams: false,
@@ -103,6 +104,7 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(RecoveryCandidateStatus.Full, persistedCandidates[0].CandidateStatus);
         Assert.True(persistedCandidates[1].IsSparse);
         Assert.True(persistedCandidates[1].IsEncrypted);
+        Assert.True(persistedCandidates[1].IsGhostRecord);
         Assert.Equal(RecoveryCandidateStatus.Invalid, persistedCandidates[1].CandidateStatus);
         Assert.Null(persistedCandidates[0].RecoveryDiagnostics);
         Assert.Null(persistedCandidates[0].LastRecoveryStatusCode);

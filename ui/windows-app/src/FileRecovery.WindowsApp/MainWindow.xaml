@@ -244,6 +244,7 @@
                         <DataGridCheckBoxColumn Header="Select" Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="60"/>
                         <DataGridTextColumn Header="Record" Binding="{Binding RecordNumber}" Width="70" IsReadOnly="True"/>
                         <DataGridCheckBoxColumn Header="Deleted" Binding="{Binding Deleted}" Width="70" IsReadOnly="True"/>
+                        <DataGridCheckBoxColumn Header="Ghost" Binding="{Binding IsGhostRecord}" Width="65" IsReadOnly="True"/>
                         <DataGridCheckBoxColumn Header="Directory" Binding="{Binding Directory}" Width="80" IsReadOnly="True"/>
                         <DataGridCheckBoxColumn Header="NonResidentData" Binding="{Binding NonResidentData}" Width="120" IsReadOnly="True"/>
                         <DataGridCheckBoxColumn Header="ADS" Binding="{Binding HasNamedDataStreams}" Width="55" IsReadOnly="True"/>

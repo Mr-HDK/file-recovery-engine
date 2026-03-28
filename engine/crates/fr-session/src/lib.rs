@@ -1,11 +1,16 @@
 use chrono::{DateTime, Utc};
+use fr_logfile::{LogfileCorrelationHint, LogfileCorrelationInput, LogfileCorrelator};
 use fr_mft::{
     parse_mft_record, AttributeForm, AttributeRecord, MftRecord, ATTRIBUTE_TYPE_DATA,
     ATTRIBUTE_TYPE_FILE_NAME,
 };
 use fr_ntfs::{parse_boot_sector, BootSectorParseError, NtfsBootSector};
 use fr_types::{EvidenceSource, RecoverySourceKind, ScanSessionState};
-use fr_usn::{UsnRecord, USN_REASON_FILE_CREATE, USN_REASON_RENAME_NEW_NAME};
+use fr_usn::{
+    parse_usn_records, UsnParseError, UsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
+    USN_REASON_NAMED_DATA_EXTEND, USN_REASON_NAMED_DATA_OVERWRITE, USN_REASON_NAMED_DATA_TRUNCATION,
+    USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
+};
 use fr_winio::{ReadSession, WinIoError};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -91,6 +96,7 @@ pub struct QuickScanRecordError {
 pub struct QuickScanCandidate {
     pub record_index: usize,
     pub record_number: u32,
+    pub is_ghost_record: bool,
     pub in_use: bool,
     pub deleted: bool,
     pub is_directory: bool,
@@ -116,6 +122,11 @@ pub struct QuickScanCandidate {
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
 const NTFS_ATTRIBUTE_FLAG_SPARSE: u16 = 0x8000;
+const NTFS_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x0000_0800;
+const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x0000_0200;
+const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x0000_4000;
 
 #[derive(Debug, Clone)]
 pub struct QuickScanSummary {
@@ -128,8 +139,16 @@ pub struct QuickScanSummary {
     pub directory_records: usize,
     pub named_records: usize,
     pub records_with_non_resident_data: usize,
+    pub usn_enriched_records: usize,
+    pub usn_ghost_records: usize,
     pub candidates: Vec<QuickScanCandidate>,
     pub record_errors: Vec<QuickScanRecordError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsnEnrichmentStats {
+    pub matched_existing: usize,
+    pub ghost_added: usize,
 }
 
 #[derive(Debug, Error)]
@@ -254,6 +273,8 @@ pub fn quick_scan_ntfs_metadata(
         directory_records,
         named_records,
         records_with_non_resident_data,
+        usn_enriched_records: 0,
+        usn_ghost_records: 0,
         candidates,
         record_errors,
     })
@@ -376,9 +397,31 @@ pub fn quick_scan_ntfs_from_read_session(
         directory_records,
         named_records,
         records_with_non_resident_data,
+        usn_enriched_records: 0,
+        usn_ghost_records: 0,
         candidates,
         record_errors,
     })
+}
+
+pub fn enrich_summary_with_usn_records(
+    summary: &mut QuickScanSummary,
+    usn_records: &[UsnRecord],
+) -> UsnEnrichmentStats {
+    let stats = enrich_candidates_with_usn_records(&mut summary.candidates, usn_records);
+    summary.usn_enriched_records = summary.usn_enriched_records.saturating_add(stats.matched_existing);
+    summary.usn_ghost_records = summary.usn_ghost_records.saturating_add(stats.ghost_added);
+    stats
+}
+
+pub fn enrich_summary_with_usn_journal_bytes(
+    summary: &mut QuickScanSummary,
+    usn_journal_bytes: &[u8],
+) -> Result<UsnEnrichmentStats, UsnParseError> {
+    let stats = enrich_candidates_with_usn_journal_bytes(&mut summary.candidates, usn_journal_bytes)?;
+    summary.usn_enriched_records = summary.usn_enriched_records.saturating_add(stats.matched_existing);
+    summary.usn_ghost_records = summary.usn_ghost_records.saturating_add(stats.ghost_added);
+    Ok(stats)
 }
 
 fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidate {
@@ -442,6 +485,7 @@ fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidat
     QuickScanCandidate {
         record_index,
         record_number: record.header.record_number,
+        is_ghost_record: false,
         in_use: record.header.in_use(),
         deleted: !record.header.in_use(),
         is_directory: record.header.is_directory(),
@@ -574,25 +618,152 @@ fn reconstruct_paths(candidates: &mut [QuickScanCandidate]) {
     }
 }
 
-pub fn apply_usn_evidence(
-    candidates: &mut [QuickScanCandidate],
+#[derive(Debug, Clone)]
+struct UsnAggregate {
+    reason_mask: u32,
+    latest_usn: i64,
+    latest_reason: u32,
+    latest_name: String,
+    latest_parent_record: u64,
+    latest_file_attributes: u32,
+    latest_timestamp_100ns: i64,
+}
+
+pub fn enrich_candidates_with_usn_journal_bytes(
+    candidates: &mut Vec<QuickScanCandidate>,
+    usn_journal_bytes: &[u8],
+) -> Result<UsnEnrichmentStats, UsnParseError> {
+    let records = parse_usn_records(usn_journal_bytes)?;
+    Ok(enrich_candidates_with_usn_records(candidates, &records))
+}
+
+pub fn enrich_candidates_with_usn_records(
+    candidates: &mut Vec<QuickScanCandidate>,
     usn_records: &[UsnRecord],
+) -> UsnEnrichmentStats {
+    if usn_records.is_empty() {
+        return UsnEnrichmentStats {
+            matched_existing: 0,
+            ghost_added: 0,
+        };
+    }
+
+    let (by_record_number, by_name_parent, by_path) = build_usn_indexes(candidates, usn_records);
+    let matched_existing = apply_usn_matches_to_existing_candidates(
+        candidates.as_mut_slice(),
+        &by_record_number,
+        &by_name_parent,
+        &by_path,
+    );
+    let ghost_added = append_usn_ghost_candidates(candidates, &by_record_number);
+
+    if ghost_added > 0 {
+        reconstruct_paths(candidates.as_mut_slice());
+    }
+
+    UsnEnrichmentStats {
+        matched_existing,
+        ghost_added,
+    }
+}
+
+pub fn apply_usn_evidence(candidates: &mut [QuickScanCandidate], usn_records: &[UsnRecord]) -> usize {
+    let mut owned = candidates.to_vec();
+    let stats = enrich_candidates_with_usn_records(&mut owned, usn_records);
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        if let Some(updated) = owned.get(index) {
+            *candidate = updated.clone();
+        }
+    }
+    stats.matched_existing
+}
+
+pub fn apply_logfile_correlation_hints(
+    candidates: &mut [QuickScanCandidate],
+    hints: &[LogfileCorrelationHint],
 ) -> usize {
-    if candidates.is_empty() || usn_records.is_empty() {
+    if candidates.is_empty() || hints.is_empty() {
         return 0;
     }
 
-    const NTFS_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
-    #[derive(Debug, Clone)]
-    struct UsnAggregate {
-        reason_mask: u32,
-        latest_usn: i64,
-        latest_reason: u32,
-        latest_name: String,
-        latest_parent_record: u64,
+    let mut by_record = HashMap::new();
+    for hint in hints {
+        by_record.insert(hint.record_number, hint);
     }
 
+    let mut changed = 0usize;
+    let mut path_dirty = false;
+    for candidate in candidates.iter_mut() {
+        let Some(hint) = by_record.get(&candidate.record_number) else {
+            continue;
+        };
+
+        if let Some(name) = &hint.inferred_name {
+            if candidate.name.as_ref() != Some(name) {
+                candidate.name = Some(name.clone());
+                changed = changed.saturating_add(1);
+                path_dirty = true;
+            }
+        }
+
+        if let Some(parent_record) = hint.inferred_parent_record_number {
+            if candidate.parent_record_number != Some(parent_record) {
+                candidate.parent_record_number = Some(parent_record);
+                changed = changed.saturating_add(1);
+                path_dirty = true;
+            }
+        }
+
+        if let Some(path) = &hint.inferred_reconstructed_path {
+            if candidate.reconstructed_path.as_ref() != Some(path) {
+                candidate.reconstructed_path = Some(path.clone());
+                changed = changed.saturating_add(1);
+            }
+        }
+
+        if !candidate.evidence_sources.contains(&EvidenceSource::DirectoryIndex) {
+            candidate.evidence_sources.push(EvidenceSource::DirectoryIndex);
+        }
+    }
+
+    if path_dirty {
+        reconstruct_paths(candidates);
+    }
+
+    changed
+}
+
+pub fn collect_logfile_correlation_inputs(
+    candidates: &[QuickScanCandidate],
+) -> Vec<LogfileCorrelationInput> {
+    candidates
+        .iter()
+        .map(|candidate| LogfileCorrelationInput {
+            record_number: candidate.record_number,
+            parent_record_number: candidate.parent_record_number,
+            name: candidate.name.clone(),
+            reconstructed_path: candidate.reconstructed_path.clone(),
+        })
+        .collect()
+}
+
+pub fn apply_logfile_correlation(
+    candidates: &mut [QuickScanCandidate],
+    correlator: &dyn LogfileCorrelator,
+) -> usize {
+    let inputs = collect_logfile_correlation_inputs(candidates);
+    let hints = correlator.correlate(&inputs);
+    apply_logfile_correlation_hints(candidates, &hints)
+}
+
+fn build_usn_indexes(
+    candidates: &[QuickScanCandidate],
+    usn_records: &[UsnRecord],
+) -> (
+    HashMap<u64, UsnAggregate>,
+    HashMap<(String, u64), u32>,
+    HashMap<String, u32>,
+) {
     let mut by_record_number: HashMap<u64, UsnAggregate> = HashMap::new();
     let mut by_name_parent: HashMap<(String, u64), u32> = HashMap::new();
     let mut by_path: HashMap<String, u32> = HashMap::new();
@@ -611,6 +782,8 @@ pub fn apply_usn_evidence(
                     aggregate.latest_reason = record.reason;
                     aggregate.latest_name = record.file_name.clone();
                     aggregate.latest_parent_record = parent_record;
+                    aggregate.latest_file_attributes = record.file_attributes;
+                    aggregate.latest_timestamp_100ns = record.timestamp_100ns;
                 }
             })
             .or_insert_with(|| UsnAggregate {
@@ -619,6 +792,8 @@ pub fn apply_usn_evidence(
                 latest_reason: record.reason,
                 latest_name: record.file_name.clone(),
                 latest_parent_record: parent_record,
+                latest_file_attributes: record.file_attributes,
+                latest_timestamp_100ns: record.timestamp_100ns,
             });
 
         let name_parent_entry = by_name_parent
@@ -627,7 +802,7 @@ pub fn apply_usn_evidence(
         *name_parent_entry |= record.reason;
     }
 
-    for candidate in candidates.iter() {
+    for candidate in candidates {
         if let Some(path) = &candidate.reconstructed_path {
             let normalized_path = normalize_case_key(path);
             if let Some(reason) = by_record_number
@@ -639,8 +814,18 @@ pub fn apply_usn_evidence(
         }
     }
 
+    (by_record_number, by_name_parent, by_path)
+}
+
+fn apply_usn_matches_to_existing_candidates(
+    candidates: &mut [QuickScanCandidate],
+    by_record_number: &HashMap<u64, UsnAggregate>,
+    by_name_parent: &HashMap<(String, u64), u32>,
+    by_path: &HashMap<String, u32>,
+) -> usize {
     let mut enriched = 0usize;
     let mut path_reconstruction_dirty = false;
+
     for candidate in candidates.iter_mut() {
         let mut matched_reason = 0u32;
         let record_number = candidate.record_number as u64;
@@ -699,6 +884,80 @@ pub fn apply_usn_evidence(
     }
 
     enriched
+}
+
+fn append_usn_ghost_candidates(
+    candidates: &mut Vec<QuickScanCandidate>,
+    by_record_number: &HashMap<u64, UsnAggregate>,
+) -> usize {
+    let existing: HashSet<u64> = candidates
+        .iter()
+        .map(|candidate| candidate.record_number as u64)
+        .collect();
+
+    let mut ghosts_added = 0usize;
+    for (record_number, aggregate) in by_record_number {
+        if existing.contains(record_number) {
+            continue;
+        }
+
+        if *record_number > u32::MAX as u64 {
+            continue;
+        }
+
+        if !should_surface_ghost_candidate(aggregate.reason_mask) {
+            continue;
+        }
+
+        let timestamp = if aggregate.latest_timestamp_100ns > 0 {
+            Some(aggregate.latest_timestamp_100ns as u64)
+        } else {
+            None
+        };
+
+        candidates.push(QuickScanCandidate {
+            record_index: usize::MAX,
+            record_number: *record_number as u32,
+            is_ghost_record: true,
+            in_use: false,
+            deleted: true,
+            is_directory: aggregate.latest_file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            has_non_resident_data: false,
+            has_named_data_streams: aggregate.reason_mask
+                & (USN_REASON_NAMED_DATA_OVERWRITE
+                    | USN_REASON_NAMED_DATA_EXTEND
+                    | USN_REASON_NAMED_DATA_TRUNCATION)
+                != 0,
+            has_compressed_data: aggregate.latest_file_attributes & FILE_ATTRIBUTE_COMPRESSED != 0,
+            has_sparse_data: aggregate.latest_file_attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
+            has_encrypted_data: aggregate.latest_file_attributes & FILE_ATTRIBUTE_ENCRYPTED != 0,
+            usn_reason_mask: Some(aggregate.reason_mask),
+            name: if aggregate.latest_name.trim().is_empty() {
+                None
+            } else {
+                Some(aggregate.latest_name.clone())
+            },
+            parent_record_number: Some(aggregate.latest_parent_record),
+            reconstructed_path: None,
+            allocated_size_bytes: None,
+            data_size_bytes: None,
+            file_attributes: Some(aggregate.latest_file_attributes),
+            created_filetime_utc: timestamp,
+            modified_filetime_utc: timestamp,
+            mft_modified_filetime_utc: timestamp,
+            accessed_filetime_utc: timestamp,
+            evidence_sources: vec![EvidenceSource::Usn],
+        });
+
+        ghosts_added = ghosts_added.saturating_add(1);
+    }
+
+    ghosts_added
+}
+
+fn should_surface_ghost_candidate(reason_mask: u32) -> bool {
+    reason_mask & (USN_REASON_FILE_DELETE | USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)
+        != 0
 }
 
 fn should_apply_rename_hint(reason_mask: u32) -> bool {
@@ -920,6 +1179,7 @@ mod tests {
         summary.candidates.push(QuickScanCandidate {
             record_index: 99,
             record_number: 77,
+            is_ghost_record: false,
             in_use: false,
             deleted: true,
             is_directory: false,
@@ -1009,6 +1269,79 @@ mod tests {
             Some(r"Docs\report-renamed.txt")
         );
         assert!(renamed.evidence_sources.contains(&EvidenceSource::Usn));
+    }
+
+    #[test]
+    fn enrich_candidates_with_usn_records_adds_ghost_deleted_candidate() {
+        let image = build_test_ntfs_image_with_named_records();
+        let mut summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let usn_records = vec![UsnRecord {
+            major_version: 2,
+            minor_version: 0,
+            file_reference_number: 77,
+            parent_file_reference_number: 5,
+            usn: 300,
+            timestamp_100ns: 132_537_600_400_000_000,
+            reason: fr_usn::USN_REASON_FILE_DELETE,
+            source_info: 0,
+            security_id: 0,
+            file_attributes: 0x20,
+            file_name: "ghost.txt".to_string(),
+        }];
+
+        let stats = enrich_summary_with_usn_records(&mut summary, &usn_records);
+        assert_eq!(stats.matched_existing, 0);
+        assert_eq!(stats.ghost_added, 1);
+        assert_eq!(summary.usn_ghost_records, 1);
+
+        let ghost = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 77)
+            .unwrap();
+        assert!(ghost.is_ghost_record);
+        assert!(ghost.deleted);
+        assert_eq!(ghost.name.as_deref(), Some("ghost.txt"));
+        assert!(ghost.evidence_sources.contains(&EvidenceSource::Usn));
+        assert_eq!(
+            ghost.reconstructed_path.as_deref(),
+            Some(r"Docs\ghost.txt")
+        );
+    }
+
+    #[test]
+    fn apply_logfile_correlation_hints_updates_candidate_and_evidence() {
+        let image = build_test_ntfs_image_with_named_records();
+        let mut summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let changed = apply_logfile_correlation_hints(
+            &mut summary.candidates,
+            &[LogfileCorrelationHint {
+                record_number: 6,
+                inferred_parent_record_number: Some(5),
+                inferred_name: Some("report-logfile.txt".to_string()),
+                inferred_reconstructed_path: Some(r"Docs\report-logfile.txt".to_string()),
+                explanation: "logfile txn replay".to_string(),
+            }],
+        );
+        assert!(changed > 0);
+
+        let updated = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+        assert_eq!(updated.name.as_deref(), Some("report-logfile.txt"));
+        assert_eq!(
+            updated.reconstructed_path.as_deref(),
+            Some(r"Docs\report-logfile.txt")
+        );
+        assert!(updated
+            .evidence_sources
+            .contains(&EvidenceSource::DirectoryIndex));
     }
 
     #[cfg(windows)]

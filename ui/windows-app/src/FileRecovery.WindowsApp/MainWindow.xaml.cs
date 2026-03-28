@@ -25,6 +25,7 @@ public partial class MainWindow : Window
         public bool IsSelected { get; set; }
         public uint RecordNumber { get; init; }
         public bool Deleted { get; init; }
+        public bool IsGhostRecord { get; init; }
         public bool Directory { get; init; }
         public bool NonResidentData { get; init; }
         public bool HasNamedDataStreams { get; init; }
@@ -347,7 +348,9 @@ public partial class MainWindow : Window
                             operationToken.ThrowIfCancellationRequested();
                             var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(open.SessionId, maxRecords: 256);
                             AppendSessionMessage(
-                                $"NTFS quick scan: {quickScan.Message} (status {quickScan.StatusCode}, parsed={quickScan.ParsedRecords}, failures={quickScan.ParseFailures}, deleted={quickScan.DeletedRecords}, dirs={quickScan.DirectoryRecords}, named={quickScan.NamedRecords}, resident={quickScan.ResidentAttributeCount}, nonresident={quickScan.NonResidentAttributeCount}, nonresident-data={quickScan.RecordsWithNonResidentData}).");
+                $"NTFS quick scan: {quickScan.Message} (status {quickScan.StatusCode}, parsed={quickScan.ParsedRecords}, failures={quickScan.ParseFailures}, deleted={quickScan.DeletedRecords}, dirs={quickScan.DirectoryRecords}, named={quickScan.NamedRecords}, resident={quickScan.ResidentAttributeCount}, nonresident={quickScan.NonResidentAttributeCount}, nonresident-data={quickScan.RecordsWithNonResidentData}).");
+                            AppendSessionMessage(
+                                $"NTFS quick scan USN enrichment: matched={quickScan.UsnEnrichedRecords}, ghost={quickScan.UsnGhostRecords}.");
 
                             if (quickScan.Success)
                             {
@@ -401,6 +404,7 @@ public partial class MainWindow : Window
                         Ordinal: index,
                         RecordNumber: candidate.RecordNumber,
                         Deleted: candidate.Deleted,
+                        IsGhostRecord: candidate.IsGhostRecord,
                         Directory: candidate.IsDirectory,
                         NonResidentData: candidate.HasNonResidentData,
                         HasNamedDataStreams: candidate.HasNamedDataStreams,
@@ -422,6 +426,7 @@ public partial class MainWindow : Window
                         ConfidenceReason: candidate.ConfidenceReason,
                         CandidateStatus: ComputeCandidateStatus(
                             candidate.Deleted,
+                            candidate.IsGhostRecord,
                             candidate.IsDirectory,
                             candidate.IsCompressed,
                             candidate.IsEncrypted,
@@ -514,6 +519,7 @@ public partial class MainWindow : Window
                 Ordinal: index,
                 RecordNumber: candidate.RecordNumber,
                 Deleted: candidate.Deleted,
+                IsGhostRecord: candidate.IsGhostRecord,
                 Directory: candidate.IsDirectory,
                 NonResidentData: candidate.HasNonResidentData,
                 HasNamedDataStreams: candidate.HasNamedDataStreams,
@@ -535,6 +541,7 @@ public partial class MainWindow : Window
                 ConfidenceReason: candidate.ConfidenceReason,
                 CandidateStatus: ComputeCandidateStatus(
                     candidate.Deleted,
+                    candidate.IsGhostRecord,
                     candidate.IsDirectory,
                     candidate.IsCompressed,
                     candidate.IsEncrypted,
@@ -555,9 +562,10 @@ public partial class MainWindow : Window
             _quickScanCandidates.Add(new QuickScanCandidateRow
             {
                 Ordinal = candidate.Ordinal,
-                IsSelected = candidate.Deleted,
+                IsSelected = candidate.Deleted && !candidate.IsGhostRecord,
                 RecordNumber = candidate.RecordNumber,
                 Deleted = candidate.Deleted,
+                IsGhostRecord = candidate.IsGhostRecord,
                 Directory = candidate.Directory,
                 NonResidentData = candidate.NonResidentData,
                 HasNamedDataStreams = candidate.HasNamedDataStreams,
@@ -630,7 +638,7 @@ public partial class MainWindow : Window
 
     private static bool IsRecoverableCandidate(QuickScanCandidateRow row)
     {
-        return !row.Directory && row.CandidateStatus != RecoveryCandidateStatus.Invalid;
+        return !row.Directory && !row.IsGhostRecord && row.CandidateStatus != RecoveryCandidateStatus.Invalid;
     }
 
     private void RefreshCandidateView()
@@ -669,6 +677,7 @@ public partial class MainWindow : Window
 
     private static RecoveryCandidateStatus ComputeCandidateStatus(
         bool deleted,
+        bool isGhostRecord,
         bool directory,
         bool compressed,
         bool encrypted,
@@ -676,7 +685,7 @@ public partial class MainWindow : Window
         string? name,
         string? originalPath)
     {
-        if (directory || !deleted)
+        if (directory || !deleted || isGhostRecord)
         {
             return RecoveryCandidateStatus.Invalid;
         }
@@ -932,6 +941,7 @@ public partial class MainWindow : Window
                 {
                     record_number = candidate.RecordNumber,
                     deleted = candidate.Deleted,
+                    is_ghost_record = candidate.IsGhostRecord,
                     directory = candidate.Directory,
                     non_resident_data = candidate.NonResidentData,
                     has_named_data_streams = candidate.HasNamedDataStreams,
@@ -1069,6 +1079,20 @@ public partial class MainWindow : Window
                     candidate.RecoveryDiagnostics = "Directory record recovery is not implemented.";
                     failed++;
                     AppendSessionMessage($"Skipped directory candidate R{candidate.RecordNumber}: directory recovery is not yet implemented.");
+                    await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                    continue;
+                }
+
+                if (candidate.IsGhostRecord)
+                {
+                    candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    candidate.LastRecoveryStatusCode = -411;
+                    candidate.LastRecoveryDiagnosticsFlags = null;
+                    candidate.LastRecoveredBytes = 0;
+                    candidate.LastRecoveryPartial = null;
+                    candidate.RecoveryDiagnostics = "Ghost candidate inferred from journal evidence and lacks recoverable MFT data.";
+                    failed++;
+                    AppendSessionMessage($"Skipped ghost candidate R{candidate.RecordNumber}: no recoverable MFT-backed stream metadata.");
                     await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
                     continue;
                 }
@@ -1294,7 +1318,7 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "record_number,deleted,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
@@ -1302,6 +1326,7 @@ public partial class MainWindow : Window
             lines.Add(string.Join(",",
                 candidate.RecordNumber.ToString(CultureInfo.InvariantCulture),
                 candidate.Deleted ? "1" : "0",
+                candidate.IsGhostRecord ? "1" : "0",
                 candidate.Directory ? "1" : "0",
                 candidate.NonResidentData ? "1" : "0",
                 candidate.HasNamedDataStreams ? "1" : "0",

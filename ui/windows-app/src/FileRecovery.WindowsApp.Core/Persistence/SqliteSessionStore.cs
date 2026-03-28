@@ -41,6 +41,7 @@ public sealed class SqliteSessionStore
               ordinal INTEGER NOT NULL,
               record_number INTEGER NOT NULL,
               deleted INTEGER NOT NULL,
+              is_ghost_record INTEGER NOT NULL DEFAULT 0,
               is_directory INTEGER NOT NULL,
               non_resident_data INTEGER NOT NULL,
               has_named_data_streams INTEGER NOT NULL DEFAULT 0,
@@ -107,6 +108,7 @@ public sealed class SqliteSessionStore
                   ordinal,
                   record_number,
                   deleted,
+                  is_ghost_record,
                   is_directory,
                   non_resident_data,
                   has_named_data_streams,
@@ -138,6 +140,7 @@ public sealed class SqliteSessionStore
                   $ordinal,
                   $record_number,
                   $deleted,
+                  $is_ghost_record,
                   $is_directory,
                   $non_resident_data,
                   $has_named_data_streams,
@@ -171,6 +174,7 @@ public sealed class SqliteSessionStore
             insert.Parameters.AddWithValue("$ordinal", candidate.Ordinal);
             insert.Parameters.AddWithValue("$record_number", (long)candidate.RecordNumber);
             insert.Parameters.AddWithValue("$deleted", candidate.Deleted ? 1 : 0);
+            insert.Parameters.AddWithValue("$is_ghost_record", candidate.IsGhostRecord ? 1 : 0);
             insert.Parameters.AddWithValue("$is_directory", candidate.Directory ? 1 : 0);
             insert.Parameters.AddWithValue("$non_resident_data", candidate.NonResidentData ? 1 : 0);
             insert.Parameters.AddWithValue("$has_named_data_streams", candidate.HasNamedDataStreams ? 1 : 0);
@@ -382,6 +386,7 @@ public sealed class SqliteSessionStore
               ordinal,
               record_number,
               deleted,
+              is_ghost_record,
               is_directory,
               non_resident_data,
               has_named_data_streams,
@@ -423,38 +428,40 @@ public sealed class SqliteSessionStore
             var ordinal = reader.GetInt32(0);
             var recordNumber = checked((uint)reader.GetInt64(1));
             var deleted = reader.GetInt32(2) != 0;
-            var isDirectory = reader.GetInt32(3) != 0;
-            var nonResidentData = reader.GetInt32(4) != 0;
-            var hasNamedDataStreams = reader.GetInt32(5) != 0;
-            var isCompressed = reader.GetInt32(6) != 0;
-            var isSparse = reader.GetInt32(7) != 0;
-            var isEncrypted = reader.GetInt32(8) != 0;
-            var name = reader.IsDBNull(9) ? null : reader.GetString(9);
-            var originalPath = reader.IsDBNull(10) ? null : reader.GetString(10);
-            ulong? parentRecord = reader.IsDBNull(11) ? null : checked((ulong?)reader.GetInt64(11));
-            ulong? dataSizeBytes = reader.IsDBNull(12) ? null : checked((ulong?)reader.GetInt64(12));
-            ulong? allocatedSizeBytes = reader.IsDBNull(13) ? null : checked((ulong?)reader.GetInt64(13));
-            uint? fileAttributes = reader.IsDBNull(14) ? null : checked((uint?)reader.GetInt64(14));
-            ulong? createdFileTimeUtc = reader.IsDBNull(15) ? null : checked((ulong?)reader.GetInt64(15));
-            ulong? modifiedFileTimeUtc = reader.IsDBNull(16) ? null : checked((ulong?)reader.GetInt64(16));
-            ulong? mftModifiedFileTimeUtc = reader.IsDBNull(17) ? null : checked((ulong?)reader.GetInt64(17));
-            ulong? accessedFileTimeUtc = reader.IsDBNull(18) ? null : checked((ulong?)reader.GetInt64(18));
-            var evidenceSources = reader.IsDBNull(19) ? "MFT" : reader.GetString(19);
-            var confidenceTier = reader.IsDBNull(20) ? "Medium" : reader.GetString(20);
-            var confidenceReason = reader.IsDBNull(21) ? string.Empty : reader.GetString(21);
+            var isGhostRecord = reader.GetInt32(3) != 0;
+            var isDirectory = reader.GetInt32(4) != 0;
+            var nonResidentData = reader.GetInt32(5) != 0;
+            var hasNamedDataStreams = reader.GetInt32(6) != 0;
+            var isCompressed = reader.GetInt32(7) != 0;
+            var isSparse = reader.GetInt32(8) != 0;
+            var isEncrypted = reader.GetInt32(9) != 0;
+            var name = reader.IsDBNull(10) ? null : reader.GetString(10);
+            var originalPath = reader.IsDBNull(11) ? null : reader.GetString(11);
+            ulong? parentRecord = reader.IsDBNull(12) ? null : checked((ulong?)reader.GetInt64(12));
+            ulong? dataSizeBytes = reader.IsDBNull(13) ? null : checked((ulong?)reader.GetInt64(13));
+            ulong? allocatedSizeBytes = reader.IsDBNull(14) ? null : checked((ulong?)reader.GetInt64(14));
+            uint? fileAttributes = reader.IsDBNull(15) ? null : checked((uint?)reader.GetInt64(15));
+            ulong? createdFileTimeUtc = reader.IsDBNull(16) ? null : checked((ulong?)reader.GetInt64(16));
+            ulong? modifiedFileTimeUtc = reader.IsDBNull(17) ? null : checked((ulong?)reader.GetInt64(17));
+            ulong? mftModifiedFileTimeUtc = reader.IsDBNull(18) ? null : checked((ulong?)reader.GetInt64(18));
+            ulong? accessedFileTimeUtc = reader.IsDBNull(19) ? null : checked((ulong?)reader.GetInt64(19));
+            var evidenceSources = reader.IsDBNull(20) ? "MFT" : reader.GetString(20);
+            var confidenceTier = reader.IsDBNull(21) ? "Medium" : reader.GetString(21);
+            var confidenceReason = reader.IsDBNull(22) ? string.Empty : reader.GetString(22);
             var candidateStatus = RecoveryCandidateStatusExtensions.FromStorageCode(
-                reader.IsDBNull(22) ? null : reader.GetString(22));
-            var recoveryDiagnostics = reader.IsDBNull(23) ? null : reader.GetString(23);
-            var lastRecoveryStatusCode = reader.IsDBNull(24) ? null : (int?)reader.GetInt32(24);
-            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(25) ? null : checked((uint?)reader.GetInt64(25));
-            ulong? lastRecoveryBytes = reader.IsDBNull(26) ? null : checked((ulong?)reader.GetInt64(26));
-            var lastRecoveryPartial = reader.IsDBNull(27) ? null : (bool?)(reader.GetInt32(27) != 0);
-            var lastRecoveryUtc = reader.IsDBNull(28) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(28));
+                reader.IsDBNull(23) ? null : reader.GetString(23));
+            var recoveryDiagnostics = reader.IsDBNull(24) ? null : reader.GetString(24);
+            var lastRecoveryStatusCode = reader.IsDBNull(25) ? null : (int?)reader.GetInt32(25);
+            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(26) ? null : checked((uint?)reader.GetInt64(26));
+            ulong? lastRecoveryBytes = reader.IsDBNull(27) ? null : checked((ulong?)reader.GetInt64(27));
+            var lastRecoveryPartial = reader.IsDBNull(28) ? null : (bool?)(reader.GetInt32(28) != 0);
+            var lastRecoveryUtc = reader.IsDBNull(29) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(29));
 
             rows.Add(new QuickScanCandidateRecord(
                 Ordinal: ordinal,
                 RecordNumber: recordNumber,
                 Deleted: deleted,
+                IsGhostRecord: isGhostRecord,
                 Directory: isDirectory,
                 NonResidentData: nonResidentData,
                 HasNamedDataStreams: hasNamedDataStreams,
@@ -623,6 +630,11 @@ public sealed class SqliteSessionStore
             connection,
             "candidate_status",
             "TEXT NOT NULL DEFAULT 'partial'",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "is_ghost_record",
+            "INTEGER NOT NULL DEFAULT 0",
             cancellationToken);
         await EnsureQuickScanCandidateColumnAsync(
             connection,

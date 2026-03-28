@@ -95,6 +95,7 @@ dependencies = [
  "fr-scoring",
  "fr-session",
  "fr-types",
+ "fr-usn",
  "fr-winio",
 ]
 
@@ -140,6 +141,7 @@ name = "fr-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fr-logfile",
  "fr-mft",
  "fr-ntfs",
  "fr-types",

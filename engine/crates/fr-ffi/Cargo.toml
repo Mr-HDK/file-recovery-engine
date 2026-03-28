@@ -14,3 +14,4 @@ fr-ntfs = { path = "../fr-ntfs" }
 fr-mft = { path = "../fr-mft" }
 fr-scoring = { path = "../fr-scoring" }
 fr-session = { path = "../fr-session" }
+fr-usn = { path = "../fr-usn" }

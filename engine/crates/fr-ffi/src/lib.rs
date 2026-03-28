@@ -1,7 +1,10 @@
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector;
 use fr_scoring::score_candidate_with_reasons;
-use fr_session::{quick_scan_ntfs_from_read_session, QuickScanConfig, QuickScanError};
+use fr_session::{
+    enrich_summary_with_usn_journal_bytes, quick_scan_ntfs_from_read_session, QuickScanConfig,
+    QuickScanError,
+};
 use fr_types::{ConfidenceTier, EvidenceSource, RecoveryCandidate, RecoverySourceKind};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
@@ -45,6 +48,8 @@ pub struct FrNtfsQuickScanSummary {
     pub directory_records: u32,
     pub named_records: u32,
     pub records_with_non_resident_data: u32,
+    pub usn_enriched_records: u32,
+    pub usn_ghost_records: u32,
 }
 
 #[repr(C)]
@@ -84,6 +89,7 @@ const CANDIDATE_FLAG_EVIDENCE_USN: u32 = 0x4000;
 const CANDIDATE_FLAG_EVIDENCE_VSS: u32 = 0x8000;
 const CANDIDATE_FLAG_EVIDENCE_CARVE: u32 = 0x0001_0000;
 const CANDIDATE_FLAG_HAS_FILE_METADATA: u32 = 0x0002_0000;
+const CANDIDATE_FLAG_GHOST_RECORD: u32 = 0x0004_0000;
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
@@ -388,6 +394,8 @@ pub extern "C" fn fr_quick_scan_ntfs_from_session(
                     records_with_non_resident_data: usize_to_u32_saturating(
                         summary.records_with_non_resident_data,
                     ),
+                    usn_enriched_records: usize_to_u32_saturating(summary.usn_enriched_records),
+                    usn_ghost_records: usize_to_u32_saturating(summary.usn_ghost_records),
                 };
             }
 
@@ -417,41 +425,44 @@ pub extern "C" fn fr_get_ntfs_quick_scan_candidates_from_session(
         *out_written = 0;
     }
 
-    let Ok(mut map) = read_sessions().lock() else {
-        return -200;
-    };
+    populate_quick_scan_candidates_buffer(
+        session_id,
+        max_records,
+        out_candidates,
+        candidate_capacity,
+        out_written,
+        None,
+    )
+}
 
-    let Some(session) = map.get_mut(&session_id) else {
-        return 20;
-    };
-    let config = QuickScanConfig {
-        max_records: normalize_max_records(max_records),
-    };
-    let summary = match quick_scan_ntfs_from_read_session(session, config) {
-        Ok(summary) => summary,
-        Err(err) => return map_quick_scan_error(err),
-    };
-
-    let mut candidates: Vec<QuickScanCandidateInternal> = summary
-        .candidates
-        .into_iter()
-        .map(build_internal_candidate_from_quick_scan)
-        .collect();
-    score_internal_candidates(&mut candidates);
-
-    let written = candidates.len().min(candidate_capacity as usize);
-    if written > 0 {
-        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_candidates, written) };
-        for (i, candidate) in candidates.into_iter().take(written).enumerate() {
-            out_slice[i] = encode_candidate(candidate);
-        }
+#[no_mangle]
+pub extern "C" fn fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
+    session_id: u64,
+    max_records: u32,
+    out_candidates: *mut FrNtfsQuickScanCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+    usn_journal_bytes: *const u8,
+    usn_journal_len: u32,
+) -> i32 {
+    if usn_journal_len > 0 && usn_journal_bytes.is_null() {
+        return -3;
     }
 
-    unsafe {
-        *out_written = written as u32;
-    }
+    let usn_slice = if usn_journal_len == 0 {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(usn_journal_bytes, usn_journal_len as usize) })
+    };
 
-    0
+    populate_quick_scan_candidates_buffer(
+        session_id,
+        max_records,
+        out_candidates,
+        candidate_capacity,
+        out_written,
+        usn_slice,
+    )
 }
 
 #[no_mangle]
@@ -750,9 +761,61 @@ pub extern "C" fn fr_close_source_session(session_id: u64) -> i32 {
     }
 }
 
+fn populate_quick_scan_candidates_buffer(
+    session_id: u64,
+    max_records: u32,
+    out_candidates: *mut FrNtfsQuickScanCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+    usn_journal_bytes: Option<&[u8]>,
+) -> i32 {
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+    let config = QuickScanConfig {
+        max_records: normalize_max_records(max_records),
+    };
+    let mut summary = match quick_scan_ntfs_from_read_session(session, config) {
+        Ok(summary) => summary,
+        Err(err) => return map_quick_scan_error(err),
+    };
+
+    if let Some(usn_bytes) = usn_journal_bytes {
+        if let Err(err) = enrich_summary_with_usn_journal_bytes(&mut summary, usn_bytes) {
+            return map_usn_parse_error(err);
+        }
+    }
+
+    let mut candidates: Vec<QuickScanCandidateInternal> = summary
+        .candidates
+        .into_iter()
+        .map(build_internal_candidate_from_quick_scan)
+        .collect();
+    score_internal_candidates(&mut candidates);
+
+    let written = candidates.len().min(candidate_capacity as usize);
+    if written > 0 {
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_candidates, written) };
+        for (i, candidate) in candidates.into_iter().take(written).enumerate() {
+            out_slice[i] = encode_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = written as u32;
+    }
+
+    0
+}
+
 #[derive(Debug, Clone)]
 struct QuickScanCandidateInternal {
     record_number: u32,
+    is_ghost_record: bool,
     in_use: bool,
     deleted: bool,
     is_directory: bool,
@@ -781,6 +844,7 @@ fn build_internal_candidate_from_quick_scan(
 ) -> QuickScanCandidateInternal {
     QuickScanCandidateInternal {
         record_number: candidate.record_number,
+        is_ghost_record: candidate.is_ghost_record,
         in_use: candidate.in_use,
         deleted: candidate.deleted,
         is_directory: candidate.is_directory,
@@ -847,6 +911,9 @@ fn encode_candidate(candidate: QuickScanCandidateInternal) -> FrNtfsQuickScanCan
     let mut flags = 0u32;
     if candidate.in_use {
         flags |= CANDIDATE_FLAG_IN_USE;
+    }
+    if candidate.is_ghost_record {
+        flags |= CANDIDATE_FLAG_GHOST_RECORD;
     }
     if candidate.deleted {
         flags |= CANDIDATE_FLAG_DELETED;
@@ -1615,6 +1682,17 @@ fn map_quick_scan_error(err: QuickScanError) -> i32 {
     }
 }
 
+fn map_usn_parse_error(err: fr_usn::UsnParseError) -> i32 {
+    match err {
+        fr_usn::UsnParseError::TruncatedRecordHeader { .. }
+        | fr_usn::UsnParseError::TruncatedRecordBody { .. } => 51,
+        fr_usn::UsnParseError::InvalidRecordLength { .. }
+        | fr_usn::UsnParseError::InvalidFileNameRange { .. }
+        | fr_usn::UsnParseError::InvalidFileNameEncoding { .. } => 52,
+        fr_usn::UsnParseError::UnsupportedVersion { .. } => 53,
+    }
+}
+
 fn map_winio_error(err: fr_winio::WinIoError) -> i32 {
     match err {
         fr_winio::WinIoError::InvalidSourcePath => 10,
@@ -1768,6 +1846,86 @@ mod tests {
             parent.confidence_tier,
             confidence_tier_code(ConfidenceTier::VeryHigh)
         );
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_quick_scan_candidates_with_usn_adds_ghost_and_rename_evidence() {
+        let image = build_test_ntfs_image_with_named_records();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-usn-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        let open_status = fr_open_source_session_readonly(
+            image_path_cstr.as_ptr(),
+            2,
+            &mut session_id,
+            &mut size_bytes,
+        );
+        assert_eq!(open_status, 0);
+        assert!(session_id > 0);
+        assert!(size_bytes >= image.len() as u64);
+
+        let mut usn_bytes = Vec::new();
+        usn_bytes.extend_from_slice(&build_usn_v2_record(
+            "report-renamed.txt",
+            fr_usn::USN_REASON_RENAME_NEW_NAME,
+            6,
+            5,
+        ));
+        usn_bytes.extend_from_slice(&build_usn_v2_record(
+            "ghost.txt",
+            fr_usn::USN_REASON_FILE_DELETE,
+            77,
+            5,
+        ));
+
+        let mut out_written = 0u32;
+        let mut candidates = vec![empty_candidate(); 16];
+
+        let scan_status = fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
+            session_id,
+            64,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut out_written,
+            usn_bytes.as_ptr(),
+            usn_bytes.len() as u32,
+        );
+        assert_eq!(scan_status, 0);
+        assert_eq!(out_written, 3);
+
+        let result_slice = &candidates[..out_written as usize];
+        let renamed = result_slice
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .expect("renamed candidate should exist");
+        let renamed_name = c_string_bytes_to_string(&renamed.name);
+        assert_eq!(renamed_name, "report-renamed.txt");
+        assert_ne!(renamed.flags & CANDIDATE_FLAG_EVIDENCE_USN, 0);
+
+        let ghost = result_slice
+            .iter()
+            .find(|candidate| candidate.record_number == 77)
+            .expect("ghost candidate should exist");
+        assert_ne!(ghost.flags & CANDIDATE_FLAG_GHOST_RECORD, 0);
+        assert_ne!(ghost.flags & CANDIDATE_FLAG_EVIDENCE_USN, 0);
+        assert_eq!(ghost.flags & CANDIDATE_FLAG_EVIDENCE_MFT, 0);
+        assert_eq!(ghost.flags & CANDIDATE_FLAG_DELETED, CANDIDATE_FLAG_DELETED);
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -2755,6 +2913,61 @@ mod tests {
         attr
     }
 
+    fn build_usn_v2_record(name: &str, reason: u32, file_ref: u64, parent_ref: u64) -> Vec<u8> {
+        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+        let name_len_bytes = (name_utf16.len() * 2) as u16;
+        let header_len = 60usize;
+        let record_len = align_to_8(header_len + name_len_bytes as usize);
+        let mut record = vec![0u8; record_len];
+
+        write_u32(&mut record, 0, record_len as u32);
+        write_u16(&mut record, 4, 2);
+        write_u16(&mut record, 6, 0);
+        write_u64(&mut record, 8, file_ref);
+        write_u64(&mut record, 16, parent_ref);
+        write_i64(&mut record, 24, 1001);
+        write_i64(&mut record, 32, 132_537_600_400_000_000);
+        write_u32(&mut record, 40, reason);
+        write_u32(&mut record, 44, 0);
+        write_u32(&mut record, 48, 0);
+        write_u32(&mut record, 52, 0x20);
+        write_u16(&mut record, 56, name_len_bytes);
+        write_u16(&mut record, 58, header_len as u16);
+
+        let mut cursor = header_len;
+        for code in name_utf16 {
+            record[cursor..cursor + 2].copy_from_slice(&code.to_le_bytes());
+            cursor += 2;
+        }
+
+        record
+    }
+
+    fn align_to_8(value: usize) -> usize {
+        (value + 7) & !7
+    }
+
+    fn empty_candidate() -> FrNtfsQuickScanCandidate {
+        FrNtfsQuickScanCandidate {
+            record_number: 0,
+            flags: 0,
+            parent_record_number: 0,
+            confidence_tier: 0,
+            _reserved0: 0,
+            data_size_bytes: 0,
+            allocated_size_bytes: 0,
+            file_attributes: 0,
+            _reserved1: 0,
+            created_filetime_utc: 0,
+            modified_filetime_utc: 0,
+            mft_modified_filetime_utc: 0,
+            accessed_filetime_utc: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+            confidence_reason: [0u8; 256],
+        }
+    }
+
     fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -2764,6 +2977,10 @@ mod tests {
     }
 
     fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_i64(bytes: &mut [u8], offset: usize, value: i64) {
         bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

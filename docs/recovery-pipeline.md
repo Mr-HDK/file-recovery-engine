@@ -27,7 +27,7 @@
 - Parse USN records and merge rename/move evidence.
 - Prepare integration seam for `$LogFile` reconstruction.
 - Mark supporting evidence per candidate.
-- Current implementation now includes a concrete `fr-usn` parser for USN v2/v3 records plus `fr-session` evidence enrichment hooks (`apply_usn_evidence`) that annotate quick-scan candidates with USN evidence and reason masks.
+- Current implementation now includes a concrete `fr-usn` parser for USN v2/v3 records, `fr-session` enrichment hooks that apply rename/path hints and synthesize ghost deleted candidates, and an extensible `$LogFile` correlator seam (`fr-logfile` + `apply_logfile_correlation`) for future transaction replay integration.
 
 6. Snapshot augmentation
 - Enumerate VSS snapshots.
