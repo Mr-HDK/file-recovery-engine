@@ -15,3 +15,4 @@ fr-mft = { path = "../fr-mft" }
 fr-scoring = { path = "../fr-scoring" }
 fr-session = { path = "../fr-session" }
 fr-usn = { path = "../fr-usn" }
+fr-vss = { path = "../fr-vss" }

@@ -73,6 +73,16 @@ pub struct FrNtfsQuickScanCandidate {
     pub confidence_reason: [u8; 256],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrVssSnapshot {
+    pub snapshot_id: [u8; 96],
+    pub volume_name: [u8; 260],
+    pub device_object: [u8; 260],
+    pub install_time_utc: [u8; 64],
+    pub snapshot_path: [u8; 260],
+}
+
 const CANDIDATE_FLAG_IN_USE: u32 = 0x0001;
 const CANDIDATE_FLAG_DELETED: u32 = 0x0002;
 const CANDIDATE_FLAG_DIRECTORY: u32 = 0x0004;
@@ -463,6 +473,44 @@ pub extern "C" fn fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
         out_written,
         usn_slice,
     )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_list_vss_snapshots(
+    out_snapshots: *mut FrVssSnapshot,
+    snapshot_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if snapshot_capacity > 0 && out_snapshots.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let snapshots = match fr_vss::list_snapshots() {
+        Ok(items) => items,
+        Err(err) => return map_vss_error(err),
+    };
+
+    let total = usize_to_u32_saturating(snapshots.len());
+    let write_count = snapshots.len().min(snapshot_capacity as usize);
+    for (index, snapshot) in snapshots.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_snapshots.add(index) = encode_vss_snapshot(snapshot);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
+    }
+
+    0
 }
 
 #[no_mangle]
@@ -990,6 +1038,28 @@ fn encode_candidate(candidate: QuickScanCandidateInternal) -> FrNtfsQuickScanCan
     }
 
     write_utf8(&candidate.confidence_reason, &mut out.confidence_reason);
+
+    out
+}
+
+fn encode_vss_snapshot(snapshot: &fr_vss::VssSnapshot) -> FrVssSnapshot {
+    let mut out = FrVssSnapshot {
+        snapshot_id: [0u8; 96],
+        volume_name: [0u8; 260],
+        device_object: [0u8; 260],
+        install_time_utc: [0u8; 64],
+        snapshot_path: [0u8; 260],
+    };
+
+    write_utf8(&snapshot.snapshot_id, &mut out.snapshot_id);
+    if let Some(volume_name) = snapshot.volume_name.as_deref() {
+        write_utf8(volume_name, &mut out.volume_name);
+    }
+    write_utf8(&snapshot.device_object, &mut out.device_object);
+    if let Some(install_time) = snapshot.install_time_utc.as_deref() {
+        write_utf8(install_time, &mut out.install_time_utc);
+    }
+    write_utf8(&snapshot.snapshot_path, &mut out.snapshot_path);
 
     out
 }
@@ -1693,6 +1763,15 @@ fn map_usn_parse_error(err: fr_usn::UsnParseError) -> i32 {
     }
 }
 
+fn map_vss_error(err: fr_vss::VssError) -> i32 {
+    match err {
+        fr_vss::VssError::UnsupportedPlatform => 60,
+        fr_vss::VssError::PowerShellUnavailable => 61,
+        fr_vss::VssError::QueryFailed { .. } => 62,
+        fr_vss::VssError::Parse(_) => 63,
+    }
+}
+
 fn map_winio_error(err: fr_winio::WinIoError) -> i32 {
     match err {
         fr_winio::WinIoError::InvalidSourcePath => 10,
@@ -1714,6 +1793,39 @@ mod tests {
     #[test]
     fn health_check_returns_zero() {
         assert_eq!(fr_health_check(), 0);
+    }
+
+    #[test]
+    fn encode_vss_snapshot_maps_all_fields() {
+        let snapshot = fr_vss::VssSnapshot {
+            snapshot_id: "{11111111-1111-1111-1111-111111111111}".to_string(),
+            volume_name: Some(r"\\?\Volume{abc}\".to_string()),
+            device_object: r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7".to_string(),
+            install_time_utc: Some("2026-03-28T10:10:10+00:00".to_string()),
+            snapshot_path: r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7\".to_string(),
+        };
+
+        let encoded = encode_vss_snapshot(&snapshot);
+        assert_eq!(
+            c_string_bytes_to_string(&encoded.snapshot_id),
+            snapshot.snapshot_id
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&encoded.volume_name),
+            snapshot.volume_name.as_deref().unwrap()
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&encoded.device_object),
+            snapshot.device_object
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&encoded.install_time_utc),
+            snapshot.install_time_utc.as_deref().unwrap()
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&encoded.snapshot_path),
+            snapshot.snapshot_path
+        );
     }
 
     #[test]

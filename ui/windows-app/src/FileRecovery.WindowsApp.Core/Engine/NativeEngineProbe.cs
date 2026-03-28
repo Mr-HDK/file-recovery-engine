@@ -102,6 +102,22 @@ public sealed record EngineNtfsQuickScanCandidatesResult(
     int StatusCode
 );
 
+public sealed record EngineVssSnapshot(
+    string SnapshotId,
+    string? VolumeName,
+    string DeviceObject,
+    string? InstallTimeUtc,
+    string SnapshotPath
+);
+
+public sealed record EngineVssSnapshotListResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineVssSnapshot> Snapshots,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineRecoverCandidateResult(
     bool EngineAvailable,
     bool Success,
@@ -518,6 +534,98 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineVssSnapshotListResult ListVssSnapshots(int snapshotCapacity = 64)
+    {
+        if (snapshotCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(snapshotCapacity));
+        }
+
+        try
+        {
+            NativeVssSnapshot[] buffer;
+            if (snapshotCapacity == 0)
+            {
+                buffer = Array.Empty<NativeVssSnapshot>();
+            }
+            else
+            {
+                buffer = new NativeVssSnapshot[snapshotCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].SnapshotId = new byte[96];
+                    buffer[i].VolumeName = new byte[260];
+                    buffer[i].DeviceObject = new byte[260];
+                    buffer[i].InstallTimeUtc = new byte[64];
+                    buffer[i].SnapshotPath = new byte[260];
+                }
+            }
+
+            var status = fr_list_vss_snapshots(
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineVssSnapshotListResult(
+                    true,
+                    false,
+                    Array.Empty<EngineVssSnapshot>(),
+                    MapVssStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var snapshots = new List<EngineVssSnapshot>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var current = buffer[i];
+                var snapshotId = DecodeUtf8(current.SnapshotId);
+                var deviceObject = DecodeUtf8(current.DeviceObject);
+                var snapshotPath = DecodeUtf8(current.SnapshotPath);
+                if (string.IsNullOrWhiteSpace(snapshotId) ||
+                    string.IsNullOrWhiteSpace(deviceObject) ||
+                    string.IsNullOrWhiteSpace(snapshotPath))
+                {
+                    continue;
+                }
+
+                snapshots.Add(new EngineVssSnapshot(
+                    snapshotId,
+                    DecodeUtf8(current.VolumeName),
+                    deviceObject,
+                    DecodeUtf8(current.InstallTimeUtc),
+                    snapshotPath));
+            }
+
+            return new EngineVssSnapshotListResult(
+                true,
+                true,
+                snapshots,
+                "VSS snapshots loaded.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineVssSnapshotListResult(
+                false,
+                false,
+                Array.Empty<EngineVssSnapshot>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineVssSnapshotListResult(
+                false,
+                false,
+                Array.Empty<EngineVssSnapshot>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
     public static EngineRecoverCandidateResult RecoverNtfsCandidateToFile(
         string sourcePath,
         RecoverySourceKind sourceKind,
@@ -646,6 +754,18 @@ public static class NativeEngineProbe
             51 => "USN journal payload is truncated.",
             52 => "USN journal payload is malformed.",
             53 => "USN journal version is unsupported.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapVssStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            60 => "VSS snapshot enumeration is unsupported on this platform.",
+            61 => "PowerShell is unavailable for VSS snapshot enumeration.",
+            62 => "VSS snapshot query failed.",
+            63 => "VSS snapshot query output was malformed.",
             _ => "Unknown engine response.",
         };
     }
@@ -917,6 +1037,25 @@ public static class NativeEngineProbe
         public byte[] ConfidenceReason;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeVssSnapshot
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 96)]
+        public byte[] SnapshotId;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 260)]
+        public byte[] VolumeName;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 260)]
+        public byte[] DeviceObject;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+        public byte[] InstallTimeUtc;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 260)]
+        public byte[] SnapshotPath;
+    }
+
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr fr_engine_version();
 
@@ -977,6 +1116,12 @@ public static class NativeEngineProbe
         out uint written,
         [In] byte[] usnJournalBytes,
         uint usnJournalLength);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_list_vss_snapshots(
+        [Out] NativeVssSnapshot[] snapshots,
+        uint snapshotCapacity,
+        out uint written);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_recover_ntfs_candidate_to_file(

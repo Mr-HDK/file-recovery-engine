@@ -205,6 +205,7 @@ public partial class MainWindow : Window
                 AppendSessionMessage($"Enumeration warning: {warning}");
             }
 
+            AppendVssSnapshotSources();
             StatusTextBlock.Text = $"Found {_sources.Count} sources";
         }
         catch (OperationCanceledException)
@@ -216,6 +217,66 @@ public partial class MainWindow : Window
         {
             StatusTextBlock.Text = "Source enumeration failed";
             AppendSessionMessage($"Enumeration error: {ex.Message}");
+        }
+    }
+
+    private void AppendVssSnapshotSources()
+    {
+        var vss = NativeEngineProbe.ListVssSnapshots(snapshotCapacity: 64);
+        if (!vss.EngineAvailable)
+        {
+            return;
+        }
+
+        if (!vss.Success)
+        {
+            AppendSessionMessage(
+                $"VSS snapshot enumeration skipped: {vss.Message} (status {vss.StatusCode}).");
+            return;
+        }
+
+        if (vss.Snapshots.Count == 0)
+        {
+            return;
+        }
+
+        var existingIds = new HashSet<string>(
+            _sources.Select(source => source.Id),
+            StringComparer.OrdinalIgnoreCase);
+        var added = 0;
+        foreach (var snapshot in vss.Snapshots)
+        {
+            var sourceId = $"vss:{snapshot.SnapshotId}";
+            if (!existingIds.Add(sourceId))
+            {
+                continue;
+            }
+
+            var timestampDisplay = string.IsNullOrWhiteSpace(snapshot.InstallTimeUtc)
+                ? "unknown timestamp"
+                : snapshot.InstallTimeUtc;
+
+            _sources.Add(new SourceCandidate(
+                Id: sourceId,
+                Kind: RecoverySourceKind.Volume,
+                DisplayName: $"VSS Snapshot {timestampDisplay}",
+                DevicePath: snapshot.DeviceObject,
+                FileSystem: "NTFS (VSS)",
+                SizeBytes: null,
+                SectorSizeBytes: null,
+                DiskIndex: null,
+                VolumeIdentity: null,
+                SourcePath: snapshot.SnapshotPath,
+                ReadOnlyEnforced: true,
+                VolumeLabel: snapshot.VolumeName,
+                MountedPaths: snapshot.SnapshotPath,
+                PartitionInfo: $"Snapshot {snapshot.SnapshotId}"));
+            added++;
+        }
+
+        if (added > 0)
+        {
+            AppendSessionMessage($"VSS snapshots discovered: {added} source(s) added.");
         }
     }
 
@@ -421,7 +482,9 @@ public partial class MainWindow : Window
                         ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
                         MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
                         AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
-                        EvidenceSources: candidate.EvidenceSources,
+                        EvidenceSources: NormalizeEvidenceSourcesForSelectedSource(
+                            candidate.EvidenceSources,
+                            selectedSource),
                         ConfidenceTier: candidate.ConfidenceTier,
                         ConfidenceReason: candidate.ConfidenceReason,
                         CandidateStatus: ComputeCandidateStatus(
@@ -536,7 +599,9 @@ public partial class MainWindow : Window
                 ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
                 MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
                 AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
-                EvidenceSources: candidate.EvidenceSources,
+                EvidenceSources: NormalizeEvidenceSourcesForSelectedSource(
+                    candidate.EvidenceSources,
+                    _selectedSource),
                 ConfidenceTier: candidate.ConfidenceTier,
                 ConfidenceReason: candidate.ConfidenceReason,
                 CandidateStatus: ComputeCandidateStatus(
@@ -596,6 +661,33 @@ public partial class MainWindow : Window
 
         RefreshCandidateView();
         AppendCandidateActivity($"Loaded {_quickScanCandidates.Count} candidate rows.");
+    }
+
+    private static string NormalizeEvidenceSourcesForSelectedSource(
+        string evidenceSources,
+        SourceCandidate? selectedSource)
+    {
+        var normalized = string.IsNullOrWhiteSpace(evidenceSources) ? "MFT" : evidenceSources;
+        if (!IsVssSnapshotSource(selectedSource))
+        {
+            return normalized;
+        }
+
+        var hasVss = normalized
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(value => string.Equals(value, "VSS", StringComparison.OrdinalIgnoreCase));
+        if (hasVss)
+        {
+            return normalized;
+        }
+
+        return $"{normalized}, VSS";
+    }
+
+    private static bool IsVssSnapshotSource(SourceCandidate? source)
+    {
+        return source is not null
+            && source.Id.StartsWith("vss:", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool FilterQuickScanCandidate(object rowObject)

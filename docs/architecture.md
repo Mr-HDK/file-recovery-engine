@@ -68,7 +68,7 @@
 ## Non-goals for this batch
 
 - Full NTFS undelete pipeline implementation.
-- VSS browse and restore UI.
+- Cross-snapshot deduplication and historical diffing across multiple VSS snapshots.
 - Full carving engine.
 
 These are tracked in `docs/todo-risk-register.md` with concrete follow-up tasks.

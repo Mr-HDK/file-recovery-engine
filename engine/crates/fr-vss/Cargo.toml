@@ -6,3 +6,7 @@ license.workspace = true
 
 [dependencies]
 fr-types = { path = "../fr-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true

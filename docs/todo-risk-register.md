@@ -3,6 +3,7 @@
 ## Active TODOs
 
 1. Execute host NTFS stream validation on at least two additional Windows host profiles (different storage/controller layouts) and compare artifact manifests/TRX outputs for drift.
+2. Add host-level validation for VSS snapshot enumeration and snapshot-source quick scan/recovery on a machine with at least one accessible shadow copy.
 
 ## Recently completed
 
@@ -38,6 +39,7 @@
 30. Added extensible `$LogFile` correlation seam in `fr-logfile` (`LogfileCorrelator` trait + hint model) and integrated hint application in `fr-session`.
 31. Aligned .NET native interop with updated quick-scan ABI (USN summary counters + ghost flag), including UI/session-store/export handling for ghost candidates.
 32. Updated UI recovery workflow to block ghost candidates from false-positive recovery attempts with explicit diagnostics messaging.
+33. Implemented Phase 4 baseline VSS path: native snapshot enumeration (`fr-vss` + `fr_list_vss_snapshots`), .NET interop mapping, WPF source-list snapshot integration (ID/timestamp surfaced), and VSS evidence tagging for snapshot-derived quick-scan candidates in the unified results model.
 
 ## Active risks
 
