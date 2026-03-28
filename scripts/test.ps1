@@ -1,5 +1,7 @@
 param(
-  [switch]$IncludeHostIntegration
+  [switch]$IncludeHostIntegration,
+  [switch]$IncludeHostVssIntegration,
+  [switch]$AllowNoSnapshots
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,5 +120,16 @@ if ($cargoPath) {
 if ($IncludeHostIntegration) {
   Invoke-External -Description "host NTFS stream validation" -Command {
     & "$PSScriptRoot\run-host-ntfs-stream-validation.ps1" -NoBuild
+  }
+}
+
+if ($IncludeHostVssIntegration) {
+  Invoke-External -Description "host VSS validation" -Command {
+    $vssArgs = @("-NoBuild")
+    if ($AllowNoSnapshots) {
+      $vssArgs += "-AllowNoSnapshots"
+    }
+
+    & "$PSScriptRoot\run-host-vss-validation.ps1" @vssArgs
   }
 }

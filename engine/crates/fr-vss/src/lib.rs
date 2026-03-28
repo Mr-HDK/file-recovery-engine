@@ -70,7 +70,9 @@ fn parse_snapshots_from_json(raw_json: &str) -> Result<Vec<RawShadowCopy>, VssEr
         Value::Null => Ok(Vec::new()),
         Value::Array(array) => array
             .into_iter()
-            .map(|item| serde_json::from_value(item).map_err(|err| VssError::Parse(err.to_string())))
+            .map(|item| {
+                serde_json::from_value(item).map_err(|err| VssError::Parse(err.to_string()))
+            })
             .collect(),
         Value::Object(_) => serde_json::from_value(value)
             .map(|single| vec![single])
@@ -251,7 +253,12 @@ mod platform {
 
     fn find_powershell() -> Option<&'static str> {
         if Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ])
             .output()
             .is_ok()
         {
@@ -259,7 +266,12 @@ mod platform {
         }
 
         if Command::new("pwsh")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ])
             .output()
             .is_ok()
         {

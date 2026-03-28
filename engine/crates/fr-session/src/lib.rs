@@ -8,8 +8,8 @@ use fr_ntfs::{parse_boot_sector, BootSectorParseError, NtfsBootSector};
 use fr_types::{EvidenceSource, RecoverySourceKind, ScanSessionState};
 use fr_usn::{
     parse_usn_records, UsnParseError, UsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
-    USN_REASON_NAMED_DATA_EXTEND, USN_REASON_NAMED_DATA_OVERWRITE, USN_REASON_NAMED_DATA_TRUNCATION,
-    USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
+    USN_REASON_NAMED_DATA_EXTEND, USN_REASON_NAMED_DATA_OVERWRITE,
+    USN_REASON_NAMED_DATA_TRUNCATION, USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
 };
 use fr_winio::{ReadSession, WinIoError};
 use std::collections::{HashMap, HashSet};
@@ -411,7 +411,9 @@ pub fn enrich_summary_with_usn_records(
     usn_records: &[UsnRecord],
 ) -> UsnEnrichmentStats {
     let stats = enrich_candidates_with_usn_records(&mut summary.candidates, usn_records);
-    summary.usn_enriched_records = summary.usn_enriched_records.saturating_add(stats.matched_existing);
+    summary.usn_enriched_records = summary
+        .usn_enriched_records
+        .saturating_add(stats.matched_existing);
     summary.usn_ghost_records = summary.usn_ghost_records.saturating_add(stats.ghost_added);
     stats
 }
@@ -420,8 +422,11 @@ pub fn enrich_summary_with_usn_journal_bytes(
     summary: &mut QuickScanSummary,
     usn_journal_bytes: &[u8],
 ) -> Result<UsnEnrichmentStats, UsnParseError> {
-    let stats = enrich_candidates_with_usn_journal_bytes(&mut summary.candidates, usn_journal_bytes)?;
-    summary.usn_enriched_records = summary.usn_enriched_records.saturating_add(stats.matched_existing);
+    let stats =
+        enrich_candidates_with_usn_journal_bytes(&mut summary.candidates, usn_journal_bytes)?;
+    summary.usn_enriched_records = summary
+        .usn_enriched_records
+        .saturating_add(stats.matched_existing);
     summary.usn_ghost_records = summary.usn_ghost_records.saturating_add(stats.ghost_added);
     Ok(stats)
 }
@@ -625,7 +630,9 @@ fn sort_quick_scan_candidates_for_recent_deletes(candidates: &mut [QuickScanCand
         right
             .deleted
             .cmp(&left.deleted)
-            .then_with(|| quick_scan_candidate_recency_key(right).cmp(&quick_scan_candidate_recency_key(left)))
+            .then_with(|| {
+                quick_scan_candidate_recency_key(right).cmp(&quick_scan_candidate_recency_key(left))
+            })
             .then_with(|| left.record_index.cmp(&right.record_index))
     });
 }
@@ -688,7 +695,10 @@ pub fn enrich_candidates_with_usn_records(
     }
 }
 
-pub fn apply_usn_evidence(candidates: &mut [QuickScanCandidate], usn_records: &[UsnRecord]) -> usize {
+pub fn apply_usn_evidence(
+    candidates: &mut [QuickScanCandidate],
+    usn_records: &[UsnRecord],
+) -> usize {
     let mut owned = candidates.to_vec();
     let stats = enrich_candidates_with_usn_records(&mut owned, usn_records);
     for (index, candidate) in candidates.iter_mut().enumerate() {
@@ -742,8 +752,13 @@ pub fn apply_logfile_correlation_hints(
             }
         }
 
-        if !candidate.evidence_sources.contains(&EvidenceSource::DirectoryIndex) {
-            candidate.evidence_sources.push(EvidenceSource::DirectoryIndex);
+        if !candidate
+            .evidence_sources
+            .contains(&EvidenceSource::DirectoryIndex)
+        {
+            candidate
+                .evidence_sources
+                .push(EvidenceSource::DirectoryIndex);
         }
     }
 
@@ -857,7 +872,8 @@ fn apply_usn_matches_to_existing_candidates(
             if should_apply_rename_hint(record_match.latest_reason)
                 && !record_match.latest_name.trim().is_empty()
             {
-                let rename_changed_name = candidate.name.as_ref() != Some(&record_match.latest_name);
+                let rename_changed_name =
+                    candidate.name.as_ref() != Some(&record_match.latest_name);
                 let rename_changed_parent =
                     candidate.parent_record_number != Some(record_match.latest_parent_record);
                 if rename_changed_name || rename_changed_parent {
@@ -1371,10 +1387,7 @@ mod tests {
         assert!(ghost.deleted);
         assert_eq!(ghost.name.as_deref(), Some("ghost.txt"));
         assert!(ghost.evidence_sources.contains(&EvidenceSource::Usn));
-        assert_eq!(
-            ghost.reconstructed_path.as_deref(),
-            Some(r"Docs\ghost.txt")
-        );
+        assert_eq!(ghost.reconstructed_path.as_deref(), Some(r"Docs\ghost.txt"));
     }
 
     #[test]

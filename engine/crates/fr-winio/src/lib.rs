@@ -418,15 +418,15 @@ mod tests {
 
     #[test]
     fn normalizes_physical_drive_path_case_insensitively() {
-        let path = normalize_probe_path(r"\\.\PHYSICALDRIVE12", RecoverySourceKind::PhysicalDisk)
-            .unwrap();
+        let path =
+            normalize_probe_path(r"\\.\PHYSICALDRIVE12", RecoverySourceKind::PhysicalDisk).unwrap();
         assert_eq!(path, r"\\.\PhysicalDrive12");
     }
 
     #[test]
     fn rejects_physical_drive_path_with_non_numeric_suffix() {
-        let err =
-            normalize_probe_path(r"\\.\PhysicalDriveX", RecoverySourceKind::PhysicalDisk).unwrap_err();
+        let err = normalize_probe_path(r"\\.\PhysicalDriveX", RecoverySourceKind::PhysicalDisk)
+            .unwrap_err();
         assert_eq!(err, WinIoError::InvalidSourcePath);
     }
 

@@ -2,9 +2,7 @@ use std::collections::{HashSet, VecDeque};
 
 use fr_scoring::score_candidate_with_reasons;
 use fr_types::{ConfidenceTier, EvidenceSource, RecoveryCandidate, RecoverySourceKind};
-use fr_validator::{
-    validate_carved_bytes_with_extension, FileFormat, ValidationReport,
-};
+use fr_validator::{validate_carved_bytes_with_extension, FileFormat, ValidationReport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleDescriptor {
@@ -16,7 +14,8 @@ pub struct ModuleDescriptor {
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         name: "fr-carving",
-        purpose: "Selective signature-based carving with validator-driven false-positive reduction.",
+        purpose:
+            "Selective signature-based carving with validator-driven false-positive reduction.",
         source_kind: RecoverySourceKind::Volume,
     }
 }
@@ -114,7 +113,14 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
     }
 
     if plan.format_enabled(FileFormat::Pdf) {
-        carve_header_footer(bytes, FileFormat::Pdf, b"%PDF-", Some(b"%%EOF"), &mut seen, &mut carved);
+        carve_header_footer(
+            bytes,
+            FileFormat::Pdf,
+            b"%PDF-",
+            Some(b"%%EOF"),
+            &mut seen,
+            &mut carved,
+        );
     }
 
     if plan.format_enabled(FileFormat::Utf8Text) {
@@ -284,7 +290,8 @@ fn push_candidate(
     }
 
     let slice = &source_bytes[offset..end.min(source_bytes.len())];
-    let validation = validate_carved_bytes_with_extension(format, slice, Some(format.default_extension()));
+    let validation =
+        validate_carved_bytes_with_extension(format, slice, Some(format.default_extension()));
     if !validation.is_valid {
         return;
     }
@@ -314,7 +321,10 @@ fn push_candidate(
     });
 }
 
-fn collect_diagnostics(validation: &ValidationReport, scoring_reasons: &[&'static str]) -> Vec<String> {
+fn collect_diagnostics(
+    validation: &ValidationReport,
+    scoring_reasons: &[&'static str],
+) -> Vec<String> {
     let mut diagnostics = validation.reasons.clone();
     for reason in scoring_reasons {
         diagnostics.push((*reason).to_string());
@@ -392,8 +402,12 @@ mod tests {
             .with_family(CarvingFamily::Archives);
         let carved = carve_bytes(&plan, &bytes);
 
-        assert!(carved.iter().any(|candidate| candidate.format == FileFormat::Zip));
-        assert!(!carved.iter().any(|candidate| candidate.format == FileFormat::Jpeg));
+        assert!(carved
+            .iter()
+            .any(|candidate| candidate.format == FileFormat::Zip));
+        assert!(!carved
+            .iter()
+            .any(|candidate| candidate.format == FileFormat::Jpeg));
     }
 
     #[test]
@@ -423,7 +437,10 @@ mod tests {
             .find(|candidate| candidate.format == FileFormat::Pdf)
             .expect("pdf candidate");
         assert!(pdf.partial);
-        assert!(matches!(pdf.confidence, ConfidenceTier::Low | ConfidenceTier::VeryLow));
+        assert!(matches!(
+            pdf.confidence,
+            ConfidenceTier::Low | ConfidenceTier::VeryLow
+        ));
     }
 
     fn build_test_zip_blob(file_name: &str, payload: &[u8]) -> Vec<u8> {

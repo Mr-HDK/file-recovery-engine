@@ -63,6 +63,8 @@
 - Host encrypted-file validation auto-degrades on systems where EFS is unavailable for the fixture volume (compressed-path validation still runs).
 - Host integration test exits early with explicit notice when native engine runtime (`file_recovery_engine.dll`) is unavailable in the test process.
 - `scripts/run-host-ntfs-stream-validation.ps1` to execute host integration coverage in an elevated shell.
+- `scripts/compare-host-validation-artifacts.ps1` to compare archived host-validation manifest/TRX outputs across runs and detect drift in counters/outcomes.
+- `scripts/run-host-vss-validation.ps1` plus `HostVssSnapshotRecoveryTests` for elevated host VSS enumeration and snapshot-source quick-scan/recovery validation.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 

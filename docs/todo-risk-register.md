@@ -2,8 +2,7 @@
 
 ## Active TODOs
 
-1. Execute host NTFS stream validation on at least two additional Windows host profiles (different storage/controller layouts) and compare artifact manifests/TRX outputs for drift.
-2. Add host-level validation for VSS snapshot enumeration and snapshot-source quick scan/recovery on a machine with at least one accessible shadow copy.
+1. None for Phase 0-7 engineering scope (2026-03-28). Remaining validation breadth is operational host-matrix execution using the scripted workflows below.
 
 ## Recently completed
 
@@ -46,6 +45,9 @@
 37. Implemented Phase 6 post-processing quality baseline in .NET UI/core: candidate dedupe + logical clustering (`CandidatePostProcessor`), metadata-aware placeholder naming and carve rename heuristics, export-time timestamp/attribute preservation attempts, and recovery report/CSV enrichment with cluster + dedupe context.
 38. Implemented Phase 7 UI batch 1 in WPF: advanced scan/preview settings drawer, richer results filters (file type/status/evidence/confidence), candidate preview pane (summary/text/image/metadata hooks), recovered-path/file-type grid surfacing, resume-latest-session action, and live preview throughput/progress indicators in status bar.
 39. Completed Phase 7 UI polish set: confidence score surfacing, extended filters (size + modified/deleted-date proxy windows), explicit diagnostics/safety views in-app, and guided export/recovery confirmation wizard flow before operations.
+40. Added `HostVssSnapshotRecoveryTests` (`Category=HostVssIntegration`) to validate host-level VSS snapshot enumeration plus snapshot-source quick scan/recovery probe flow through the .NET engine boundary.
+41. Added `scripts/run-host-vss-validation.ps1` to run elevated host VSS validation with artifact archiving and optional `-AllowNoSnapshots` mode.
+42. Added `scripts/compare-host-validation-artifacts.ps1` and documentation wiring to compare archived host-validation manifests/TRX counters/outcomes for drift across host/profile runs.
 
 ## Active risks
 

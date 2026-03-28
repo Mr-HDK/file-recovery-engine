@@ -45,6 +45,33 @@ To skip artifact archiving:
 ./scripts/run-host-ntfs-stream-validation.ps1 -NoArchive
 ```
 
+Optional elevated VSS host validation (enumerates snapshots and probes quick-scan/recovery through snapshot source sessions):
+
+```powershell
+./scripts/run-host-vss-validation.ps1
+# or:
+./scripts/test.ps1 -IncludeHostVssIntegration
+```
+
+If you want snapshot enumeration coverage without requiring an existing snapshot:
+
+```powershell
+./scripts/run-host-vss-validation.ps1 -AllowNoSnapshots
+```
+
+Compare host-validation artifact runs (manifest + TRX drift):
+
+```powershell
+# Compare the latest two host-validation runs automatically:
+./scripts/compare-host-validation-artifacts.ps1
+
+# Compare two specific runs and emit JSON:
+./scripts/compare-host-validation-artifacts.ps1 `
+  -BaselineRun 20260327-214622 `
+  -CandidateRun 20260328-110601 `
+  -OutputPath artifacts/host-validation/drift-20260328.json
+```
+
 ## UI run/release helpers
 
 Prefer the helper scripts below to avoid stale locked binaries:

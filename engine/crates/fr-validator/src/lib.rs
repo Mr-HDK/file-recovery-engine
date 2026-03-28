@@ -87,7 +87,10 @@ fn apply_extension_check(report: &mut ValidationReport, extension: Option<&str>)
         return;
     };
 
-    let normalized = raw_extension.trim().trim_start_matches('.').to_ascii_lowercase();
+    let normalized = raw_extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
     if normalized.is_empty() {
         report.extension_matches = None;
         return;
