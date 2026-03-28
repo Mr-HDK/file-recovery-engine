@@ -105,8 +105,15 @@ fn normalize_volume_path(path: &str) -> Result<String, WinIoError> {
 }
 
 fn normalize_physical_disk_path(path: &str) -> Result<String, WinIoError> {
-    if path.starts_with(r"\\.\PhysicalDrive") {
-        return Ok(path.to_string());
+    const PREFIX: &str = r"\\.\PhysicalDrive";
+
+    if path.len() >= PREFIX.len() && path[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        let suffix = &path[PREFIX.len()..];
+        let Ok(index) = suffix.parse::<u32>() else {
+            return Err(WinIoError::InvalidSourcePath);
+        };
+
+        return Ok(format!(r"\\.\PhysicalDrive{}", index));
     }
 
     let Ok(index) = path.parse::<u32>() else {
@@ -407,6 +414,20 @@ mod tests {
     fn normalizes_physical_drive_index() {
         let path = normalize_probe_path("2", RecoverySourceKind::PhysicalDisk).unwrap();
         assert_eq!(path, r"\\.\PhysicalDrive2");
+    }
+
+    #[test]
+    fn normalizes_physical_drive_path_case_insensitively() {
+        let path = normalize_probe_path(r"\\.\PHYSICALDRIVE12", RecoverySourceKind::PhysicalDisk)
+            .unwrap();
+        assert_eq!(path, r"\\.\PhysicalDrive12");
+    }
+
+    #[test]
+    fn rejects_physical_drive_path_with_non_numeric_suffix() {
+        let err =
+            normalize_probe_path(r"\\.\PhysicalDriveX", RecoverySourceKind::PhysicalDisk).unwrap_err();
+        assert_eq!(err, WinIoError::InvalidSourcePath);
     }
 
     #[test]

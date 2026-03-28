@@ -30,6 +30,7 @@
 22. Hardened `fr-session` USN enrichment matching to prioritize direct record-number correlation and constrained fallback matching (`name+parent` / mapped path) to reduce same-name false positives.
 23. Added USN rename-hint application in `fr-session` so `RENAME_NEW_NAME` / `FILE_CREATE` journal evidence can update candidate name + reconstructed path.
 24. Polished quick-scan UI table readability with status-based row highlighting and an explicit confidence-reason column to expose scoring rationale inline.
+25. Closed Phase 1 hardening gaps by adding deterministic image-source enumeration tests in `.NET` and canonical/case-insensitive `\\.\PhysicalDriveN` normalization tests in `fr-winio`.
 
 ## Active risks
 
