@@ -31,6 +31,8 @@
 23. Added USN rename-hint application in `fr-session` so `RENAME_NEW_NAME` / `FILE_CREATE` journal evidence can update candidate name + reconstructed path.
 24. Polished quick-scan UI table readability with status-based row highlighting and an explicit confidence-reason column to expose scoring rationale inline.
 25. Closed Phase 1 hardening gaps by adding deterministic image-source enumeration tests in `.NET` and canonical/case-insensitive `\\.\PhysicalDriveN` normalization tests in `fr-winio`.
+26. Added NTFS `$FILE_NAME` metadata extraction in quick-scan (`data/allocated size`, file attributes, created/modified/MFT-modified/accessed FILETIME values) and threaded it through Rust FFI, .NET probe mapping, SQLite persistence, and UI/export/report surfaces.
+27. Added explicit fragmented non-resident recovery coverage in `fr-ffi` (successful multi-run fragmented reassembly + partial status when a later run is unreadable/out-of-bounds).
 
 ## Active risks
 

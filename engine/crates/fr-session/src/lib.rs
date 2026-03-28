@@ -103,6 +103,13 @@ pub struct QuickScanCandidate {
     pub name: Option<String>,
     pub parent_record_number: Option<u64>,
     pub reconstructed_path: Option<String>,
+    pub allocated_size_bytes: Option<u64>,
+    pub data_size_bytes: Option<u64>,
+    pub file_attributes: Option<u32>,
+    pub created_filetime_utc: Option<u64>,
+    pub modified_filetime_utc: Option<u64>,
+    pub mft_modified_filetime_utc: Option<u64>,
+    pub accessed_filetime_utc: Option<u64>,
     pub evidence_sources: Vec<EvidenceSource>,
 }
 
@@ -382,6 +389,13 @@ fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidat
     let mut has_encrypted_data = false;
     let mut name = None;
     let mut parent_record_number = None;
+    let mut allocated_size_bytes = None;
+    let mut data_size_bytes = None;
+    let mut file_attributes = None;
+    let mut created_filetime_utc = None;
+    let mut modified_filetime_utc = None;
+    let mut mft_modified_filetime_utc = None;
+    let mut accessed_filetime_utc = None;
 
     for attribute in &record.attributes {
         if attribute.flags & NTFS_ATTRIBUTE_FLAG_COMPRESSED != 0 {
@@ -412,9 +426,16 @@ fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidat
             continue;
         }
 
-        if let Some((parent, parsed_name)) = extract_file_name(attribute) {
-            name = Some(parsed_name);
-            parent_record_number = Some(parent);
+        if let Some(metadata) = extract_file_name(attribute) {
+            name = Some(metadata.name);
+            parent_record_number = Some(metadata.parent_record_number);
+            allocated_size_bytes = Some(metadata.allocated_size_bytes);
+            data_size_bytes = Some(metadata.data_size_bytes);
+            file_attributes = Some(metadata.file_attributes);
+            created_filetime_utc = Some(metadata.created_filetime_utc);
+            modified_filetime_utc = Some(metadata.modified_filetime_utc);
+            mft_modified_filetime_utc = Some(metadata.mft_modified_filetime_utc);
+            accessed_filetime_utc = Some(metadata.accessed_filetime_utc);
         }
     }
 
@@ -433,11 +454,31 @@ fn build_candidate(record_index: usize, record: &MftRecord) -> QuickScanCandidat
         name,
         parent_record_number,
         reconstructed_path: None,
+        allocated_size_bytes,
+        data_size_bytes,
+        file_attributes,
+        created_filetime_utc,
+        modified_filetime_utc,
+        mft_modified_filetime_utc,
+        accessed_filetime_utc,
         evidence_sources: vec![EvidenceSource::Mft],
     }
 }
 
-fn extract_file_name(attribute: &AttributeRecord) -> Option<(u64, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileNameMetadata {
+    parent_record_number: u64,
+    name: String,
+    allocated_size_bytes: u64,
+    data_size_bytes: u64,
+    file_attributes: u32,
+    created_filetime_utc: u64,
+    modified_filetime_utc: u64,
+    mft_modified_filetime_utc: u64,
+    accessed_filetime_utc: u64,
+}
+
+fn extract_file_name(attribute: &AttributeRecord) -> Option<FileNameMetadata> {
     let AttributeForm::Resident(resident) = &attribute.form else {
         return None;
     };
@@ -445,12 +486,19 @@ fn extract_file_name(attribute: &AttributeRecord) -> Option<(u64, String)> {
     parse_file_name_value(&resident.value)
 }
 
-fn parse_file_name_value(value: &[u8]) -> Option<(u64, String)> {
+fn parse_file_name_value(value: &[u8]) -> Option<FileNameMetadata> {
     if value.len() < 0x42 {
         return None;
     }
 
     let parent_ref = read_u64(value, 0) & 0x0000_FFFF_FFFF_FFFF;
+    let created_filetime_utc = read_u64(value, 0x08);
+    let modified_filetime_utc = read_u64(value, 0x10);
+    let mft_modified_filetime_utc = read_u64(value, 0x18);
+    let accessed_filetime_utc = read_u64(value, 0x20);
+    let allocated_size_bytes = read_u64(value, 0x28);
+    let data_size_bytes = read_u64(value, 0x30);
+    let file_attributes = read_u32(value, 0x38);
     let name_len = value[0x40] as usize;
     let name_start = 0x42usize;
     let name_len_bytes = name_len.checked_mul(2)?;
@@ -471,7 +519,17 @@ fn parse_file_name_value(value: &[u8]) -> Option<(u64, String)> {
         return None;
     }
 
-    Some((parent_ref, name))
+    Some(FileNameMetadata {
+        parent_record_number: parent_ref,
+        name,
+        allocated_size_bytes,
+        data_size_bytes,
+        file_attributes,
+        created_filetime_utc,
+        modified_filetime_utc,
+        mft_modified_filetime_utc,
+        accessed_filetime_utc,
+    })
 }
 
 fn reconstruct_paths(candidates: &mut [QuickScanCandidate]) {
@@ -728,6 +786,12 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(out)
 }
 
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    let mut out = [0u8; 4];
+    out.copy_from_slice(&bytes[offset..offset + 4]);
+    u32::from_le_bytes(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,6 +932,13 @@ mod tests {
             name: Some("report.txt".to_string()),
             parent_record_number: Some(123),
             reconstructed_path: Some(r"Elsewhere\report.txt".to_string()),
+            allocated_size_bytes: None,
+            data_size_bytes: None,
+            file_attributes: None,
+            created_filetime_utc: None,
+            modified_filetime_utc: None,
+            mft_modified_filetime_utc: None,
+            accessed_filetime_utc: None,
             evidence_sources: vec![EvidenceSource::Mft],
         });
 
@@ -997,6 +1068,30 @@ mod tests {
 
         let error = quick_scan_ntfs_metadata(&image, QuickScanConfig::default()).unwrap_err();
         assert!(matches!(error, QuickScanError::MftOutOfBounds(_, _)));
+    }
+
+    #[test]
+    fn quick_scan_extracts_file_name_metadata() {
+        let image = build_test_ntfs_image_with_named_records();
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let deleted = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 6)
+            .unwrap();
+
+        assert_eq!(deleted.data_size_bytes, Some(1234));
+        assert_eq!(deleted.allocated_size_bytes, Some(4096));
+        assert_eq!(deleted.file_attributes, Some(0x0000_0020));
+        assert_eq!(deleted.created_filetime_utc, Some(132_537_600_000_000_000));
+        assert_eq!(deleted.modified_filetime_utc, Some(132_537_600_100_000_000));
+        assert_eq!(
+            deleted.mft_modified_filetime_utc,
+            Some(132_537_600_200_000_000)
+        );
+        assert_eq!(deleted.accessed_filetime_utc, Some(132_537_600_300_000_000));
     }
 
     fn build_test_ntfs_image_with_single_record() -> Vec<u8> {
@@ -1140,6 +1235,13 @@ mod tests {
         write_u16(&mut attr, 0x14, 0x18);
 
         write_u64(&mut attr, 0x18, parent_record & 0x0000_FFFF_FFFF_FFFF);
+        write_u64(&mut attr, 0x20, 132_537_600_000_000_000);
+        write_u64(&mut attr, 0x28, 132_537_600_100_000_000);
+        write_u64(&mut attr, 0x30, 132_537_600_200_000_000);
+        write_u64(&mut attr, 0x38, 132_537_600_300_000_000);
+        write_u64(&mut attr, 0x40, 4096);
+        write_u64(&mut attr, 0x48, 1234);
+        write_u32(&mut attr, 0x50, 0x0000_0020);
         attr[0x18 + 0x40] = name_len;
         attr[0x18 + 0x41] = 1;
 

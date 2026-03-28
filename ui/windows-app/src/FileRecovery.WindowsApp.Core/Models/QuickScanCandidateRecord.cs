@@ -22,5 +22,12 @@ public sealed record QuickScanCandidateRecord(
     uint? LastRecoveryDiagnosticsFlags = null,
     ulong? LastRecoveredBytes = null,
     bool? LastRecoveryPartial = null,
-    DateTimeOffset? LastRecoveryUtc = null
+    DateTimeOffset? LastRecoveryUtc = null,
+    ulong? DataSizeBytes = null,
+    ulong? AllocatedSizeBytes = null,
+    uint? FileAttributes = null,
+    ulong? CreatedFileTimeUtc = null,
+    ulong? ModifiedFileTimeUtc = null,
+    ulong? MftModifiedFileTimeUtc = null,
+    ulong? AccessedFileTimeUtc = null
 );

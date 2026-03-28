@@ -54,6 +54,15 @@ pub struct FrNtfsQuickScanCandidate {
     pub flags: u32,
     pub parent_record_number: u64,
     pub confidence_tier: u32,
+    pub _reserved0: u32,
+    pub data_size_bytes: u64,
+    pub allocated_size_bytes: u64,
+    pub file_attributes: u32,
+    pub _reserved1: u32,
+    pub created_filetime_utc: u64,
+    pub modified_filetime_utc: u64,
+    pub mft_modified_filetime_utc: u64,
+    pub accessed_filetime_utc: u64,
     pub name: [u8; 128],
     pub reconstructed_path: [u8; 256],
     pub confidence_reason: [u8; 256],
@@ -74,6 +83,7 @@ const CANDIDATE_FLAG_EVIDENCE_DIRECTORY_INDEX: u32 = 0x2000;
 const CANDIDATE_FLAG_EVIDENCE_USN: u32 = 0x4000;
 const CANDIDATE_FLAG_EVIDENCE_VSS: u32 = 0x8000;
 const CANDIDATE_FLAG_EVIDENCE_CARVE: u32 = 0x0001_0000;
+const CANDIDATE_FLAG_HAS_FILE_METADATA: u32 = 0x0002_0000;
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
@@ -755,6 +765,13 @@ struct QuickScanCandidateInternal {
     parent_record_number: Option<u64>,
     name: Option<String>,
     reconstructed_path: Option<String>,
+    data_size_bytes: Option<u64>,
+    allocated_size_bytes: Option<u64>,
+    file_attributes: Option<u32>,
+    created_filetime_utc: Option<u64>,
+    modified_filetime_utc: Option<u64>,
+    mft_modified_filetime_utc: Option<u64>,
+    accessed_filetime_utc: Option<u64>,
     confidence_tier: u32,
     confidence_reason: String,
 }
@@ -776,6 +793,13 @@ fn build_internal_candidate_from_quick_scan(
         parent_record_number: candidate.parent_record_number,
         name: candidate.name,
         reconstructed_path: candidate.reconstructed_path,
+        data_size_bytes: candidate.data_size_bytes,
+        allocated_size_bytes: candidate.allocated_size_bytes,
+        file_attributes: candidate.file_attributes,
+        created_filetime_utc: candidate.created_filetime_utc,
+        modified_filetime_utc: candidate.modified_filetime_utc,
+        mft_modified_filetime_utc: candidate.mft_modified_filetime_utc,
+        accessed_filetime_utc: candidate.accessed_filetime_utc,
         confidence_tier: confidence_tier_code(ConfidenceTier::Medium),
         confidence_reason: String::from("Score 0. Confidence pending scoring."),
     }
@@ -793,7 +817,7 @@ fn score_internal_candidates(candidates: &mut [QuickScanCandidateInternal]) {
             original_name: candidate.name.clone(),
             original_path: candidate.reconstructed_path.clone(),
             recovered_path: None,
-            size_bytes: 0,
+            size_bytes: candidate.data_size_bytes.unwrap_or(0),
             evidence: candidate.evidence_sources.clone(),
             confidence: ConfidenceTier::Medium,
             partial,
@@ -860,12 +884,31 @@ fn encode_candidate(candidate: QuickScanCandidateInternal) -> FrNtfsQuickScanCan
             EvidenceSource::Carve => CANDIDATE_FLAG_EVIDENCE_CARVE,
         };
     }
+    if candidate.data_size_bytes.is_some()
+        || candidate.allocated_size_bytes.is_some()
+        || candidate.file_attributes.is_some()
+        || candidate.created_filetime_utc.is_some()
+        || candidate.modified_filetime_utc.is_some()
+        || candidate.mft_modified_filetime_utc.is_some()
+        || candidate.accessed_filetime_utc.is_some()
+    {
+        flags |= CANDIDATE_FLAG_HAS_FILE_METADATA;
+    }
 
     let mut out = FrNtfsQuickScanCandidate {
         record_number: candidate.record_number,
         flags,
         parent_record_number: candidate.parent_record_number.unwrap_or(0),
         confidence_tier: candidate.confidence_tier,
+        _reserved0: 0,
+        data_size_bytes: candidate.data_size_bytes.unwrap_or(0),
+        allocated_size_bytes: candidate.allocated_size_bytes.unwrap_or(0),
+        file_attributes: candidate.file_attributes.unwrap_or(0),
+        _reserved1: 0,
+        created_filetime_utc: candidate.created_filetime_utc.unwrap_or(0),
+        modified_filetime_utc: candidate.modified_filetime_utc.unwrap_or(0),
+        mft_modified_filetime_utc: candidate.mft_modified_filetime_utc.unwrap_or(0),
+        accessed_filetime_utc: candidate.accessed_filetime_utc.unwrap_or(0),
         name: [0u8; 128],
         reconstructed_path: [0u8; 256],
         confidence_reason: [0u8; 256],
@@ -1663,6 +1706,15 @@ mod tests {
                 flags: 0,
                 parent_record_number: 0,
                 confidence_tier: 0,
+                _reserved0: 0,
+                data_size_bytes: 0,
+                allocated_size_bytes: 0,
+                file_attributes: 0,
+                _reserved1: 0,
+                created_filetime_utc: 0,
+                modified_filetime_utc: 0,
+                mft_modified_filetime_utc: 0,
+                accessed_filetime_utc: 0,
                 name: [0u8; 128],
                 reconstructed_path: [0u8; 256],
                 confidence_reason: [0u8; 256],
@@ -1695,6 +1747,12 @@ mod tests {
         assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_NAME, 0);
         assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_PATH, 0);
         assert_ne!(deleted.flags & CANDIDATE_FLAG_EVIDENCE_MFT, 0);
+        assert_ne!(deleted.flags & CANDIDATE_FLAG_HAS_FILE_METADATA, 0);
+        assert_eq!(deleted.data_size_bytes, 1234);
+        assert_eq!(deleted.allocated_size_bytes, 4096);
+        assert_eq!(deleted.file_attributes, 0x0000_0020);
+        assert_eq!(deleted.created_filetime_utc, 132_537_600_000_000_000);
+        assert_eq!(deleted.modified_filetime_utc, 132_537_600_100_000_000);
         assert_eq!(
             deleted.confidence_tier,
             confidence_tier_code(ConfidenceTier::VeryHigh)
@@ -2174,6 +2232,153 @@ mod tests {
     }
 
     #[test]
+    fn ffi_recover_handles_fragmented_non_resident_default_stream() {
+        let record_number = 124u32;
+        let cluster_size = 512u64;
+        let part_a = vec![0x41u8; cluster_size as usize];
+        let part_b = vec![0x42u8; cluster_size as usize];
+
+        let fragmented_attribute = build_non_resident_data_attribute(
+            1,
+            None,
+            0,
+            0,
+            cluster_size * 2,
+            &[(1, Some(8)), (1, Some(12))],
+            cluster_size,
+            None,
+        );
+
+        let record = build_record_with_data_attributes(record_number, vec![fragmented_attribute]);
+        let mut image = build_test_ntfs_image_with_record(&record);
+        image[(8 * cluster_size) as usize..(9 * cluster_size) as usize].copy_from_slice(&part_a);
+        image[(12 * cluster_size) as usize..(13 * cluster_size) as usize].copy_from_slice(&part_b);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-fragmented-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(written, cluster_size * 2);
+        let mut expected = part_a;
+        expected.extend_from_slice(&part_b);
+        assert_eq!(fs::read(&output_path).unwrap(), expected);
+        assert_eq!(diagnostics & RECOVERY_DIAG_SPARSE_ZERO_FILLED, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_marks_partial_when_non_resident_run_unreadable() {
+        let record_number = 125u32;
+        let cluster_size = 512u64;
+        let part_a = vec![0x43u8; cluster_size as usize];
+
+        let fragmented_attribute = build_non_resident_data_attribute(
+            1,
+            None,
+            0,
+            0,
+            cluster_size * 2,
+            &[(1, Some(8)), (1, Some(40))],
+            cluster_size,
+            None,
+        );
+
+        let record = build_record_with_data_attributes(record_number, vec![fragmented_attribute]);
+        let mut image = build_test_ntfs_image_with_record(&record);
+        image[(8 * cluster_size) as usize..(9 * cluster_size) as usize].copy_from_slice(&part_a);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-recover-partial-fragmented-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("sample.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path = temp_dir.join("recovered.bin");
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut written = 0u64;
+        let mut partial = 0i32;
+        let mut diagnostics = 0u32;
+        let status = fr_recover_ntfs_candidate_to_file_ex(
+            session_id,
+            record_number,
+            output_path_cstr.as_ptr(),
+            &mut written,
+            &mut partial,
+            &mut diagnostics,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
+        assert_eq!(written, cluster_size);
+        assert_eq!(fs::read(&output_path).unwrap(), part_a);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_recover_finds_record_after_zero_gap() {
         let record_number = 123u32;
         let payload = b"gap-test-payload".to_vec();
@@ -2531,6 +2736,13 @@ mod tests {
         write_u16(&mut attr, 0x14, 0x18);
 
         write_u64(&mut attr, 0x18, parent_record & 0x0000_FFFF_FFFF_FFFF);
+        write_u64(&mut attr, 0x20, 132_537_600_000_000_000);
+        write_u64(&mut attr, 0x28, 132_537_600_100_000_000);
+        write_u64(&mut attr, 0x30, 132_537_600_200_000_000);
+        write_u64(&mut attr, 0x38, 132_537_600_300_000_000);
+        write_u64(&mut attr, 0x40, 4096);
+        write_u64(&mut attr, 0x48, 1234);
+        write_u32(&mut attr, 0x50, 0x0000_0020);
         attr[0x18 + 0x40] = name_len;
         attr[0x18 + 0x41] = 1;
 

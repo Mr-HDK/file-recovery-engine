@@ -79,6 +79,13 @@ public sealed record EngineNtfsQuickScanCandidate(
     ulong? ParentRecordNumber,
     string? Name,
     string? ReconstructedPath,
+    ulong? DataSizeBytes,
+    ulong? AllocatedSizeBytes,
+    uint? FileAttributes,
+    ulong? CreatedFileTimeUtc,
+    ulong? ModifiedFileTimeUtc,
+    ulong? MftModifiedFileTimeUtc,
+    ulong? AccessedFileTimeUtc,
     string EvidenceSources,
     string ConfidenceTier,
     string ConfidenceReason
@@ -407,6 +414,7 @@ public static class NativeEngineProbe
                 var path = DecodeUtf8(candidate.ReconstructedPath);
                 var confidenceReason = DecodeUtf8(candidate.ConfidenceReason) ?? "Engine confidence reason unavailable.";
                 var flags = candidate.Flags;
+                var hasFileMetadata = (flags & CandidateFlagHasFileMetadata) != 0;
 
                 results.Add(new EngineNtfsQuickScanCandidate(
                     candidate.RecordNumber,
@@ -421,6 +429,13 @@ public static class NativeEngineProbe
                     candidate.ParentRecordNumber == 0 ? null : candidate.ParentRecordNumber,
                     name,
                     path,
+                    hasFileMetadata ? candidate.DataSizeBytes : null,
+                    hasFileMetadata ? candidate.AllocatedSizeBytes : null,
+                    hasFileMetadata ? candidate.FileAttributes : null,
+                    hasFileMetadata ? candidate.CreatedFileTimeUtc : null,
+                    hasFileMetadata ? candidate.ModifiedFileTimeUtc : null,
+                    hasFileMetadata ? candidate.MftModifiedFileTimeUtc : null,
+                    hasFileMetadata ? candidate.AccessedFileTimeUtc : null,
                     MapEvidenceSources(flags),
                     MapConfidenceTier(candidate.ConfidenceTier),
                     confidenceReason));
@@ -779,6 +794,7 @@ public static class NativeEngineProbe
     private const uint CandidateFlagEvidenceUsn = 0x4000;
     private const uint CandidateFlagEvidenceVss = 0x8000;
     private const uint CandidateFlagEvidenceCarve = 0x0001_0000;
+    private const uint CandidateFlagHasFileMetadata = 0x0002_0000;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
     private const uint RecoveryDiagCompressedAttribute = 0x0004;
@@ -825,6 +841,15 @@ public static class NativeEngineProbe
         public uint Flags;
         public ulong ParentRecordNumber;
         public uint ConfidenceTier;
+        public uint Reserved0;
+        public ulong DataSizeBytes;
+        public ulong AllocatedSizeBytes;
+        public uint FileAttributes;
+        public uint Reserved1;
+        public ulong CreatedFileTimeUtc;
+        public ulong ModifiedFileTimeUtc;
+        public ulong MftModifiedFileTimeUtc;
+        public ulong AccessedFileTimeUtc;
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
         public byte[] Name;

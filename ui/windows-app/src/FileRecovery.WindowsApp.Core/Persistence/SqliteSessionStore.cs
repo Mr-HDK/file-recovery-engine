@@ -50,6 +50,13 @@ public sealed class SqliteSessionStore
               name TEXT NULL,
               original_path TEXT NULL,
               parent_record_number INTEGER NULL,
+              data_size_bytes INTEGER NULL,
+              allocated_size_bytes INTEGER NULL,
+              file_attributes INTEGER NULL,
+              created_filetime_utc INTEGER NULL,
+              modified_filetime_utc INTEGER NULL,
+              mft_modified_filetime_utc INTEGER NULL,
+              accessed_filetime_utc INTEGER NULL,
               evidence_sources TEXT NOT NULL DEFAULT 'MFT',
               confidence_tier TEXT NOT NULL DEFAULT 'Medium',
               confidence_reason TEXT NOT NULL DEFAULT '',
@@ -109,6 +116,13 @@ public sealed class SqliteSessionStore
                   name,
                   original_path,
                   parent_record_number,
+                  data_size_bytes,
+                  allocated_size_bytes,
+                  file_attributes,
+                  created_filetime_utc,
+                  modified_filetime_utc,
+                  mft_modified_filetime_utc,
+                  accessed_filetime_utc,
                   evidence_sources,
                   confidence_tier,
                   confidence_reason,
@@ -133,6 +147,13 @@ public sealed class SqliteSessionStore
                   $name,
                   $original_path,
                   $parent_record_number,
+                  $data_size_bytes,
+                  $allocated_size_bytes,
+                  $file_attributes,
+                  $created_filetime_utc,
+                  $modified_filetime_utc,
+                  $mft_modified_filetime_utc,
+                  $accessed_filetime_utc,
                   $evidence_sources,
                   $confidence_tier,
                   $confidence_reason,
@@ -161,6 +182,27 @@ public sealed class SqliteSessionStore
             insert.Parameters.AddWithValue(
                 "$parent_record_number",
                 candidate.ParentRecordNumber.HasValue ? (object)(long)candidate.ParentRecordNumber.Value : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$data_size_bytes",
+                candidate.DataSizeBytes.HasValue ? (object)checked((long)candidate.DataSizeBytes.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$allocated_size_bytes",
+                candidate.AllocatedSizeBytes.HasValue ? (object)checked((long)candidate.AllocatedSizeBytes.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$file_attributes",
+                candidate.FileAttributes.HasValue ? (object)(long)candidate.FileAttributes.Value : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$created_filetime_utc",
+                candidate.CreatedFileTimeUtc.HasValue ? (object)checked((long)candidate.CreatedFileTimeUtc.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$modified_filetime_utc",
+                candidate.ModifiedFileTimeUtc.HasValue ? (object)checked((long)candidate.ModifiedFileTimeUtc.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$mft_modified_filetime_utc",
+                candidate.MftModifiedFileTimeUtc.HasValue ? (object)checked((long)candidate.MftModifiedFileTimeUtc.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$accessed_filetime_utc",
+                candidate.AccessedFileTimeUtc.HasValue ? (object)checked((long)candidate.AccessedFileTimeUtc.Value) : DBNull.Value);
             insert.Parameters.AddWithValue("$evidence_sources", candidate.EvidenceSources);
             insert.Parameters.AddWithValue("$confidence_tier", candidate.ConfidenceTier);
             insert.Parameters.AddWithValue("$confidence_reason", candidate.ConfidenceReason);
@@ -349,6 +391,13 @@ public sealed class SqliteSessionStore
               name,
               original_path,
               parent_record_number,
+              data_size_bytes,
+              allocated_size_bytes,
+              file_attributes,
+              created_filetime_utc,
+              modified_filetime_utc,
+              mft_modified_filetime_utc,
+              accessed_filetime_utc,
               evidence_sources,
               confidence_tier,
               confidence_reason,
@@ -383,17 +432,24 @@ public sealed class SqliteSessionStore
             var name = reader.IsDBNull(9) ? null : reader.GetString(9);
             var originalPath = reader.IsDBNull(10) ? null : reader.GetString(10);
             ulong? parentRecord = reader.IsDBNull(11) ? null : checked((ulong?)reader.GetInt64(11));
-            var evidenceSources = reader.IsDBNull(12) ? "MFT" : reader.GetString(12);
-            var confidenceTier = reader.IsDBNull(13) ? "Medium" : reader.GetString(13);
-            var confidenceReason = reader.IsDBNull(14) ? string.Empty : reader.GetString(14);
+            ulong? dataSizeBytes = reader.IsDBNull(12) ? null : checked((ulong?)reader.GetInt64(12));
+            ulong? allocatedSizeBytes = reader.IsDBNull(13) ? null : checked((ulong?)reader.GetInt64(13));
+            uint? fileAttributes = reader.IsDBNull(14) ? null : checked((uint?)reader.GetInt64(14));
+            ulong? createdFileTimeUtc = reader.IsDBNull(15) ? null : checked((ulong?)reader.GetInt64(15));
+            ulong? modifiedFileTimeUtc = reader.IsDBNull(16) ? null : checked((ulong?)reader.GetInt64(16));
+            ulong? mftModifiedFileTimeUtc = reader.IsDBNull(17) ? null : checked((ulong?)reader.GetInt64(17));
+            ulong? accessedFileTimeUtc = reader.IsDBNull(18) ? null : checked((ulong?)reader.GetInt64(18));
+            var evidenceSources = reader.IsDBNull(19) ? "MFT" : reader.GetString(19);
+            var confidenceTier = reader.IsDBNull(20) ? "Medium" : reader.GetString(20);
+            var confidenceReason = reader.IsDBNull(21) ? string.Empty : reader.GetString(21);
             var candidateStatus = RecoveryCandidateStatusExtensions.FromStorageCode(
-                reader.IsDBNull(15) ? null : reader.GetString(15));
-            var recoveryDiagnostics = reader.IsDBNull(16) ? null : reader.GetString(16);
-            var lastRecoveryStatusCode = reader.IsDBNull(17) ? null : (int?)reader.GetInt32(17);
-            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(18) ? null : checked((uint?)reader.GetInt64(18));
-            ulong? lastRecoveryBytes = reader.IsDBNull(19) ? null : checked((ulong?)reader.GetInt64(19));
-            var lastRecoveryPartial = reader.IsDBNull(20) ? null : (bool?)(reader.GetInt32(20) != 0);
-            var lastRecoveryUtc = reader.IsDBNull(21) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(21));
+                reader.IsDBNull(22) ? null : reader.GetString(22));
+            var recoveryDiagnostics = reader.IsDBNull(23) ? null : reader.GetString(23);
+            var lastRecoveryStatusCode = reader.IsDBNull(24) ? null : (int?)reader.GetInt32(24);
+            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(25) ? null : checked((uint?)reader.GetInt64(25));
+            ulong? lastRecoveryBytes = reader.IsDBNull(26) ? null : checked((ulong?)reader.GetInt64(26));
+            var lastRecoveryPartial = reader.IsDBNull(27) ? null : (bool?)(reader.GetInt32(27) != 0);
+            var lastRecoveryUtc = reader.IsDBNull(28) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(28));
 
             rows.Add(new QuickScanCandidateRecord(
                 Ordinal: ordinal,
@@ -408,6 +464,13 @@ public sealed class SqliteSessionStore
                 Name: name,
                 OriginalPath: originalPath,
                 ParentRecordNumber: parentRecord,
+                DataSizeBytes: dataSizeBytes,
+                AllocatedSizeBytes: allocatedSizeBytes,
+                FileAttributes: fileAttributes,
+                CreatedFileTimeUtc: createdFileTimeUtc,
+                ModifiedFileTimeUtc: modifiedFileTimeUtc,
+                MftModifiedFileTimeUtc: mftModifiedFileTimeUtc,
+                AccessedFileTimeUtc: accessedFileTimeUtc,
                 EvidenceSources: evidenceSources,
                 ConfidenceTier: confidenceTier,
                 ConfidenceReason: confidenceReason,
@@ -585,6 +648,41 @@ public sealed class SqliteSessionStore
             connection,
             "evidence_sources",
             "TEXT NOT NULL DEFAULT 'MFT'",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "data_size_bytes",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "allocated_size_bytes",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "file_attributes",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "created_filetime_utc",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "modified_filetime_utc",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "mft_modified_filetime_utc",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "accessed_filetime_utc",
+            "INTEGER NULL",
             cancellationToken);
         await EnsureQuickScanCandidateColumnAsync(
             connection,

@@ -34,6 +34,20 @@ public partial class MainWindow : Window
         public string Name { get; init; } = string.Empty;
         public string OriginalPath { get; init; } = string.Empty;
         public string ParentRecord { get; init; } = string.Empty;
+        public ulong? DataSizeBytes { get; init; }
+        public ulong? AllocatedSizeBytes { get; init; }
+        public uint? FileAttributes { get; init; }
+        public ulong? CreatedFileTimeUtc { get; init; }
+        public ulong? ModifiedFileTimeUtc { get; init; }
+        public ulong? MftModifiedFileTimeUtc { get; init; }
+        public ulong? AccessedFileTimeUtc { get; init; }
+        public string DataSizeDisplay => DataSizeBytes.HasValue
+            ? DataSizeBytes.Value.ToString(CultureInfo.InvariantCulture)
+            : string.Empty;
+        public string ModifiedUtcDisplay => FormatFileTimeUtc(ModifiedFileTimeUtc);
+        public string FileAttributesDisplay => FileAttributes.HasValue
+            ? $"0x{FileAttributes.Value:X8}"
+            : string.Empty;
         public string EvidenceSource { get; init; } = "MFT";
         public string ConfidenceTier { get; init; } = "Medium";
         public RecoveryCandidateStatus CandidateStatus { get; set; } = RecoveryCandidateStatus.Partial;
@@ -52,6 +66,31 @@ public partial class MainWindow : Window
             LastRecoveryDiagnosticsFlags.HasValue
                 ? $"0x{LastRecoveryDiagnosticsFlags.Value:X8}"
                 : string.Empty;
+
+        private static string FormatFileTimeUtc(ulong? fileTime)
+        {
+            if (!fileTime.HasValue || fileTime.Value == 0)
+            {
+                return string.Empty;
+            }
+
+            if (fileTime.Value > long.MaxValue)
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                return DateTimeOffset
+                    .FromFileTime((long)fileTime.Value)
+                    .UtcDateTime
+                    .ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
     }
 
     private readonly IDeviceEnumerationService _deviceEnumerationService;
@@ -371,6 +410,13 @@ public partial class MainWindow : Window
                         Name: candidate.Name,
                         OriginalPath: candidate.ReconstructedPath,
                         ParentRecordNumber: candidate.ParentRecordNumber,
+                        DataSizeBytes: candidate.DataSizeBytes,
+                        AllocatedSizeBytes: candidate.AllocatedSizeBytes,
+                        FileAttributes: candidate.FileAttributes,
+                        CreatedFileTimeUtc: candidate.CreatedFileTimeUtc,
+                        ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
+                        MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
+                        AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
                         EvidenceSources: candidate.EvidenceSources,
                         ConfidenceTier: candidate.ConfidenceTier,
                         ConfidenceReason: candidate.ConfidenceReason,
@@ -477,6 +523,13 @@ public partial class MainWindow : Window
                 Name: candidate.Name,
                 OriginalPath: candidate.ReconstructedPath,
                 ParentRecordNumber: candidate.ParentRecordNumber,
+                DataSizeBytes: candidate.DataSizeBytes,
+                AllocatedSizeBytes: candidate.AllocatedSizeBytes,
+                FileAttributes: candidate.FileAttributes,
+                CreatedFileTimeUtc: candidate.CreatedFileTimeUtc,
+                ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
+                MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
+                AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
                 EvidenceSources: candidate.EvidenceSources,
                 ConfidenceTier: candidate.ConfidenceTier,
                 ConfidenceReason: candidate.ConfidenceReason,
@@ -514,6 +567,13 @@ public partial class MainWindow : Window
                 Name = candidate.Name ?? "(unknown)",
                 OriginalPath = candidate.OriginalPath ?? "(unresolved)",
                 ParentRecord = candidate.ParentRecordNumber?.ToString() ?? string.Empty,
+                DataSizeBytes = candidate.DataSizeBytes,
+                AllocatedSizeBytes = candidate.AllocatedSizeBytes,
+                FileAttributes = candidate.FileAttributes,
+                CreatedFileTimeUtc = candidate.CreatedFileTimeUtc,
+                ModifiedFileTimeUtc = candidate.ModifiedFileTimeUtc,
+                MftModifiedFileTimeUtc = candidate.MftModifiedFileTimeUtc,
+                AccessedFileTimeUtc = candidate.AccessedFileTimeUtc,
                 EvidenceSource = candidate.EvidenceSources,
                 ConfidenceTier = candidate.ConfidenceTier,
                 CandidateStatus = candidate.CandidateStatus,
@@ -560,6 +620,9 @@ public partial class MainWindow : Window
         return row.Name.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.OriginalPath.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.RecordNumber.ToString(CultureInfo.InvariantCulture).Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.DataSizeDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.ModifiedUtcDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.FileAttributesDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.EvidenceSource.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.CandidateStatusCode.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.RecoveryDiagnostics.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase);
@@ -878,6 +941,13 @@ public partial class MainWindow : Window
                     name = candidate.Name,
                     original_path = candidate.OriginalPath,
                     parent_record = candidate.ParentRecord,
+                    data_size_bytes = candidate.DataSizeBytes,
+                    allocated_size_bytes = candidate.AllocatedSizeBytes,
+                    file_attributes = candidate.FileAttributesDisplay,
+                    created_filetime_utc = candidate.CreatedFileTimeUtc,
+                    modified_filetime_utc = candidate.ModifiedFileTimeUtc,
+                    mft_modified_filetime_utc = candidate.MftModifiedFileTimeUtc,
+                    accessed_filetime_utc = candidate.AccessedFileTimeUtc,
                     evidence_source = candidate.EvidenceSource,
                     confidence_tier = candidate.ConfidenceTier,
                     confidence_reason = candidate.ConfidenceReason,
@@ -1190,8 +1260,8 @@ public partial class MainWindow : Window
         builder.AppendLine();
         builder.AppendLine("## Candidate Details");
         builder.AppendLine();
-        builder.AppendLine("| Record | Name | Original Path | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
-        builder.AppendLine("|---|---|---|---|---:|---:|---:|---|---|");
+        builder.AppendLine("| Record | Name | Original Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
+        builder.AppendLine("|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
 
         foreach (var candidate in selected)
         {
@@ -1207,9 +1277,14 @@ public partial class MainWindow : Window
             var recoverCode = candidate.LastRecoveryStatusCode.HasValue
                 ? candidate.LastRecoveryStatusCode.Value.ToString(CultureInfo.InvariantCulture)
                 : "-";
+            var dataSize = candidate.DataSizeBytes.HasValue
+                ? candidate.DataSizeBytes.Value.ToString(CultureInfo.InvariantCulture)
+                : "-";
+            var modifiedUtc = EscapeMarkdownCell(candidate.ModifiedUtcDisplay);
+            var fileAttributes = EscapeMarkdownCell(candidate.FileAttributesDisplay);
 
             builder.AppendLine(
-                $"| {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
+                $"| {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
         }
 
         return builder.ToString();
@@ -1219,7 +1294,7 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "record_number,deleted,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "record_number,deleted,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
@@ -1236,6 +1311,13 @@ public partial class MainWindow : Window
                 EscapeCsv(candidate.Name),
                 EscapeCsv(candidate.OriginalPath),
                 EscapeCsv(candidate.ParentRecord),
+                EscapeCsv(candidate.DataSizeBytes?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.AllocatedSizeBytes?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.FileAttributesDisplay),
+                EscapeCsv(candidate.CreatedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.ModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.MftModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.AccessedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
                 EscapeCsv(candidate.EvidenceSource),
                 EscapeCsv(candidate.ConfidenceTier),
                 EscapeCsv(candidate.CandidateStatus.ToStorageCode()),

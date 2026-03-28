@@ -50,6 +50,13 @@ public sealed class SqliteSessionStoreTests
                 Name: "report.txt",
                 OriginalPath: @"Docs\report.txt",
                 ParentRecordNumber: 5,
+                DataSizeBytes: 1234,
+                AllocatedSizeBytes: 4096,
+                FileAttributes: 0x20,
+                CreatedFileTimeUtc: 132537600000000000,
+                ModifiedFileTimeUtc: 132537600100000000,
+                MftModifiedFileTimeUtc: 132537600200000000,
+                AccessedFileTimeUtc: 132537600300000000,
                 ConfidenceTier: "Very high",
                 ConfidenceReason: "Score 88. MFT metadata present; Original name/path reconstructed",
                 CandidateStatus: RecoveryCandidateStatus.Full),
@@ -89,6 +96,10 @@ public sealed class SqliteSessionStoreTests
         Assert.Equal(@"Docs\report.txt", persistedCandidates[0].OriginalPath);
         Assert.Equal("Very high", persistedCandidates[0].ConfidenceTier);
         Assert.Contains("Score 88", persistedCandidates[0].ConfidenceReason);
+        Assert.Equal((ulong)1234, persistedCandidates[0].DataSizeBytes);
+        Assert.Equal((ulong)4096, persistedCandidates[0].AllocatedSizeBytes);
+        Assert.Equal((uint)0x20, persistedCandidates[0].FileAttributes);
+        Assert.Equal((ulong)132537600100000000, persistedCandidates[0].ModifiedFileTimeUtc);
         Assert.Equal(RecoveryCandidateStatus.Full, persistedCandidates[0].CandidateStatus);
         Assert.True(persistedCandidates[1].IsSparse);
         Assert.True(persistedCandidates[1].IsEncrypted);
