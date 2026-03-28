@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 fr-types = { path = "../fr-types" }
+fr-validator = { path = "../fr-validator" }
+fr-scoring = { path = "../fr-scoring" }

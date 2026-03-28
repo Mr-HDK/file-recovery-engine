@@ -49,6 +49,12 @@ public partial class MainWindow : Window
         public string FileAttributesDisplay => FileAttributes.HasValue
             ? $"0x{FileAttributes.Value:X8}"
             : string.Empty;
+        public ulong? CarveOffsetBytes { get; init; }
+        public ulong? CarveLengthBytes { get; init; }
+        public string CarveFormat { get; init; } = string.Empty;
+        public string CarveOffsetDisplay => CarveOffsetBytes.HasValue
+            ? $"0x{CarveOffsetBytes.Value:X}"
+            : string.Empty;
         public string EvidenceSource { get; init; } = "MFT";
         public string ConfidenceTier { get; init; } = "Medium";
         public RecoveryCandidateStatus CandidateStatus { get; set; } = RecoveryCandidateStatus.Partial;
@@ -112,6 +118,7 @@ public partial class MainWindow : Window
     private const string UiBuildTag = "ui-scroll-fix-20260328-0006";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
+    private const ulong FullScanCarveMaxBytes = 64UL * 1024UL * 1024UL;
     private SourceCandidate? _selectedSource;
     private ICollectionView? _quickScanCandidatesView;
     private CancellationTokenSource? _previewReadCts;
@@ -370,7 +377,7 @@ public partial class MainWindow : Window
         }
 
         var selectedSource = _selectedSource;
-        EngineNtfsQuickScanCandidatesResult? quickScanCandidates = null;
+        var scanMode = ScanModeComboBox.SelectedItem is ScanMode mode ? mode : ScanMode.Quick;
         Guid? sessionId = null;
 
         try
@@ -445,7 +452,20 @@ public partial class MainWindow : Window
                                 AppendSessionMessage(
                                     $"NTFS quick scan candidates: {candidateResult.Message} (status {candidateResult.StatusCode}, count={candidateResult.Candidates.Count}).");
                                 RenderQuickScanCandidates(candidateResult);
-                                quickScanCandidates = candidateResult;
+
+                                if (scanMode == ScanMode.Full)
+                                {
+                                    operationToken.ThrowIfCancellationRequested();
+                                    var familyFlags = BuildSelectedCarveFamilyFlags();
+                                    var carveResult = NativeEngineProbe.GetCarveCandidatesFromSession(
+                                        open.SessionId,
+                                        familyFlags,
+                                        FullScanCarveMaxBytes,
+                                        candidateCapacity: 256);
+                                    AppendSessionMessage(
+                                        $"Carving scan: {carveResult.Message} (status {carveResult.StatusCode}, count={carveResult.Candidates.Count}).");
+                                    AppendCarveCandidates(carveResult);
+                                }
                             }
                         }
                     }
@@ -457,7 +477,6 @@ public partial class MainWindow : Window
                 }
             }
 
-            var scanMode = ScanModeComboBox.SelectedItem is ScanMode mode ? mode : ScanMode.Quick;
             operationToken.ThrowIfCancellationRequested();
             sessionId = await _sessionStore.CreateSessionAsync(
                 selectedSource,
@@ -478,46 +497,10 @@ public partial class MainWindow : Window
             await _sessionLogWriter.LogMessageAsync(sessionId.Value, "Session created and waiting for scan pipeline execution.", operationToken);
             await _sessionStore.UpdateStatusAsync(sessionId.Value, "ready", "Session initialized by UI.", operationToken);
 
-            if (quickScanCandidates?.Success == true)
+            if (_quickScanCandidates.Count > 0)
             {
                 operationToken.ThrowIfCancellationRequested();
-                var candidateRows = quickScanCandidates.Candidates
-                    .Select((candidate, index) => new QuickScanCandidateRecord(
-                        Ordinal: index,
-                        RecordNumber: candidate.RecordNumber,
-                        Deleted: candidate.Deleted,
-                        IsGhostRecord: candidate.IsGhostRecord,
-                        Directory: candidate.IsDirectory,
-                        NonResidentData: candidate.HasNonResidentData,
-                        HasNamedDataStreams: candidate.HasNamedDataStreams,
-                        IsCompressed: candidate.IsCompressed,
-                        IsSparse: candidate.IsSparse,
-                        IsEncrypted: candidate.IsEncrypted,
-                        Name: candidate.Name,
-                        OriginalPath: candidate.ReconstructedPath,
-                        ParentRecordNumber: candidate.ParentRecordNumber,
-                        DataSizeBytes: candidate.DataSizeBytes,
-                        AllocatedSizeBytes: candidate.AllocatedSizeBytes,
-                        FileAttributes: candidate.FileAttributes,
-                        CreatedFileTimeUtc: candidate.CreatedFileTimeUtc,
-                        ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
-                        MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
-                        AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
-                        EvidenceSources: NormalizeEvidenceSourcesForSelectedSource(
-                            candidate.EvidenceSources,
-                            selectedSource),
-                        ConfidenceTier: candidate.ConfidenceTier,
-                        ConfidenceReason: candidate.ConfidenceReason,
-                        CandidateStatus: ComputeCandidateStatus(
-                            candidate.Deleted,
-                            candidate.IsGhostRecord,
-                            candidate.IsDirectory,
-                            candidate.IsCompressed,
-                            candidate.IsEncrypted,
-                            candidate.HasNamedDataStreams,
-                            candidate.Name,
-                            candidate.ReconstructedPath)))
-                    .ToArray();
+                var candidateRows = SnapshotCandidateRecordsFromRows();
 
                 await _sessionStore.ReplaceQuickScanCandidatesAsync(sessionId.Value, candidateRows, operationToken);
                 await _sessionLogWriter.LogEventAsync(sessionId.Value, "quick_scan_candidates_persisted", new
@@ -599,41 +582,47 @@ public partial class MainWindow : Window
         }
 
         var mapped = result.Candidates
-            .Select((candidate, index) => new QuickScanCandidateRecord(
-                Ordinal: index,
-                RecordNumber: candidate.RecordNumber,
-                Deleted: candidate.Deleted,
-                IsGhostRecord: candidate.IsGhostRecord,
-                Directory: candidate.IsDirectory,
-                NonResidentData: candidate.HasNonResidentData,
-                HasNamedDataStreams: candidate.HasNamedDataStreams,
-                IsCompressed: candidate.IsCompressed,
-                IsSparse: candidate.IsSparse,
-                IsEncrypted: candidate.IsEncrypted,
-                Name: candidate.Name,
-                OriginalPath: candidate.ReconstructedPath,
-                ParentRecordNumber: candidate.ParentRecordNumber,
-                DataSizeBytes: candidate.DataSizeBytes,
-                AllocatedSizeBytes: candidate.AllocatedSizeBytes,
-                FileAttributes: candidate.FileAttributes,
-                CreatedFileTimeUtc: candidate.CreatedFileTimeUtc,
-                ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
-                MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
-                AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
-                EvidenceSources: NormalizeEvidenceSourcesForSelectedSource(
+            .Select((candidate, index) =>
+            {
+                var evidenceSources = NormalizeEvidenceSourcesForSelectedSource(
                     candidate.EvidenceSources,
-                    _selectedSource),
-                ConfidenceTier: candidate.ConfidenceTier,
-                ConfidenceReason: candidate.ConfidenceReason,
-                CandidateStatus: ComputeCandidateStatus(
-                    candidate.Deleted,
-                    candidate.IsGhostRecord,
-                    candidate.IsDirectory,
-                    candidate.IsCompressed,
-                    candidate.IsEncrypted,
-                    candidate.HasNamedDataStreams,
-                    candidate.Name,
-                    candidate.ReconstructedPath)))
+                    _selectedSource);
+
+                return new QuickScanCandidateRecord(
+                    Ordinal: index,
+                    RecordNumber: candidate.RecordNumber,
+                    Deleted: candidate.Deleted,
+                    IsGhostRecord: candidate.IsGhostRecord,
+                    Directory: candidate.IsDirectory,
+                    NonResidentData: candidate.HasNonResidentData,
+                    HasNamedDataStreams: candidate.HasNamedDataStreams,
+                    IsCompressed: candidate.IsCompressed,
+                    IsSparse: candidate.IsSparse,
+                    IsEncrypted: candidate.IsEncrypted,
+                    Name: candidate.Name,
+                    OriginalPath: candidate.ReconstructedPath,
+                    ParentRecordNumber: candidate.ParentRecordNumber,
+                    DataSizeBytes: candidate.DataSizeBytes,
+                    AllocatedSizeBytes: candidate.AllocatedSizeBytes,
+                    FileAttributes: candidate.FileAttributes,
+                    CreatedFileTimeUtc: candidate.CreatedFileTimeUtc,
+                    ModifiedFileTimeUtc: candidate.ModifiedFileTimeUtc,
+                    MftModifiedFileTimeUtc: candidate.MftModifiedFileTimeUtc,
+                    AccessedFileTimeUtc: candidate.AccessedFileTimeUtc,
+                    EvidenceSources: evidenceSources,
+                    ConfidenceTier: candidate.ConfidenceTier,
+                    ConfidenceReason: candidate.ConfidenceReason,
+                    CandidateStatus: ComputeCandidateStatus(
+                        candidate.Deleted,
+                        candidate.IsGhostRecord,
+                        candidate.IsDirectory,
+                        candidate.IsCompressed,
+                        candidate.IsEncrypted,
+                        candidate.HasNamedDataStreams,
+                        candidate.Name,
+                        candidate.ReconstructedPath,
+                        evidenceSources));
+            })
             .ToArray();
 
         RenderQuickScanCandidates(mapped);
@@ -648,7 +637,7 @@ public partial class MainWindow : Window
             _quickScanCandidates.Add(new QuickScanCandidateRow
             {
                 Ordinal = candidate.Ordinal,
-                IsSelected = candidate.Deleted && !candidate.IsGhostRecord,
+                IsSelected = candidate.Deleted && !candidate.IsGhostRecord && !IsCarveEvidence(candidate.EvidenceSources),
                 RecordNumber = candidate.RecordNumber,
                 Deleted = candidate.Deleted,
                 IsGhostRecord = candidate.IsGhostRecord,
@@ -668,6 +657,9 @@ public partial class MainWindow : Window
                 ModifiedFileTimeUtc = candidate.ModifiedFileTimeUtc,
                 MftModifiedFileTimeUtc = candidate.MftModifiedFileTimeUtc,
                 AccessedFileTimeUtc = candidate.AccessedFileTimeUtc,
+                CarveOffsetBytes = candidate.CarveOffsetBytes,
+                CarveLengthBytes = candidate.CarveLengthBytes,
+                CarveFormat = candidate.CarveFormat ?? string.Empty,
                 EvidenceSource = candidate.EvidenceSources,
                 ConfidenceTier = candidate.ConfidenceTier,
                 CandidateStatus = candidate.CandidateStatus,
@@ -682,6 +674,150 @@ public partial class MainWindow : Window
 
         RefreshCandidateView();
         AppendCandidateActivity($"Loaded {_quickScanCandidates.Count} candidate rows.");
+    }
+
+    private uint BuildSelectedCarveFamilyFlags()
+    {
+        var flags = 0u;
+        if (CarveImagesCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyImages;
+        }
+        if (CarveDocumentsCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyDocuments;
+        }
+        if (CarveArchivesCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyArchives;
+        }
+        if (CarveOfficeCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyOffice;
+        }
+        if (CarveMediaCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyMedia;
+        }
+
+        return flags;
+    }
+
+    private void AppendCarveCandidates(EngineCarveCandidatesResult result)
+    {
+        if (!result.Success)
+        {
+            AppendCandidateActivity($"Carving candidates not loaded: {result.Message} (status {result.StatusCode}).");
+            return;
+        }
+
+        if (result.Candidates.Count == 0)
+        {
+            return;
+        }
+
+        var baseOrdinal = _quickScanCandidates.Count;
+        for (var index = 0; index < result.Candidates.Count; index++)
+        {
+            var candidate = result.Candidates[index];
+            var format = string.IsNullOrWhiteSpace(candidate.Format) ? "bin" : candidate.Format;
+            var suggestedName = string.IsNullOrWhiteSpace(candidate.SuggestedName)
+                ? $"carve_{candidate.OffsetBytes:X16}.{format}"
+                : candidate.SuggestedName;
+
+            _quickScanCandidates.Add(new QuickScanCandidateRow
+            {
+                Ordinal = baseOrdinal + index,
+                IsSelected = false,
+                RecordNumber = BuildSyntheticRecordNumber(candidate.OffsetBytes, index),
+                Deleted = false,
+                IsGhostRecord = false,
+                Directory = false,
+                NonResidentData = false,
+                HasNamedDataStreams = false,
+                IsCompressed = false,
+                IsSparse = false,
+                IsEncrypted = false,
+                Name = suggestedName,
+                OriginalPath = $@"Carved\{suggestedName}",
+                ParentRecord = string.Empty,
+                DataSizeBytes = candidate.LengthBytes,
+                AllocatedSizeBytes = null,
+                FileAttributes = null,
+                CreatedFileTimeUtc = null,
+                ModifiedFileTimeUtc = null,
+                MftModifiedFileTimeUtc = null,
+                AccessedFileTimeUtc = null,
+                CarveOffsetBytes = candidate.OffsetBytes,
+                CarveLengthBytes = candidate.LengthBytes,
+                CarveFormat = format,
+                EvidenceSource = "Carve",
+                ConfidenceTier = candidate.ConfidenceTier,
+                CandidateStatus = RecoveryCandidateStatus.Partial,
+                ConfidenceReason = candidate.ConfidenceReason,
+                RecoveryDiagnostics = candidate.Partial
+                    ? "Candidate marked partial by carving validator."
+                    : string.Empty,
+            });
+        }
+
+        RefreshCandidateView();
+        AppendCandidateActivity($"Appended {result.Candidates.Count} carve candidates.");
+    }
+
+    private QuickScanCandidateRecord[] SnapshotCandidateRecordsFromRows()
+    {
+        return _quickScanCandidates
+            .Select(row =>
+            {
+                ulong? parentRecord = null;
+                if (!string.IsNullOrWhiteSpace(row.ParentRecord)
+                    && ulong.TryParse(row.ParentRecord, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedParent))
+                {
+                    parentRecord = parsedParent;
+                }
+
+                return new QuickScanCandidateRecord(
+                    Ordinal: row.Ordinal,
+                    RecordNumber: row.RecordNumber,
+                    Deleted: row.Deleted,
+                    IsGhostRecord: row.IsGhostRecord,
+                    Directory: row.Directory,
+                    NonResidentData: row.NonResidentData,
+                    HasNamedDataStreams: row.HasNamedDataStreams,
+                    IsCompressed: row.IsCompressed,
+                    IsSparse: row.IsSparse,
+                    IsEncrypted: row.IsEncrypted,
+                    Name: row.Name,
+                    OriginalPath: row.OriginalPath,
+                    ParentRecordNumber: parentRecord,
+                    DataSizeBytes: row.DataSizeBytes,
+                    AllocatedSizeBytes: row.AllocatedSizeBytes,
+                    FileAttributes: row.FileAttributes,
+                    CreatedFileTimeUtc: row.CreatedFileTimeUtc,
+                    ModifiedFileTimeUtc: row.ModifiedFileTimeUtc,
+                    MftModifiedFileTimeUtc: row.MftModifiedFileTimeUtc,
+                    AccessedFileTimeUtc: row.AccessedFileTimeUtc,
+                    EvidenceSources: row.EvidenceSource,
+                    ConfidenceTier: row.ConfidenceTier,
+                    ConfidenceReason: row.ConfidenceReason,
+                    CandidateStatus: row.CandidateStatus,
+                    RecoveryDiagnostics: string.IsNullOrWhiteSpace(row.RecoveryDiagnostics) ? null : row.RecoveryDiagnostics,
+                    LastRecoveryStatusCode: row.LastRecoveryStatusCode,
+                    LastRecoveryDiagnosticsFlags: row.LastRecoveryDiagnosticsFlags,
+                    LastRecoveredBytes: row.LastRecoveredBytes,
+                    LastRecoveryPartial: row.LastRecoveryPartial,
+                    CarveOffsetBytes: row.CarveOffsetBytes,
+                    CarveLengthBytes: row.CarveLengthBytes,
+                    CarveFormat: string.IsNullOrWhiteSpace(row.CarveFormat) ? null : row.CarveFormat);
+            })
+            .ToArray();
+    }
+
+    private static uint BuildSyntheticRecordNumber(ulong offsetBytes, int ordinal)
+    {
+        var folded = (uint)(offsetBytes ^ (offsetBytes >> 32));
+        return unchecked(0xC000_0000u | ((folded + (uint)ordinal) & 0x3FFF_FFFFu));
     }
 
     private static string NormalizeEvidenceSourcesForSelectedSource(
@@ -744,6 +880,8 @@ public partial class MainWindow : Window
             || row.DataSizeDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.ModifiedUtcDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.FileAttributesDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.CarveOffsetDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.CarveFormat.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.EvidenceSource.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.CandidateStatusCode.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.RecoveryDiagnostics.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase);
@@ -796,9 +934,20 @@ public partial class MainWindow : Window
         bool encrypted,
         bool hasNamedDataStreams,
         string? name,
-        string? originalPath)
+        string? originalPath,
+        string evidenceSources)
     {
-        if (directory || !deleted || isGhostRecord)
+        if (directory || isGhostRecord)
+        {
+            return RecoveryCandidateStatus.Invalid;
+        }
+
+        if (IsCarveEvidence(evidenceSources))
+        {
+            return RecoveryCandidateStatus.Partial;
+        }
+
+        if (!deleted)
         {
             return RecoveryCandidateStatus.Invalid;
         }
@@ -814,6 +963,18 @@ public partial class MainWindow : Window
         }
 
         return RecoveryCandidateStatus.Full;
+    }
+
+    private static bool IsCarveEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "Carve", StringComparison.OrdinalIgnoreCase));
     }
 
     private static RecoveryCandidateStatus MapRecoveryFailureStatus(int statusCode)
@@ -1212,6 +1373,62 @@ public partial class MainWindow : Window
             {
                 operationToken.ThrowIfCancellationRequested();
 
+                if (IsCarveEvidence(candidate.EvidenceSource))
+                {
+                    var carveRelativePath = BuildRecoveryRelativePath(candidate);
+                    var carveTargetPath = Path.Combine(recoveryRoot, carveRelativePath);
+                    var carveTargetDirectory = Path.GetDirectoryName(carveTargetPath);
+                    if (!string.IsNullOrWhiteSpace(carveTargetDirectory))
+                    {
+                        Directory.CreateDirectory(carveTargetDirectory);
+                    }
+
+                    var carveResult = RecoverCarvedCandidateToFile(
+                        sourcePath,
+                        _selectedSource.Kind,
+                        candidate,
+                        carveTargetPath,
+                        operationToken);
+
+                    if (carveResult.Success)
+                    {
+                        if (carveResult.Partial)
+                        {
+                            candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
+                            partial++;
+                        }
+                        else
+                        {
+                            candidate.CandidateStatus = RecoveryCandidateStatus.Full;
+                            recovered++;
+                        }
+
+                        candidate.LastRecoveryStatusCode = carveResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = carveResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = carveResult.BytesWritten;
+                        candidate.LastRecoveryPartial = carveResult.Partial;
+                        candidate.RecoveryDiagnostics = carveResult.DiagnosticsSummary;
+                        candidate.IsSelected = false;
+                        AppendSessionMessage(
+                            $"Recovered carve candidate {candidate.Name} to {carveTargetPath} ({(carveResult.Partial ? "partial" : "full")}, {carveResult.BytesWritten} bytes).");
+                    }
+                    else
+                    {
+                        candidate.CandidateStatus = MapRecoveryFailureStatus(carveResult.StatusCode);
+                        candidate.LastRecoveryStatusCode = carveResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = carveResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = carveResult.BytesWritten;
+                        candidate.LastRecoveryPartial = null;
+                        candidate.RecoveryDiagnostics = carveResult.DiagnosticsSummary;
+                        failed++;
+                        AppendSessionMessage(
+                            $"Carve recovery failed for {candidate.Name}: {carveResult.Message} (status {carveResult.StatusCode}).");
+                    }
+
+                    await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                    continue;
+                }
+
                 if (candidate.IsGhostRecord)
                 {
                     candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
@@ -1518,7 +1735,7 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
@@ -1543,6 +1760,9 @@ public partial class MainWindow : Window
                 EscapeCsv(candidate.ModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
                 EscapeCsv(candidate.MftModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
                 EscapeCsv(candidate.AccessedFileTimeUtc?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.CarveOffsetBytes?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.CarveLengthBytes?.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.CarveFormat),
                 EscapeCsv(candidate.EvidenceSource),
                 EscapeCsv(candidate.ConfidenceTier),
                 EscapeCsv(candidate.CandidateStatus.ToStorageCode()),
@@ -1554,6 +1774,142 @@ public partial class MainWindow : Window
         }
 
         return string.Join(Environment.NewLine, lines);
+    }
+
+    private static EngineRecoverCandidateResult RecoverCarvedCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        QuickScanCandidateRow candidate,
+        string outputPath,
+        CancellationToken cancellationToken)
+    {
+        if (!candidate.CarveOffsetBytes.HasValue || !candidate.CarveLengthBytes.HasValue || candidate.CarveLengthBytes.Value == 0)
+        {
+            return new EngineRecoverCandidateResult(
+                true,
+                false,
+                false,
+                0,
+                0,
+                "No carve offset/length metadata available.",
+                "Carve candidate is missing byte-range metadata.",
+                -420);
+        }
+
+        var open = NativeEngineProbe.OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No additional diagnostics.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            var outputDirectory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrWhiteSpace(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+            using var stream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
+
+            var offset = candidate.CarveOffsetBytes.Value;
+            var remaining = candidate.CarveLengthBytes.Value;
+            ulong written = 0;
+            var partial = false;
+            var alignment = open.AlignmentBytes > 1 ? (ulong)open.AlignmentBytes : 1UL;
+
+            while (remaining > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var chunkSize = (int)Math.Min(remaining, 1024 * 1024);
+                var alignedOffset = (offset / alignment) * alignment;
+                var prefix = checked((int)(offset - alignedOffset));
+                var required = checked((ulong)prefix + (ulong)chunkSize);
+                var alignedRequired = checked((int)(((required + alignment - 1) / alignment) * alignment));
+                var buffer = new byte[alignedRequired];
+
+                var read = NativeEngineProbe.ReadSourceSessionChunk(open.SessionId, alignedOffset, buffer);
+                if (!read.Success)
+                {
+                    return new EngineRecoverCandidateResult(
+                        true,
+                        false,
+                        false,
+                        written,
+                        0,
+                        "Chunk read failed while exporting carved bytes.",
+                        read.Message,
+                        read.StatusCode);
+                }
+
+                if (read.BytesRead == 0)
+                {
+                    partial = true;
+                    break;
+                }
+
+                if (read.BytesRead <= prefix)
+                {
+                    partial = true;
+                    break;
+                }
+
+                var payloadBytes = (int)read.BytesRead - prefix;
+                var toWrite = Math.Min(chunkSize, payloadBytes);
+                stream.Write(buffer, prefix, toWrite);
+                written += (ulong)toWrite;
+                offset += (ulong)toWrite;
+                remaining -= (ulong)toWrite;
+
+                if (toWrite < chunkSize)
+                {
+                    partial = true;
+                    break;
+                }
+            }
+
+            return new EngineRecoverCandidateResult(
+                true,
+                true,
+                partial,
+                written,
+                0,
+                partial
+                    ? "Carved byte range ended before requested length."
+                    : "No additional diagnostics.",
+                partial
+                    ? "Carved candidate recovered with partial data."
+                    : "Carved candidate recovered successfully.",
+                0);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new EngineRecoverCandidateResult(
+                true,
+                false,
+                false,
+                0,
+                0,
+                "Write failed while exporting carved bytes.",
+                ex.Message,
+                -421);
+        }
+        finally
+        {
+            NativeEngineProbe.CloseSourceSession(open.SessionId);
+        }
     }
 
     private static string EscapeMarkdownCell(string? value)

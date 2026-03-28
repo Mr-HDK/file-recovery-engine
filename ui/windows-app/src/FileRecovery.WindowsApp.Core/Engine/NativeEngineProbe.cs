@@ -102,6 +102,24 @@ public sealed record EngineNtfsQuickScanCandidatesResult(
     int StatusCode
 );
 
+public sealed record EngineCarveCandidate(
+    ulong OffsetBytes,
+    ulong LengthBytes,
+    bool Partial,
+    string Format,
+    string SuggestedName,
+    string ConfidenceTier,
+    string ConfidenceReason
+);
+
+public sealed record EngineCarveCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineCarveCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineVssSnapshot(
     string SnapshotId,
     string? VolumeName,
@@ -131,6 +149,12 @@ public sealed record EngineRecoverCandidateResult(
 
 public static class NativeEngineProbe
 {
+    public const uint CarveFamilyImages = 0x0001;
+    public const uint CarveFamilyDocuments = 0x0002;
+    public const uint CarveFamilyArchives = 0x0004;
+    public const uint CarveFamilyOffice = 0x0008;
+    public const uint CarveFamilyMedia = 0x0010;
+
     public static string GetVersionDisplay()
     {
         try
@@ -534,6 +558,99 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineCarveCandidatesResult GetCarveCandidatesFromSession(
+        ulong sessionId,
+        uint familyFlags,
+        ulong maxScanBytes,
+        int candidateCapacity = 256)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeCarveCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeCarveCandidate>();
+            }
+            else
+            {
+                buffer = new NativeCarveCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Format = new byte[16];
+                    buffer[i].SuggestedName = new byte[128];
+                    buffer[i].ConfidenceReason = new byte[256];
+                }
+            }
+
+            var status = fr_get_carve_candidates_from_session(
+                sessionId,
+                familyFlags,
+                maxScanBytes,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineCarveCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineCarveCandidate>(),
+                    MapCarveStatusMessage(status),
+                    status);
+            }
+
+            var results = new List<EngineCarveCandidate>((int)Math.Min(written, (uint)buffer.Length));
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                var format = DecodeUtf8(candidate.Format) ?? "bin";
+                var suggestedName = DecodeUtf8(candidate.SuggestedName) ?? $"carve_{candidate.OffsetBytes:X16}.{format}";
+                var confidenceReason = DecodeUtf8(candidate.ConfidenceReason) ?? "Signature-based carving candidate.";
+                var partial = (candidate.Flags & CarveCandidateFlagPartial) != 0;
+                results.Add(new EngineCarveCandidate(
+                    candidate.OffsetBytes,
+                    candidate.LengthBytes,
+                    partial,
+                    format,
+                    suggestedName,
+                    MapConfidenceTier(candidate.ConfidenceTier),
+                    confidenceReason));
+            }
+
+            return new EngineCarveCandidatesResult(
+                true,
+                true,
+                results,
+                "Carving candidates loaded.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineCarveCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineCarveCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineCarveCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineCarveCandidate>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
     public static EngineVssSnapshotListResult ListVssSnapshots(int snapshotCapacity = 64)
     {
         if (snapshotCapacity < 0)
@@ -758,6 +875,22 @@ public static class NativeEngineProbe
         };
     }
 
+    private static string MapCarveStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
     private static string MapVssStatusMessage(int statusCode)
     {
         return statusCode switch
@@ -969,6 +1102,7 @@ public static class NativeEngineProbe
     private const uint CandidateFlagEvidenceCarve = 0x0001_0000;
     private const uint CandidateFlagHasFileMetadata = 0x0002_0000;
     private const uint CandidateFlagGhostRecord = 0x0004_0000;
+    private const uint CarveCandidateFlagPartial = 0x0001;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
     private const uint RecoveryDiagCompressedAttribute = 0x0004;
@@ -1032,6 +1166,24 @@ public static class NativeEngineProbe
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
         public byte[] ReconstructedPath;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ConfidenceReason;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeCarveCandidate
+    {
+        public ulong OffsetBytes;
+        public ulong LengthBytes;
+        public uint Flags;
+        public uint ConfidenceTier;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+        public byte[] Format;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] SuggestedName;
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
         public byte[] ConfidenceReason;
@@ -1116,6 +1268,15 @@ public static class NativeEngineProbe
         out uint written,
         [In] byte[] usnJournalBytes,
         uint usnJournalLength);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_carve_candidates_from_session(
+        ulong sessionId,
+        uint familyFlags,
+        ulong maxScanBytes,
+        [Out] NativeCarveCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_list_vss_snapshots(

@@ -1,3 +1,4 @@
+use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector;
 use fr_scoring::score_candidate_with_reasons;
@@ -75,6 +76,18 @@ pub struct FrNtfsQuickScanCandidate {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct FrCarveCandidate {
+    pub offset_bytes: u64,
+    pub length_bytes: u64,
+    pub flags: u32,
+    pub confidence_tier: u32,
+    pub format: [u8; 16],
+    pub suggested_name: [u8; 128],
+    pub confidence_reason: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrVssSnapshot {
     pub snapshot_id: [u8; 96],
     pub volume_name: [u8; 260],
@@ -100,6 +113,13 @@ const CANDIDATE_FLAG_EVIDENCE_VSS: u32 = 0x8000;
 const CANDIDATE_FLAG_EVIDENCE_CARVE: u32 = 0x0001_0000;
 const CANDIDATE_FLAG_HAS_FILE_METADATA: u32 = 0x0002_0000;
 const CANDIDATE_FLAG_GHOST_RECORD: u32 = 0x0004_0000;
+const CARVE_CANDIDATE_FLAG_PARTIAL: u32 = 0x0001;
+
+const CARVE_FAMILY_IMAGES: u32 = 0x0001;
+const CARVE_FAMILY_DOCUMENTS: u32 = 0x0002;
+const CARVE_FAMILY_ARCHIVES: u32 = 0x0004;
+const CARVE_FAMILY_OFFICE: u32 = 0x0008;
+const CARVE_FAMILY_MEDIA: u32 = 0x0010;
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
@@ -473,6 +493,61 @@ pub extern "C" fn fr_get_ntfs_quick_scan_candidates_from_session_with_usn(
         out_written,
         usn_slice,
     )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_carve_candidates_from_session(
+    session_id: u64,
+    family_flags: u32,
+    max_scan_bytes: u64,
+    out_candidates: *mut FrCarveCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let bytes = match read_prefix_for_carving(session, max_scan_bytes) {
+        Ok(data) => data,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if bytes.is_empty() {
+        return 0;
+    }
+
+    let plan = build_carving_plan(family_flags, max_scan_bytes);
+    let candidates = carve_bytes(&plan, &bytes);
+    let written = candidates.len().min(candidate_capacity as usize);
+    if written > 0 {
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_candidates, written) };
+        for (index, candidate) in candidates.into_iter().take(written).enumerate() {
+            out_slice[index] = encode_carve_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = written as u32;
+    }
+
+    0
 }
 
 #[no_mangle]
@@ -1038,6 +1113,38 @@ fn encode_candidate(candidate: QuickScanCandidateInternal) -> FrNtfsQuickScanCan
     }
 
     write_utf8(&candidate.confidence_reason, &mut out.confidence_reason);
+
+    out
+}
+
+fn encode_carve_candidate(candidate: fr_carving::CarvedCandidate) -> FrCarveCandidate {
+    let mut out = FrCarveCandidate {
+        offset_bytes: candidate.offset as u64,
+        length_bytes: candidate.length as u64,
+        flags: if candidate.partial {
+            CARVE_CANDIDATE_FLAG_PARTIAL
+        } else {
+            0
+        },
+        confidence_tier: confidence_tier_code(candidate.confidence),
+        format: [0u8; 16],
+        suggested_name: [0u8; 128],
+        confidence_reason: [0u8; 256],
+    };
+
+    let extension = candidate.format.default_extension();
+    write_utf8(extension, &mut out.format);
+    write_utf8(
+        &format!("carve_{:016X}.{}", candidate.offset, extension),
+        &mut out.suggested_name,
+    );
+
+    let reason = if candidate.diagnostics.is_empty() {
+        String::from("Signature-based carving candidate.")
+    } else {
+        candidate.diagnostics.join("; ")
+    };
+    write_utf8(&reason, &mut out.confidence_reason);
 
     out
 }
@@ -1719,6 +1826,68 @@ fn write_diagnostics_flags(out_diagnostics_flags: *mut u32, diagnostics_flags: u
     }
 }
 
+fn build_carving_plan(family_flags: u32, max_scan_bytes: u64) -> CarvingPlan {
+    let max_scan_bytes = normalize_max_scan_bytes(max_scan_bytes) as usize;
+    if family_flags == 0 {
+        return CarvingPlan::default().with_max_scan_bytes(max_scan_bytes);
+    }
+
+    let mut plan = CarvingPlan::default()
+        .without_family(CarvingFamily::Images)
+        .without_family(CarvingFamily::Documents);
+    if family_flags & CARVE_FAMILY_IMAGES != 0 {
+        plan = plan.with_family(CarvingFamily::Images);
+    }
+    if family_flags & CARVE_FAMILY_DOCUMENTS != 0 {
+        plan = plan.with_family(CarvingFamily::Documents);
+    }
+    if family_flags & CARVE_FAMILY_ARCHIVES != 0 {
+        plan = plan.with_family(CarvingFamily::Archives);
+    }
+    if family_flags & CARVE_FAMILY_OFFICE != 0 {
+        plan = plan.with_family(CarvingFamily::Office);
+    }
+    if family_flags & CARVE_FAMILY_MEDIA != 0 {
+        plan = plan.with_family(CarvingFamily::Media);
+    }
+
+    plan.with_max_scan_bytes(max_scan_bytes)
+}
+
+fn read_prefix_for_carving(
+    session: &mut fr_winio::ReadSession,
+    max_scan_bytes: u64,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const UNKNOWN_SIZE_FALLBACK_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+    let normalized_max = normalize_max_scan_bytes(max_scan_bytes);
+    let source_len = session
+        .size_bytes()
+        .unwrap_or(normalized_max.min(UNKNOWN_SIZE_FALLBACK_SCAN_BYTES));
+    let scan_len = source_len.min(normalized_max) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn normalize_max_scan_bytes(max_scan_bytes: u64) -> u64 {
+    const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_ALLOWED_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    if max_scan_bytes == 0 {
+        DEFAULT_MAX_SCAN_BYTES
+    } else {
+        max_scan_bytes.min(MAX_ALLOWED_SCAN_BYTES)
+    }
+}
+
 fn parse_source_kind(raw: i32) -> Result<RecoverySourceKind, ()> {
     match raw {
         0 => Ok(RecoverySourceKind::PhysicalDisk),
@@ -1793,6 +1962,55 @@ mod tests {
     #[test]
     fn health_check_returns_zero() {
         assert_eq!(fr_health_check(), 0);
+    }
+
+    #[test]
+    fn ffi_carve_candidates_from_session_returns_image_candidate() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-carve-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("carve.img");
+        let bytes = b"prefix\xFF\xD8\xFF\xE0test-jpeg\xFF\xD9suffix";
+        fs::write(&image_path, bytes).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut out_written = 0u32;
+        let mut carved = vec![empty_carve_candidate(); 4];
+        let status = fr_get_carve_candidates_from_session(
+            session_id,
+            CARVE_FAMILY_IMAGES,
+            bytes.len() as u64,
+            carved.as_mut_ptr(),
+            carved.len() as u32,
+            &mut out_written,
+        );
+        assert_eq!(status, 0);
+        assert!(out_written >= 1);
+
+        let first = carved[0];
+        assert!(first.length_bytes > 0);
+        assert_eq!(c_string_bytes_to_string(&first.format), "jpg");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
@@ -3076,6 +3294,18 @@ mod tests {
             accessed_filetime_utc: 0,
             name: [0u8; 128],
             reconstructed_path: [0u8; 256],
+            confidence_reason: [0u8; 256],
+        }
+    }
+
+    fn empty_carve_candidate() -> FrCarveCandidate {
+        FrCarveCandidate {
+            offset_bytes: 0,
+            length_bytes: 0,
+            flags: 0,
+            confidence_tier: 0,
+            format: [0u8; 16],
+            suggested_name: [0u8; 128],
             confidence_reason: [0u8; 256],
         }
     }

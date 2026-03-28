@@ -42,6 +42,7 @@
 33. Implemented Phase 4 baseline VSS path: native snapshot enumeration (`fr-vss` + `fr_list_vss_snapshots`), .NET interop mapping, WPF source-list snapshot integration (ID/timestamp surfaced), and VSS evidence tagging for snapshot-derived quick-scan candidates in the unified results model.
 34. Closed remaining Phase 2 quick-scan quality gaps by prioritizing recently deleted candidates in session quick-scan ordering and adding explicit nested deleted-directory reconstruction coverage in `fr-session` tests.
 35. Completed Phase 4 recovery UX gaps by enabling directory-selection expansion into child-file recovery, formatting snapshot timestamps clearly in source display, and normalizing snapshot volume identity checks for same-volume safety enforcement.
+36. Implemented Phase 5 baseline end-to-end carving path: selective family-based carving in `fr-carving` + validator hardening in `fr-validator`, new FFI carve-candidate API, WPF full-scan carve family selection UI, carve candidate persistence in SQLite, and carve-range export recovery in UI with explicit carve evidence labeling.
 
 ## Active risks
 

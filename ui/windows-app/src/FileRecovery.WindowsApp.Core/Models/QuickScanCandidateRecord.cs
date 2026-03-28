@@ -30,5 +30,8 @@ public sealed record QuickScanCandidateRecord(
     ulong? ModifiedFileTimeUtc = null,
     ulong? MftModifiedFileTimeUtc = null,
     ulong? AccessedFileTimeUtc = null,
-    bool IsGhostRecord = false
+    bool IsGhostRecord = false,
+    ulong? CarveOffsetBytes = null,
+    ulong? CarveLengthBytes = null,
+    string? CarveFormat = null
 );

@@ -58,6 +58,9 @@ public sealed class SqliteSessionStore
               modified_filetime_utc INTEGER NULL,
               mft_modified_filetime_utc INTEGER NULL,
               accessed_filetime_utc INTEGER NULL,
+              carve_offset_bytes INTEGER NULL,
+              carve_length_bytes INTEGER NULL,
+              carve_format TEXT NULL,
               evidence_sources TEXT NOT NULL DEFAULT 'MFT',
               confidence_tier TEXT NOT NULL DEFAULT 'Medium',
               confidence_reason TEXT NOT NULL DEFAULT '',
@@ -125,6 +128,9 @@ public sealed class SqliteSessionStore
                   modified_filetime_utc,
                   mft_modified_filetime_utc,
                   accessed_filetime_utc,
+                  carve_offset_bytes,
+                  carve_length_bytes,
+                  carve_format,
                   evidence_sources,
                   confidence_tier,
                   confidence_reason,
@@ -157,6 +163,9 @@ public sealed class SqliteSessionStore
                   $modified_filetime_utc,
                   $mft_modified_filetime_utc,
                   $accessed_filetime_utc,
+                  $carve_offset_bytes,
+                  $carve_length_bytes,
+                  $carve_format,
                   $evidence_sources,
                   $confidence_tier,
                   $confidence_reason,
@@ -207,6 +216,15 @@ public sealed class SqliteSessionStore
             insert.Parameters.AddWithValue(
                 "$accessed_filetime_utc",
                 candidate.AccessedFileTimeUtc.HasValue ? (object)checked((long)candidate.AccessedFileTimeUtc.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$carve_offset_bytes",
+                candidate.CarveOffsetBytes.HasValue ? (object)checked((long)candidate.CarveOffsetBytes.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$carve_length_bytes",
+                candidate.CarveLengthBytes.HasValue ? (object)checked((long)candidate.CarveLengthBytes.Value) : DBNull.Value);
+            insert.Parameters.AddWithValue(
+                "$carve_format",
+                string.IsNullOrWhiteSpace(candidate.CarveFormat) ? DBNull.Value : candidate.CarveFormat);
             insert.Parameters.AddWithValue("$evidence_sources", candidate.EvidenceSources);
             insert.Parameters.AddWithValue("$confidence_tier", candidate.ConfidenceTier);
             insert.Parameters.AddWithValue("$confidence_reason", candidate.ConfidenceReason);
@@ -403,6 +421,9 @@ public sealed class SqliteSessionStore
               modified_filetime_utc,
               mft_modified_filetime_utc,
               accessed_filetime_utc,
+              carve_offset_bytes,
+              carve_length_bytes,
+              carve_format,
               evidence_sources,
               confidence_tier,
               confidence_reason,
@@ -445,17 +466,20 @@ public sealed class SqliteSessionStore
             ulong? modifiedFileTimeUtc = reader.IsDBNull(17) ? null : checked((ulong?)reader.GetInt64(17));
             ulong? mftModifiedFileTimeUtc = reader.IsDBNull(18) ? null : checked((ulong?)reader.GetInt64(18));
             ulong? accessedFileTimeUtc = reader.IsDBNull(19) ? null : checked((ulong?)reader.GetInt64(19));
-            var evidenceSources = reader.IsDBNull(20) ? "MFT" : reader.GetString(20);
-            var confidenceTier = reader.IsDBNull(21) ? "Medium" : reader.GetString(21);
-            var confidenceReason = reader.IsDBNull(22) ? string.Empty : reader.GetString(22);
+            ulong? carveOffsetBytes = reader.IsDBNull(20) ? null : checked((ulong?)reader.GetInt64(20));
+            ulong? carveLengthBytes = reader.IsDBNull(21) ? null : checked((ulong?)reader.GetInt64(21));
+            var carveFormat = reader.IsDBNull(22) ? null : reader.GetString(22);
+            var evidenceSources = reader.IsDBNull(23) ? "MFT" : reader.GetString(23);
+            var confidenceTier = reader.IsDBNull(24) ? "Medium" : reader.GetString(24);
+            var confidenceReason = reader.IsDBNull(25) ? string.Empty : reader.GetString(25);
             var candidateStatus = RecoveryCandidateStatusExtensions.FromStorageCode(
-                reader.IsDBNull(23) ? null : reader.GetString(23));
-            var recoveryDiagnostics = reader.IsDBNull(24) ? null : reader.GetString(24);
-            var lastRecoveryStatusCode = reader.IsDBNull(25) ? null : (int?)reader.GetInt32(25);
-            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(26) ? null : checked((uint?)reader.GetInt64(26));
-            ulong? lastRecoveryBytes = reader.IsDBNull(27) ? null : checked((ulong?)reader.GetInt64(27));
-            var lastRecoveryPartial = reader.IsDBNull(28) ? null : (bool?)(reader.GetInt32(28) != 0);
-            var lastRecoveryUtc = reader.IsDBNull(29) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(29));
+                reader.IsDBNull(26) ? null : reader.GetString(26));
+            var recoveryDiagnostics = reader.IsDBNull(27) ? null : reader.GetString(27);
+            var lastRecoveryStatusCode = reader.IsDBNull(28) ? null : (int?)reader.GetInt32(28);
+            uint? lastRecoveryDiagnosticsFlags = reader.IsDBNull(29) ? null : checked((uint?)reader.GetInt64(29));
+            ulong? lastRecoveryBytes = reader.IsDBNull(30) ? null : checked((ulong?)reader.GetInt64(30));
+            var lastRecoveryPartial = reader.IsDBNull(31) ? null : (bool?)(reader.GetInt32(31) != 0);
+            var lastRecoveryUtc = reader.IsDBNull(32) ? null : (DateTimeOffset?)DateTimeOffset.Parse(reader.GetString(32));
 
             rows.Add(new QuickScanCandidateRecord(
                 Ordinal: ordinal,
@@ -487,7 +511,10 @@ public sealed class SqliteSessionStore
                 LastRecoveryDiagnosticsFlags: lastRecoveryDiagnosticsFlags,
                 LastRecoveredBytes: lastRecoveryBytes,
                 LastRecoveryPartial: lastRecoveryPartial,
-                LastRecoveryUtc: lastRecoveryUtc));
+                LastRecoveryUtc: lastRecoveryUtc,
+                CarveOffsetBytes: carveOffsetBytes,
+                CarveLengthBytes: carveLengthBytes,
+                CarveFormat: carveFormat));
         }
 
         return rows;
@@ -695,6 +722,21 @@ public sealed class SqliteSessionStore
             connection,
             "accessed_filetime_utc",
             "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "carve_offset_bytes",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "carve_length_bytes",
+            "INTEGER NULL",
+            cancellationToken);
+        await EnsureQuickScanCandidateColumnAsync(
+            connection,
+            "carve_format",
+            "TEXT NULL",
             cancellationToken);
         await EnsureQuickScanCandidateColumnAsync(
             connection,

@@ -99,6 +99,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
@@ -111,7 +112,18 @@
                     <TextBlock Grid.Row="2" Text="Scan Mode" FontWeight="SemiBold"/>
                     <ComboBox x:Name="ScanModeComboBox" Grid.Row="3" Margin="0,6,0,12" MinWidth="220"/>
 
-                    <StackPanel Grid.Row="4" Orientation="Horizontal" VerticalAlignment="Top">
+                    <StackPanel Grid.Row="4" Margin="0,0,0,12">
+                        <TextBlock Text="Carving Families (Full Scan)" FontWeight="SemiBold"/>
+                        <WrapPanel Margin="0,6,0,0">
+                            <CheckBox x:Name="CarveImagesCheckBox" Content="Images" Margin="0,0,12,0" IsChecked="True"/>
+                            <CheckBox x:Name="CarveDocumentsCheckBox" Content="Documents" Margin="0,0,12,0" IsChecked="True"/>
+                            <CheckBox x:Name="CarveArchivesCheckBox" Content="Archives" Margin="0,0,12,0"/>
+                            <CheckBox x:Name="CarveOfficeCheckBox" Content="Office" Margin="0,0,12,0"/>
+                            <CheckBox x:Name="CarveMediaCheckBox" Content="Media"/>
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="5" Orientation="Horizontal" VerticalAlignment="Top">
                         <Button Content="Validate Safety" Width="120" Margin="0,0,8,0" Click="ValidateSafetyButton_Click"/>
                         <Button Content="Start Session" Width="110" Click="StartSessionButton_Click"/>
                         <Button Content="Cancel Operation" Width="120" Margin="8,0,0,0" Click="CancelPreviewButton_Click"/>
@@ -257,6 +269,8 @@
                         <DataGridTextColumn Header="Data Size" Binding="{Binding DataSizeDisplay}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Modified UTC" Binding="{Binding ModifiedUtcDisplay}" Width="165" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Attr" Binding="{Binding FileAttributesDisplay}" Width="92" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Carve Format" Binding="{Binding CarveFormat}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Carve Offset" Binding="{Binding CarveOffsetDisplay}" Width="120" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Parent Record" Binding="{Binding ParentRecord}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Evidence" Binding="{Binding EvidenceSource}" Width="90" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceTier}" Width="90" IsReadOnly="True"/>
