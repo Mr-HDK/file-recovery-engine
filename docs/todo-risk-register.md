@@ -43,6 +43,7 @@
 34. Closed remaining Phase 2 quick-scan quality gaps by prioritizing recently deleted candidates in session quick-scan ordering and adding explicit nested deleted-directory reconstruction coverage in `fr-session` tests.
 35. Completed Phase 4 recovery UX gaps by enabling directory-selection expansion into child-file recovery, formatting snapshot timestamps clearly in source display, and normalizing snapshot volume identity checks for same-volume safety enforcement.
 36. Implemented Phase 5 baseline end-to-end carving path: selective family-based carving in `fr-carving` + validator hardening in `fr-validator`, new FFI carve-candidate API, WPF full-scan carve family selection UI, carve candidate persistence in SQLite, and carve-range export recovery in UI with explicit carve evidence labeling.
+37. Implemented Phase 6 post-processing quality baseline in .NET UI/core: candidate dedupe + logical clustering (`CandidatePostProcessor`), metadata-aware placeholder naming and carve rename heuristics, export-time timestamp/attribute preservation attempts, and recovery report/CSV enrichment with cluster + dedupe context.
 
 ## Active risks
 

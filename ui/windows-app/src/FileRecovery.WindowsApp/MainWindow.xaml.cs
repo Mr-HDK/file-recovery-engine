@@ -8,11 +8,15 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Media.Imaging;
+using System.Xml.Linq;
 using WinForms = System.Windows.Forms;
 
 namespace FileRecovery.WindowsApp;
@@ -32,9 +36,18 @@ public partial class MainWindow : Window
         public bool IsCompressed { get; init; }
         public bool IsSparse { get; init; }
         public bool IsEncrypted { get; init; }
-        public string Name { get; init; } = string.Empty;
-        public string OriginalPath { get; init; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string OriginalPath { get; set; } = string.Empty;
         public string ParentRecord { get; init; } = string.Empty;
+        public string ClusterId { get; init; } = string.Empty;
+        public int ClusterSize { get; init; }
+        public int DeduplicatedCount { get; init; }
+        public string ClusterDisplay => string.IsNullOrWhiteSpace(ClusterId)
+            ? string.Empty
+            : $"{ClusterId} ({ClusterSize.ToString(CultureInfo.InvariantCulture)})";
+        public string DedupDisplay => DeduplicatedCount > 0
+            ? DeduplicatedCount.ToString(CultureInfo.InvariantCulture)
+            : string.Empty;
         public ulong? DataSizeBytes { get; init; }
         public ulong? AllocatedSizeBytes { get; init; }
         public uint? FileAttributes { get; init; }
@@ -110,15 +123,17 @@ public partial class MainWindow : Window
     private readonly SqliteSessionStore _sessionStore;
     private readonly SessionLogWriter _sessionLogWriter;
     private readonly ReadPreviewScanner _previewScanner;
+    private readonly CandidatePostProcessor _candidatePostProcessor;
     private readonly ObservableCollection<SourceCandidate> _sources = [];
     private readonly ObservableCollection<string> _validationOutput = [];
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
-    private const string UiBuildTag = "ui-scroll-fix-20260328-0006";
+    private const string UiBuildTag = "phase6-postprocess-20260328-0012";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
     private const ulong FullScanCarveMaxBytes = 64UL * 1024UL * 1024UL;
+    private static readonly Regex PdfTitleRegex = new("/Title\\s*\\((?<title>[^\\)]{3,120})\\)", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private SourceCandidate? _selectedSource;
     private ICollectionView? _quickScanCandidatesView;
     private CancellationTokenSource? _previewReadCts;
@@ -131,6 +146,8 @@ public partial class MainWindow : Window
     private bool _filterRecoverableOnly;
     private bool _filterSelectedOnly;
     private string _candidateSearchTerm = string.Empty;
+    private int _candidateClusterCount;
+    private int _candidateDedupedCount;
 
     public MainWindow()
     {
@@ -143,6 +160,7 @@ public partial class MainWindow : Window
         _sessionStore = new SqliteSessionStore();
         _sessionLogWriter = new SessionLogWriter();
         _previewScanner = new ReadPreviewScanner();
+        _candidatePostProcessor = new CandidatePostProcessor();
 
         SourcesDataGrid.ItemsSource = _sources;
         ValidationListBox.ItemsSource = _validationOutput;
@@ -576,6 +594,8 @@ public partial class MainWindow : Window
         if (!result.Success)
         {
             _quickScanCandidates.Clear();
+            _candidateClusterCount = 0;
+            _candidateDedupedCount = 0;
             RefreshCandidateView();
             AppendCandidateActivity("Candidate load failed: engine result was not successful.");
             return;
@@ -630,14 +650,24 @@ public partial class MainWindow : Window
 
     private void RenderQuickScanCandidates(IReadOnlyList<QuickScanCandidateRecord> candidates)
     {
+        var processed = _candidatePostProcessor.Process(candidates);
+        var previouslySelectedKeys = _quickScanCandidates
+            .Where(existing => existing.IsSelected)
+            .Select(BuildCandidateSelectionKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         _quickScanCandidates.Clear();
 
-        foreach (var candidate in candidates)
+        foreach (var entry in processed.Candidates)
         {
+            var candidate = entry.Candidate;
+            var defaultSelection = candidate.Deleted && !candidate.IsGhostRecord && !IsCarveEvidence(candidate.EvidenceSources);
+            var selectionKey = BuildCandidateSelectionKey(candidate.RecordNumber, candidate.Name, candidate.OriginalPath);
             _quickScanCandidates.Add(new QuickScanCandidateRow
             {
                 Ordinal = candidate.Ordinal,
-                IsSelected = candidate.Deleted && !candidate.IsGhostRecord && !IsCarveEvidence(candidate.EvidenceSources),
+                IsSelected = previouslySelectedKeys.Count == 0
+                    ? defaultSelection
+                    : previouslySelectedKeys.Contains(selectionKey),
                 RecordNumber = candidate.RecordNumber,
                 Deleted = candidate.Deleted,
                 IsGhostRecord = candidate.IsGhostRecord,
@@ -650,6 +680,9 @@ public partial class MainWindow : Window
                 Name = candidate.Name ?? "(unknown)",
                 OriginalPath = candidate.OriginalPath ?? "(unresolved)",
                 ParentRecord = candidate.ParentRecordNumber?.ToString() ?? string.Empty,
+                ClusterId = entry.ClusterId,
+                ClusterSize = entry.ClusterSize,
+                DeduplicatedCount = entry.DeduplicatedCount,
                 DataSizeBytes = candidate.DataSizeBytes,
                 AllocatedSizeBytes = candidate.AllocatedSizeBytes,
                 FileAttributes = candidate.FileAttributes,
@@ -672,8 +705,11 @@ public partial class MainWindow : Window
             });
         }
 
+        _candidateClusterCount = processed.ClusterCount;
+        _candidateDedupedCount = processed.RemovedDuplicateCount;
         RefreshCandidateView();
-        AppendCandidateActivity($"Loaded {_quickScanCandidates.Count} candidate rows.");
+        AppendCandidateActivity(
+            $"Loaded {_quickScanCandidates.Count} candidate rows (input={processed.InputCount}, clusters={processed.ClusterCount}, deduped={processed.RemovedDuplicateCount}).");
     }
 
     private uint BuildSelectedCarveFamilyFlags()
@@ -716,7 +752,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var baseOrdinal = _quickScanCandidates.Count;
+        var combined = SnapshotCandidateRecordsFromRows().ToList();
+        var baseOrdinal = combined.Count;
         for (var index = 0; index < result.Candidates.Count; index++)
         {
             var candidate = result.Candidates[index];
@@ -725,43 +762,40 @@ public partial class MainWindow : Window
                 ? $"carve_{candidate.OffsetBytes:X16}.{format}"
                 : candidate.SuggestedName;
 
-            _quickScanCandidates.Add(new QuickScanCandidateRow
-            {
-                Ordinal = baseOrdinal + index,
-                IsSelected = false,
-                RecordNumber = BuildSyntheticRecordNumber(candidate.OffsetBytes, index),
-                Deleted = false,
-                IsGhostRecord = false,
-                Directory = false,
-                NonResidentData = false,
-                HasNamedDataStreams = false,
-                IsCompressed = false,
-                IsSparse = false,
-                IsEncrypted = false,
-                Name = suggestedName,
-                OriginalPath = $@"Carved\{suggestedName}",
-                ParentRecord = string.Empty,
-                DataSizeBytes = candidate.LengthBytes,
-                AllocatedSizeBytes = null,
-                FileAttributes = null,
-                CreatedFileTimeUtc = null,
-                ModifiedFileTimeUtc = null,
-                MftModifiedFileTimeUtc = null,
-                AccessedFileTimeUtc = null,
-                CarveOffsetBytes = candidate.OffsetBytes,
-                CarveLengthBytes = candidate.LengthBytes,
-                CarveFormat = format,
-                EvidenceSource = "Carve",
-                ConfidenceTier = candidate.ConfidenceTier,
-                CandidateStatus = RecoveryCandidateStatus.Partial,
-                ConfidenceReason = candidate.ConfidenceReason,
-                RecoveryDiagnostics = candidate.Partial
+            combined.Add(new QuickScanCandidateRecord(
+                Ordinal: baseOrdinal + index,
+                RecordNumber: BuildSyntheticRecordNumber(candidate.OffsetBytes, index),
+                Deleted: false,
+                IsGhostRecord: false,
+                Directory: false,
+                NonResidentData: false,
+                HasNamedDataStreams: false,
+                IsCompressed: false,
+                IsSparse: false,
+                IsEncrypted: false,
+                Name: suggestedName,
+                OriginalPath: $@"Carved\{suggestedName}",
+                ParentRecordNumber: null,
+                DataSizeBytes: candidate.LengthBytes,
+                AllocatedSizeBytes: null,
+                FileAttributes: null,
+                CreatedFileTimeUtc: null,
+                ModifiedFileTimeUtc: null,
+                MftModifiedFileTimeUtc: null,
+                AccessedFileTimeUtc: null,
+                CarveOffsetBytes: candidate.OffsetBytes,
+                CarveLengthBytes: candidate.LengthBytes,
+                CarveFormat: format,
+                EvidenceSources: "Carve",
+                ConfidenceTier: candidate.ConfidenceTier,
+                CandidateStatus: RecoveryCandidateStatus.Partial,
+                ConfidenceReason: candidate.ConfidenceReason,
+                RecoveryDiagnostics: candidate.Partial
                     ? "Candidate marked partial by carving validator."
-                    : string.Empty,
-            });
+                    : string.Empty));
         }
 
-        RefreshCandidateView();
+        RenderQuickScanCandidates(combined);
         AppendCandidateActivity($"Appended {result.Candidates.Count} carve candidates.");
     }
 
@@ -847,6 +881,18 @@ public partial class MainWindow : Window
             && source.Id.StartsWith("vss:", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static string BuildCandidateSelectionKey(QuickScanCandidateRow row)
+    {
+        return BuildCandidateSelectionKey(row.RecordNumber, row.Name, row.OriginalPath);
+    }
+
+    private static string BuildCandidateSelectionKey(uint recordNumber, string? name, string? originalPath)
+    {
+        var normalizedName = string.IsNullOrWhiteSpace(name) ? "(unknown)" : name.Trim().ToLowerInvariant();
+        var normalizedPath = string.IsNullOrWhiteSpace(originalPath) ? "(unresolved)" : originalPath.Trim().ToLowerInvariant();
+        return $"{recordNumber.ToString(CultureInfo.InvariantCulture)}|{normalizedName}|{normalizedPath}";
+    }
+
     private bool FilterQuickScanCandidate(object rowObject)
     {
         if (rowObject is not QuickScanCandidateRow row)
@@ -907,7 +953,7 @@ public partial class MainWindow : Window
         var visible = _quickScanCandidatesView?.Cast<object>().Count() ?? total;
 
         CandidateSummaryTextBlock.Text =
-            $"Visible {visible}/{total} | Selected {selected} | Deleted {deleted} | Recoverable {recoverable}";
+            $"Visible {visible}/{total} | Selected {selected} | Deleted {deleted} | Recoverable {recoverable} | Clusters {_candidateClusterCount} | Deduped {_candidateDedupedCount}";
     }
 
     private void AppendCandidateActivity(string message)
@@ -1392,6 +1438,15 @@ public partial class MainWindow : Window
 
                     if (carveResult.Success)
                     {
+                        var finalCarvePath = carveTargetPath;
+                        var renameSummary = TryApplyCarveMetadataRename(finalCarvePath, candidate, out var renamedPath);
+                        if (!string.IsNullOrWhiteSpace(renamedPath))
+                        {
+                            finalCarvePath = renamedPath;
+                        }
+
+                        var metadataSummary = TryApplyRecoveredFileMetadata(finalCarvePath, candidate);
+
                         if (carveResult.Partial)
                         {
                             candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
@@ -1407,10 +1462,13 @@ public partial class MainWindow : Window
                         candidate.LastRecoveryDiagnosticsFlags = carveResult.DiagnosticsFlags;
                         candidate.LastRecoveredBytes = carveResult.BytesWritten;
                         candidate.LastRecoveryPartial = carveResult.Partial;
-                        candidate.RecoveryDiagnostics = carveResult.DiagnosticsSummary;
+                        candidate.RecoveryDiagnostics = CombineRecoveryDiagnostics(
+                            carveResult.DiagnosticsSummary,
+                            renameSummary,
+                            metadataSummary);
                         candidate.IsSelected = false;
                         AppendSessionMessage(
-                            $"Recovered carve candidate {candidate.Name} to {carveTargetPath} ({(carveResult.Partial ? "partial" : "full")}, {carveResult.BytesWritten} bytes).");
+                            $"Recovered carve candidate {candidate.Name} to {finalCarvePath} ({(carveResult.Partial ? "partial" : "full")}, {carveResult.BytesWritten} bytes). Diagnostics: {candidate.RecoveryDiagnostics}");
                     }
                     else
                     {
@@ -1459,6 +1517,8 @@ public partial class MainWindow : Window
 
                 if (result.Success)
                 {
+                    var metadataSummary = TryApplyRecoveredFileMetadata(targetPath, candidate);
+
                     if (result.Partial)
                     {
                         candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
@@ -1474,10 +1534,10 @@ public partial class MainWindow : Window
                     candidate.LastRecoveryDiagnosticsFlags = result.DiagnosticsFlags;
                     candidate.LastRecoveredBytes = result.BytesWritten;
                     candidate.LastRecoveryPartial = result.Partial;
-                    candidate.RecoveryDiagnostics = result.DiagnosticsSummary;
+                    candidate.RecoveryDiagnostics = CombineRecoveryDiagnostics(result.DiagnosticsSummary, metadataSummary);
                     candidate.IsSelected = false;
                     AppendSessionMessage(
-                        $"Recovered R{candidate.RecordNumber} to {targetPath} ({(result.Partial ? "partial" : "full")}, {result.BytesWritten} bytes). Diagnostics: {result.DiagnosticsSummary}");
+                        $"Recovered R{candidate.RecordNumber} to {targetPath} ({(result.Partial ? "partial" : "full")}, {result.BytesWritten} bytes). Diagnostics: {candidate.RecoveryDiagnostics}");
                 }
                 else
                 {
@@ -1694,6 +1754,8 @@ public partial class MainWindow : Window
         builder.AppendLine($"- Source: `{_selectedSource?.DisplayName ?? "(unknown)"}`");
         builder.AppendLine($"- Destination Root: `{recoveryRoot}`");
         builder.AppendLine($"- Selected Candidates: `{selected.Count}`");
+        builder.AppendLine($"- Clusters: `{selected.Select(candidate => candidate.ClusterId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).Count()}`");
+        builder.AppendLine($"- Deduplicated Candidates Suppressed: `{selected.Sum(candidate => candidate.DeduplicatedCount)}`");
         builder.AppendLine($"- Recovered Full: `{recovered}`");
         builder.AppendLine($"- Recovered Partial: `{partial}`");
         builder.AppendLine($"- Failed: `{failed}`");
@@ -1701,8 +1763,8 @@ public partial class MainWindow : Window
         builder.AppendLine();
         builder.AppendLine("## Candidate Details");
         builder.AppendLine();
-        builder.AppendLine("| Record | Name | Original Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
-        builder.AppendLine("|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
+        builder.AppendLine("| Cluster | Dedupe | Evidence | Record | Name | Original Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
+        builder.AppendLine("|---|---:|---|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
 
         foreach (var candidate in selected)
         {
@@ -1723,9 +1785,12 @@ public partial class MainWindow : Window
                 : "-";
             var modifiedUtc = EscapeMarkdownCell(candidate.ModifiedUtcDisplay);
             var fileAttributes = EscapeMarkdownCell(candidate.FileAttributesDisplay);
+            var dedupe = candidate.DeduplicatedCount > 0
+                ? candidate.DeduplicatedCount.ToString(CultureInfo.InvariantCulture)
+                : "-";
 
             builder.AppendLine(
-                $"| {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
+                $"| {EscapeMarkdownCell(candidate.ClusterDisplay)} | {dedupe} | {EscapeMarkdownCell(candidate.EvidenceSource)} | {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
         }
 
         return builder.ToString();
@@ -1735,12 +1800,15 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "cluster_id,cluster_size,deduplicated_count,record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
         {
             lines.Add(string.Join(",",
+                EscapeCsv(candidate.ClusterId),
+                EscapeCsv(candidate.ClusterSize.ToString(CultureInfo.InvariantCulture)),
+                EscapeCsv(candidate.DeduplicatedCount.ToString(CultureInfo.InvariantCulture)),
                 candidate.RecordNumber.ToString(CultureInfo.InvariantCulture),
                 candidate.Deleted ? "1" : "0",
                 candidate.IsGhostRecord ? "1" : "0",
@@ -1910,6 +1978,445 @@ public partial class MainWindow : Window
         {
             NativeEngineProbe.CloseSourceSession(open.SessionId);
         }
+    }
+
+    private static string CombineRecoveryDiagnostics(params string?[] diagnostics)
+    {
+        var parts = diagnostics
+            .Where(part => !string.IsNullOrWhiteSpace(part))
+            .Select(part => part!.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (parts.Length == 0)
+        {
+            return "No additional diagnostics.";
+        }
+
+        return string.Join(" ", parts);
+    }
+
+    private static string TryApplyRecoveredFileMetadata(string outputPath, QuickScanCandidateRow candidate)
+    {
+        if (!File.Exists(outputPath))
+        {
+            return "Export metadata skipped: output file not found.";
+        }
+
+        var notes = new List<string>();
+        try
+        {
+            var createdUtc = TryConvertFileTimeUtc(candidate.CreatedFileTimeUtc);
+            var modifiedUtc = TryConvertFileTimeUtc(candidate.ModifiedFileTimeUtc);
+            var accessedUtc = TryConvertFileTimeUtc(candidate.AccessedFileTimeUtc);
+
+            if (createdUtc.HasValue)
+            {
+                File.SetCreationTimeUtc(outputPath, createdUtc.Value);
+            }
+            if (modifiedUtc.HasValue)
+            {
+                File.SetLastWriteTimeUtc(outputPath, modifiedUtc.Value);
+            }
+            if (accessedUtc.HasValue)
+            {
+                File.SetLastAccessTimeUtc(outputPath, accessedUtc.Value);
+            }
+
+            if (createdUtc.HasValue || modifiedUtc.HasValue || accessedUtc.HasValue)
+            {
+                notes.Add("Preserved timestamps.");
+            }
+        }
+        catch (Exception ex)
+        {
+            notes.Add($"Timestamp preservation skipped: {ex.Message}");
+        }
+
+        if (candidate.FileAttributes.HasValue)
+        {
+            try
+            {
+                var mapped = MapFileAttributesForExport(candidate.FileAttributes.Value);
+                File.SetAttributes(outputPath, mapped);
+                notes.Add($"Preserved attributes 0x{candidate.FileAttributes.Value:X8}.");
+            }
+            catch (Exception ex)
+            {
+                notes.Add($"Attribute preservation skipped: {ex.Message}");
+            }
+        }
+
+        if (notes.Count == 0)
+        {
+            return "No export metadata available.";
+        }
+
+        return string.Join(" ", notes);
+    }
+
+    private static string TryApplyCarveMetadataRename(
+        string outputPath,
+        QuickScanCandidateRow candidate,
+        out string? renamedPath)
+    {
+        renamedPath = null;
+        if (!File.Exists(outputPath))
+        {
+            return "Metadata rename skipped: output file not found.";
+        }
+
+        if (!LooksGenericCarveName(candidate.Name))
+        {
+            return string.Empty;
+        }
+
+        if (!TryBuildCarveMetadataName(outputPath, candidate, out var baseName, out var reason))
+        {
+            return string.Empty;
+        }
+
+        var extension = Path.GetExtension(outputPath);
+        var proposedName = $"{baseName}{extension}";
+        var directory = Path.GetDirectoryName(outputPath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return string.Empty;
+        }
+
+        var targetPath = EnsureUniqueFilePath(Path.Combine(directory, proposedName));
+        if (string.Equals(targetPath, outputPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        File.Move(outputPath, targetPath);
+        renamedPath = targetPath;
+
+        var renamedFileName = Path.GetFileName(targetPath);
+        candidate.Name = renamedFileName;
+        candidate.OriginalPath = ReplaceLeafPathSegment(candidate.OriginalPath, renamedFileName);
+        return $"Renamed using metadata heuristic ({reason}) to {renamedFileName}.";
+    }
+
+    private static bool TryBuildCarveMetadataName(
+        string outputPath,
+        QuickScanCandidateRow candidate,
+        out string baseName,
+        out string reason)
+    {
+        if (TryExtractOpenXmlTitle(outputPath, out var openXmlTitle))
+        {
+            baseName = "doc-" + SanitizeMetadataToken(openXmlTitle);
+            reason = "document title metadata";
+            return true;
+        }
+
+        if (TryExtractImageMetadataName(outputPath, out var imageName))
+        {
+            baseName = imageName;
+            reason = "image metadata";
+            return true;
+        }
+
+        if (TryExtractPdfTitle(outputPath, out var pdfTitle))
+        {
+            baseName = "pdf-" + SanitizeMetadataToken(pdfTitle);
+            reason = "pdf title metadata";
+            return true;
+        }
+
+        if (TryExtractMetadataTokenFromConfidenceReason(candidate.ConfidenceReason, out var confidenceToken))
+        {
+            baseName = "carve-" + confidenceToken;
+            reason = "candidate metadata hint";
+            return true;
+        }
+
+        baseName = string.Empty;
+        reason = string.Empty;
+        return false;
+    }
+
+    private static bool TryExtractOpenXmlTitle(string outputPath, out string title)
+    {
+        title = string.Empty;
+        var extension = Path.GetExtension(outputPath);
+        if (!string.Equals(extension, ".docx", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(extension, ".xlsx", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(extension, ".pptx", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var archive = ZipFile.OpenRead(outputPath);
+            var core = archive.GetEntry("docProps/core.xml");
+            if (core is null)
+            {
+                return false;
+            }
+
+            using var stream = core.Open();
+            var document = XDocument.Load(stream, LoadOptions.None);
+            XNamespace dcNs = "http://purl.org/dc/elements/1.1/";
+            var node = document.Descendants(dcNs + "title").FirstOrDefault();
+            if (node is null || string.IsNullOrWhiteSpace(node.Value))
+            {
+                return false;
+            }
+
+            title = node.Value.Trim();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryExtractImageMetadataName(string outputPath, out string name)
+    {
+        name = string.Empty;
+        try
+        {
+            using var stream = File.OpenRead(outputPath);
+            var decoder = BitmapDecoder.Create(
+                stream,
+                BitmapCreateOptions.IgnoreColorProfile | BitmapCreateOptions.PreservePixelFormat,
+                BitmapCacheOption.None);
+            if (decoder.Frames.Count == 0)
+            {
+                return false;
+            }
+
+            if (decoder.Frames[0].Metadata is not BitmapMetadata metadata)
+            {
+                return false;
+            }
+
+            var dateToken = TryNormalizeImageDateToken(metadata.DateTaken);
+            var deviceToken = SanitizeMetadataToken(metadata.CameraModel ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(dateToken) && string.IsNullOrWhiteSpace(deviceToken))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dateToken) && !string.IsNullOrWhiteSpace(deviceToken))
+            {
+                name = $"photo-{dateToken}-{deviceToken}";
+                return true;
+            }
+
+            name = !string.IsNullOrWhiteSpace(dateToken)
+                ? $"photo-{dateToken}"
+                : $"photo-{deviceToken}";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string TryNormalizeImageDateToken(string? dateTakenRaw)
+    {
+        if (string.IsNullOrWhiteSpace(dateTakenRaw))
+        {
+            return string.Empty;
+        }
+
+        if (DateTime.TryParseExact(
+                dateTakenRaw.Trim(),
+                "yyyy:MM:dd HH:mm:ss",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeLocal,
+                out var parsed))
+        {
+            return parsed.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        }
+
+        if (DateTime.TryParse(dateTakenRaw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out parsed))
+        {
+            return parsed.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryExtractPdfTitle(string outputPath, out string title)
+    {
+        title = string.Empty;
+        if (!string.Equals(Path.GetExtension(outputPath), ".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(outputPath);
+            var length = (int)Math.Min(stream.Length, 512 * 1024);
+            var buffer = new byte[length];
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read <= 0)
+            {
+                return false;
+            }
+
+            var content = Encoding.Latin1.GetString(buffer, 0, read);
+            var match = PdfTitleRegex.Match(content);
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            title = match.Groups["title"].Value.Trim();
+            return !string.IsNullOrWhiteSpace(title);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryExtractMetadataTokenFromConfidenceReason(string confidenceReason, out string token)
+    {
+        token = string.Empty;
+        if (string.IsNullOrWhiteSpace(confidenceReason))
+        {
+            return false;
+        }
+
+        var match = Regex.Match(
+            confidenceReason,
+            "(?i)(title|subject|author|camera|device|model|date|datetime|taken)\\s*[:=]\\s*([^;|,]{3,96})",
+            RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        token = SanitizeMetadataToken(match.Groups[2].Value);
+        return !string.IsNullOrWhiteSpace(token);
+    }
+
+    private static string SanitizeMetadataToken(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = value
+            .Trim()
+            .ToLowerInvariant()
+            .Select(ch => invalid.Contains(ch) ? '-' : ch)
+            .Select(ch => char.IsLetterOrDigit(ch) ? ch : '-')
+            .ToArray();
+        var sanitized = new string(chars);
+        while (sanitized.Contains("--", StringComparison.Ordinal))
+        {
+            sanitized = sanitized.Replace("--", "-", StringComparison.Ordinal);
+        }
+
+        sanitized = sanitized.Trim('-');
+        if (sanitized.Length > 64)
+        {
+            sanitized = sanitized[..64];
+        }
+
+        return sanitized;
+    }
+
+    private static bool LooksGenericCarveName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return true;
+        }
+
+        var normalized = name.Trim();
+        return normalized.StartsWith("carve_", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith("carve-", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith("record-", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith("file-record-", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "(unknown)", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EnsureUniqueFilePath(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return path;
+        }
+
+        var directory = Path.GetDirectoryName(path) ?? string.Empty;
+        var baseName = Path.GetFileNameWithoutExtension(path);
+        var extension = Path.GetExtension(path);
+
+        for (var index = 1; index < 5000; index++)
+        {
+            var candidate = Path.Combine(directory, $"{baseName}-{index.ToString(CultureInfo.InvariantCulture)}{extension}");
+            if (!File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return path;
+    }
+
+    private static string ReplaceLeafPathSegment(string originalPath, string newLeaf)
+    {
+        if (string.IsNullOrWhiteSpace(originalPath) || originalPath == "(unresolved)")
+        {
+            return newLeaf;
+        }
+
+        var parts = originalPath
+            .Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+        if (parts.Count == 0)
+        {
+            return newLeaf;
+        }
+
+        parts[^1] = SanitizePathSegment(newLeaf);
+        return string.Join("\\", parts);
+    }
+
+    private static DateTime? TryConvertFileTimeUtc(ulong? fileTimeUtc)
+    {
+        if (!fileTimeUtc.HasValue || fileTimeUtc.Value == 0 || fileTimeUtc.Value > long.MaxValue)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTime.FromFileTimeUtc((long)fileTimeUtc.Value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static FileAttributes MapFileAttributesForExport(uint fileAttributesRaw)
+    {
+        var raw = (FileAttributes)fileAttributesRaw;
+        const FileAttributes allowed =
+            FileAttributes.ReadOnly
+            | FileAttributes.Hidden
+            | FileAttributes.System
+            | FileAttributes.Archive
+            | FileAttributes.NotContentIndexed
+            | FileAttributes.Temporary
+            | FileAttributes.Offline;
+        var mapped = raw & allowed;
+        return mapped == 0 ? FileAttributes.Normal : mapped;
     }
 
     private static string EscapeMarkdownCell(string? value)

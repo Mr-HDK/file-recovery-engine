@@ -272,6 +272,8 @@
                         <DataGridTextColumn Header="Carve Format" Binding="{Binding CarveFormat}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Carve Offset" Binding="{Binding CarveOffsetDisplay}" Width="120" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Parent Record" Binding="{Binding ParentRecord}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Cluster" Binding="{Binding ClusterDisplay}" Width="95" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Deduped" Binding="{Binding DedupDisplay}" Width="72" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Evidence" Binding="{Binding EvidenceSource}" Width="90" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceTier}" Width="90" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Confidence Reason" Binding="{Binding ConfidenceReason}" Width="220" IsReadOnly="True"/>
