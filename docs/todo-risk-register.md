@@ -40,6 +40,8 @@
 31. Aligned .NET native interop with updated quick-scan ABI (USN summary counters + ghost flag), including UI/session-store/export handling for ghost candidates.
 32. Updated UI recovery workflow to block ghost candidates from false-positive recovery attempts with explicit diagnostics messaging.
 33. Implemented Phase 4 baseline VSS path: native snapshot enumeration (`fr-vss` + `fr_list_vss_snapshots`), .NET interop mapping, WPF source-list snapshot integration (ID/timestamp surfaced), and VSS evidence tagging for snapshot-derived quick-scan candidates in the unified results model.
+34. Closed remaining Phase 2 quick-scan quality gaps by prioritizing recently deleted candidates in session quick-scan ordering and adding explicit nested deleted-directory reconstruction coverage in `fr-session` tests.
+35. Completed Phase 4 recovery UX gaps by enabling directory-selection expansion into child-file recovery, formatting snapshot timestamps clearly in source display, and normalizing snapshot volume identity checks for same-volume safety enforcement.
 
 ## Active risks
 

@@ -34,6 +34,7 @@
 - Extract additional candidates from selected snapshots.
 - Merge into unified result set with snapshot provenance.
 - Current implementation enumerates accessible snapshots through `fr-vss`, exposes them through the `fr-ffi` C ABI (`fr_list_vss_snapshots`), surfaces snapshot ID/timestamp in the WPF source picker, treats snapshot reads as read-only source sessions, and tags snapshot-derived quick-scan candidates with `VSS` evidence in the shared candidate model.
+- Snapshot-folder recovery is implemented in the UI by expanding selected directory rows into child file candidates and recovering those children while preserving per-directory recovery diagnostics.
 
 7. Optional carving pass
 - Apply selected signatures by family/type.

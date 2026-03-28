@@ -49,6 +49,7 @@
 - Rust unit tests for NTFS boot sector parsing.
 - Rust unit tests for MFT record parsing with resident and non-resident attributes plus update-sequence-array fixup mismatch detection.
 - Rust unit tests for session-level NTFS quick-scan orchestration over synthetic image bytes.
+- Rust unit tests for deleted nested-directory reconstruction and quick-scan recent-deleted prioritization ordering.
 - Candidate persistence tests for recovery diagnostics/status-code/write-bytes fields in SQLite.
 - Candidate persistence tests for quick-scan ADS/compressed/sparse/encrypted flags in SQLite.
 - Candidate persistence tests for raw recovery diagnostics flags bitmask in SQLite.

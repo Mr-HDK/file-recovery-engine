@@ -94,6 +94,10 @@ public partial class MainWindow : Window
         }
     }
 
+    private sealed record DirectoryRecoverySelection(
+        QuickScanCandidateRow Directory,
+        IReadOnlyList<QuickScanCandidateRow> Children);
+
     private readonly IDeviceEnumerationService _deviceEnumerationService;
     private readonly SourceDestinationSafetyValidator _safetyValidator;
     private readonly IPrivilegeService _privilegeService;
@@ -252,9 +256,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var timestampDisplay = string.IsNullOrWhiteSpace(snapshot.InstallTimeUtc)
-                ? "unknown timestamp"
-                : snapshot.InstallTimeUtc;
+            var timestampDisplay = FormatSnapshotTimestamp(snapshot.InstallTimeUtc);
 
             _sources.Add(new SourceCandidate(
                 Id: sourceId,
@@ -265,12 +267,12 @@ public partial class MainWindow : Window
                 SizeBytes: null,
                 SectorSizeBytes: null,
                 DiskIndex: null,
-                VolumeIdentity: null,
+                VolumeIdentity: snapshot.VolumeName,
                 SourcePath: snapshot.SnapshotPath,
                 ReadOnlyEnforced: true,
                 VolumeLabel: snapshot.VolumeName,
                 MountedPaths: snapshot.SnapshotPath,
-                PartitionInfo: $"Snapshot {snapshot.SnapshotId}"));
+                PartitionInfo: $"Snapshot {snapshot.SnapshotId} ({timestampDisplay})"));
             added++;
         }
 
@@ -278,6 +280,21 @@ public partial class MainWindow : Window
         {
             AppendSessionMessage($"VSS snapshots discovered: {added} source(s) added.");
         }
+    }
+
+    private static string FormatSnapshotTimestamp(string? installTimeUtc)
+    {
+        if (string.IsNullOrWhiteSpace(installTimeUtc))
+        {
+            return "unknown timestamp";
+        }
+
+        if (DateTimeOffset.TryParse(installTimeUtc, out var parsed))
+        {
+            return parsed.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture);
+        }
+
+        return installTimeUtc;
     }
 
     private void SourcesDataGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -359,6 +376,10 @@ public partial class MainWindow : Window
         try
         {
             operationToken.ThrowIfCancellationRequested();
+            if (IsVssSnapshotSource(selectedSource))
+            {
+                AppendSessionMessage("VSS snapshot source selected: scan/recovery operations remain read-only.");
+            }
 
             var probePath = ResolveProbePath(selectedSource);
             if (!string.IsNullOrWhiteSpace(probePath))
@@ -1100,6 +1121,9 @@ public partial class MainWindow : Window
         var recovered = 0;
         var partial = 0;
         var failed = 0;
+        var directoryRecovered = 0;
+        var directoryPartial = 0;
+        var directoryFailed = 0;
         var overwrittenRisk = 0;
         var selectedCount = 0;
         var recoveryRoot = string.Empty;
@@ -1148,32 +1172,45 @@ public partial class MainWindow : Window
             recoveryRoot = Path.Combine(destination, "RecoveredFiles");
             Directory.CreateDirectory(recoveryRoot);
 
+            var recoveryQueue = BuildRecoveryWorklist(
+                selected,
+                _quickScanCandidates.ToArray(),
+                out var directorySelections);
+
+            if (recoveryQueue.Count == 0)
+            {
+                foreach (var directorySelection in directorySelections)
+                {
+                    var directory = directorySelection.Directory;
+                    directory.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    directory.LastRecoveryStatusCode = -410;
+                    directory.LastRecoveryDiagnosticsFlags = null;
+                    directory.LastRecoveredBytes = 0;
+                    directory.LastRecoveryPartial = null;
+                    directory.RecoveryDiagnostics = "No recoverable child files were found under the selected directory.";
+                    directoryFailed++;
+                    failed++;
+                    await PersistCandidateRecoveryDiagnosticsAsync(directory, operationToken);
+                }
+
+                RefreshCandidateView();
+                AppendSessionMessage("Recovery skipped: selected items did not contain recoverable file candidates.");
+                AppendCandidateActivity("Recovery skipped: no recoverable file candidates.");
+                return;
+            }
+
             if (_activeSessionId.HasValue)
             {
                 await _sessionStore.UpdateStatusAsync(
                     _activeSessionId.Value,
                     "recovering",
-                    $"Recovering {selected.Length} selected candidates.",
+                    $"Recovering {recoveryQueue.Count} file candidate(s) from {selected.Length} selected item(s).",
                     operationToken);
             }
 
-            foreach (var candidate in selected)
+            foreach (var candidate in recoveryQueue)
             {
                 operationToken.ThrowIfCancellationRequested();
-
-                if (candidate.Directory)
-                {
-                    candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
-                    candidate.LastRecoveryStatusCode = -410;
-                    candidate.LastRecoveryDiagnosticsFlags = null;
-                    candidate.LastRecoveredBytes = 0;
-                    candidate.LastRecoveryPartial = null;
-                    candidate.RecoveryDiagnostics = "Directory record recovery is not implemented.";
-                    failed++;
-                    AppendSessionMessage($"Skipped directory candidate R{candidate.RecordNumber}: directory recovery is not yet implemented.");
-                    await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
-                    continue;
-                }
 
                 if (candidate.IsGhostRecord)
                 {
@@ -1245,6 +1282,67 @@ public partial class MainWindow : Window
                 await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
             }
 
+            foreach (var directorySelection in directorySelections)
+            {
+                var directory = directorySelection.Directory;
+                var children = directorySelection.Children;
+
+                if (children.Count == 0)
+                {
+                    directory.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    directory.LastRecoveryStatusCode = -410;
+                    directory.LastRecoveryDiagnosticsFlags = null;
+                    directory.LastRecoveredBytes = 0;
+                    directory.LastRecoveryPartial = null;
+                    directory.RecoveryDiagnostics = "No recoverable child files were found under the selected directory.";
+                    directoryFailed++;
+                    failed++;
+                    AppendSessionMessage($"Directory R{directory.RecordNumber} skipped: no recoverable child files found.");
+                    await PersistCandidateRecoveryDiagnosticsAsync(directory, operationToken);
+                    continue;
+                }
+
+                var childFull = children.Count(candidate => candidate.CandidateStatus == RecoveryCandidateStatus.Full);
+                var childPartial = children.Count(candidate => candidate.CandidateStatus == RecoveryCandidateStatus.Partial);
+                var childFailed = children.Count - childFull - childPartial;
+                var childBytes = children.Aggregate(
+                    0UL,
+                    (current, item) => current + (item.LastRecoveredBytes ?? 0));
+
+                if (childFull == 0 && childPartial == 0)
+                {
+                    directory.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    directory.LastRecoveryStatusCode = -412;
+                    directory.LastRecoveryPartial = null;
+                    directoryFailed++;
+                    failed++;
+                }
+                else if (childFailed == 0 && childPartial == 0)
+                {
+                    directory.CandidateStatus = RecoveryCandidateStatus.Full;
+                    directory.LastRecoveryStatusCode = 0;
+                    directory.LastRecoveryPartial = false;
+                    directoryRecovered++;
+                }
+                else
+                {
+                    directory.CandidateStatus = RecoveryCandidateStatus.Partial;
+                    directory.LastRecoveryStatusCode = 0;
+                    directory.LastRecoveryPartial = true;
+                    directoryPartial++;
+                }
+
+                directory.LastRecoveryDiagnosticsFlags = null;
+                directory.LastRecoveredBytes = childBytes;
+                directory.RecoveryDiagnostics =
+                    $"Directory expanded to {children.Count} child file(s): full={childFull}, partial={childPartial}, failed={childFailed}.";
+                directory.IsSelected = false;
+
+                AppendSessionMessage(
+                    $"Directory R{directory.RecordNumber} expanded recovery: children={children.Count}, full={childFull}, partial={childPartial}, failed={childFailed}.");
+                await PersistCandidateRecoveryDiagnosticsAsync(directory, operationToken);
+            }
+
             RefreshCandidateView();
             StatusTextBlock.Text = "Recovery execution completed";
 
@@ -1253,17 +1351,21 @@ public partial class MainWindow : Window
                 await _sessionLogWriter.LogEventAsync(_activeSessionId.Value, "candidate_recovery", new
                 {
                     selected_count = selected.Length,
+                    expanded_file_count = recoveryQueue.Count,
                     recovered_full = recovered,
                     recovered_partial = partial,
                     failed,
                     overwritten_risk = overwrittenRisk,
+                    recovered_directories_full = directoryRecovered,
+                    recovered_directories_partial = directoryPartial,
+                    failed_directories = directoryFailed,
                     destination_root = recoveryRoot,
                 }, operationToken);
 
                 await _sessionStore.UpdateStatusAsync(
                     _activeSessionId.Value,
                     "ready",
-                    $"Recovery completed: full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}.",
+                    $"Recovery completed: files(full={recovered}, partial={partial}), directories(full={directoryRecovered}, partial={directoryPartial}), failed={failed}, overwritten-risk={overwrittenRisk}.",
                     operationToken);
 
                 try
@@ -1282,10 +1384,14 @@ public partial class MainWindow : Window
                     {
                         report_path = reportPath,
                         selected_count = selected.Length,
+                        expanded_file_count = recoveryQueue.Count,
                         recovered_full = recovered,
                         recovered_partial = partial,
                         failed,
                         overwritten_risk = overwrittenRisk,
+                        recovered_directories_full = directoryRecovered,
+                        recovered_directories_partial = directoryPartial,
+                        failed_directories = directoryFailed,
                     }, operationToken);
 
                     AppendSessionMessage($"Recovery report written: {reportPath}");
@@ -1296,8 +1402,10 @@ public partial class MainWindow : Window
                 }
             }
 
-            AppendSessionMessage($"Recovery summary: full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}.");
-            AppendCandidateActivity($"Recovery summary full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}.");
+            AppendSessionMessage(
+                $"Recovery summary: files(full={recovered}, partial={partial}), directories(full={directoryRecovered}, partial={directoryPartial}, failed={directoryFailed}), failed={failed}, overwritten-risk={overwrittenRisk}.");
+            AppendCandidateActivity(
+                $"Recovery summary files(full={recovered}, partial={partial}), dirs(full={directoryRecovered}, partial={directoryPartial}, failed={directoryFailed}), failed={failed}, overwritten-risk={overwrittenRisk}.");
         }
         catch (OperationCanceledException)
         {
@@ -1310,7 +1418,7 @@ public partial class MainWindow : Window
             {
                 await TryMarkSessionCanceledAsync(
                     _activeSessionId.Value,
-                    $"Recovery canceled after progress full={recovered}, partial={partial}, failed={failed}, overwritten-risk={overwrittenRisk}, selected={selectedCount}.");
+                    $"Recovery canceled after progress files(full={recovered}, partial={partial}), directories(full={directoryRecovered}, partial={directoryPartial}, failed={directoryFailed}), failed={failed}, overwritten-risk={overwrittenRisk}, selected={selectedCount}.");
             }
         }
         catch (Exception ex)
@@ -1514,6 +1622,109 @@ public partial class MainWindow : Window
         var chars = segment.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray();
         var sanitized = new string(chars).Trim();
         return string.IsNullOrWhiteSpace(sanitized) ? "_" : sanitized;
+    }
+
+    private static List<QuickScanCandidateRow> BuildRecoveryWorklist(
+        IReadOnlyList<QuickScanCandidateRow> selected,
+        IReadOnlyList<QuickScanCandidateRow> allCandidates,
+        out List<DirectoryRecoverySelection> directorySelections)
+    {
+        directorySelections = new List<DirectoryRecoverySelection>();
+        var queuedRecordNumbers = new HashSet<uint>();
+        var worklist = new List<QuickScanCandidateRow>();
+
+        foreach (var candidate in selected)
+        {
+            if (candidate.Directory)
+            {
+                var children = FindRecoverableChildCandidates(candidate, allCandidates);
+                directorySelections.Add(new DirectoryRecoverySelection(candidate, children));
+
+                foreach (var child in children)
+                {
+                    if (!queuedRecordNumbers.Add(child.RecordNumber))
+                    {
+                        continue;
+                    }
+
+                    worklist.Add(child);
+                }
+
+                continue;
+            }
+
+            if (!queuedRecordNumbers.Add(candidate.RecordNumber))
+            {
+                continue;
+            }
+
+            worklist.Add(candidate);
+        }
+
+        return worklist;
+    }
+
+    private static IReadOnlyList<QuickScanCandidateRow> FindRecoverableChildCandidates(
+        QuickScanCandidateRow directoryCandidate,
+        IReadOnlyList<QuickScanCandidateRow> allCandidates)
+    {
+        var directoryPath = NormalizeCandidatePathForMatch(directoryCandidate.OriginalPath);
+        if (string.IsNullOrWhiteSpace(directoryPath)
+            && !string.Equals(directoryCandidate.Name, "(unknown)", StringComparison.Ordinal))
+        {
+            directoryPath = NormalizeCandidatePathForMatch(directoryCandidate.Name);
+        }
+
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return Array.Empty<QuickScanCandidateRow>();
+        }
+
+        var prefix = directoryPath + "\\";
+        var children = new List<QuickScanCandidateRow>();
+        foreach (var candidate in allCandidates)
+        {
+            if (candidate.Directory || candidate.IsGhostRecord || !candidate.Deleted)
+            {
+                continue;
+            }
+
+            var candidatePath = NormalizeCandidatePathForMatch(candidate.OriginalPath);
+            if (string.IsNullOrWhiteSpace(candidatePath))
+            {
+                continue;
+            }
+
+            if (candidatePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                children.Add(candidate);
+            }
+        }
+
+        return children;
+    }
+
+    private static string? NormalizeCandidatePathForMatch(string? rawPath)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            return null;
+        }
+
+        var normalized = rawPath.Trim();
+        if (string.Equals(normalized, "(unresolved)", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        normalized = normalized.Replace('/', '\\');
+        while (normalized.StartsWith(@".\", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+        }
+
+        normalized = normalized.Trim('\\');
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
     }
 
     private CancellationTokenSource StartNewOperationScope()
@@ -1798,6 +2009,13 @@ public partial class MainWindow : Window
 
     private static string? ResolveProbePath(SourceCandidate source)
     {
+        if (IsVssSnapshotSource(source))
+        {
+            return !string.IsNullOrWhiteSpace(source.SourcePath)
+                ? source.SourcePath
+                : source.DevicePath;
+        }
+
         return source.Kind switch
         {
             RecoverySourceKind.ImageFile => source.SourcePath,

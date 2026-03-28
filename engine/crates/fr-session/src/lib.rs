@@ -262,6 +262,7 @@ pub fn quick_scan_ntfs_metadata(
     }
 
     reconstruct_paths(&mut candidates);
+    sort_quick_scan_candidates_for_recent_deletes(&mut candidates);
 
     Ok(QuickScanSummary {
         boot_sector,
@@ -386,6 +387,7 @@ pub fn quick_scan_ntfs_from_read_session(
     }
 
     reconstruct_paths(&mut candidates);
+    sort_quick_scan_candidates_for_recent_deletes(&mut candidates);
 
     Ok(QuickScanSummary {
         boot_sector,
@@ -616,6 +618,25 @@ fn reconstruct_paths(candidates: &mut [QuickScanCandidate]) {
         segments.reverse();
         candidate.reconstructed_path = Some(segments.join("\\"));
     }
+}
+
+fn sort_quick_scan_candidates_for_recent_deletes(candidates: &mut [QuickScanCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .deleted
+            .cmp(&left.deleted)
+            .then_with(|| quick_scan_candidate_recency_key(right).cmp(&quick_scan_candidate_recency_key(left)))
+            .then_with(|| left.record_index.cmp(&right.record_index))
+    });
+}
+
+fn quick_scan_candidate_recency_key(candidate: &QuickScanCandidate) -> u64 {
+    candidate
+        .modified_filetime_utc
+        .or(candidate.mft_modified_filetime_utc)
+        .or(candidate.created_filetime_utc)
+        .or(candidate.accessed_filetime_utc)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone)]
@@ -1112,6 +1133,51 @@ mod tests {
     }
 
     #[test]
+    fn quick_scan_detects_deleted_directory_with_nested_child() {
+        let image = build_test_ntfs_image_with_deleted_nested_records();
+
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        let deleted_directory = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 10)
+            .unwrap();
+        assert!(deleted_directory.deleted);
+        assert!(deleted_directory.is_directory);
+        assert_eq!(
+            deleted_directory.reconstructed_path.as_deref(),
+            Some("Archive")
+        );
+
+        let nested_child = summary
+            .candidates
+            .iter()
+            .find(|candidate| candidate.record_number == 11)
+            .unwrap();
+        assert!(nested_child.deleted);
+        assert!(!nested_child.is_directory);
+        assert_eq!(
+            nested_child.reconstructed_path.as_deref(),
+            Some(r"Archive\nested.txt")
+        );
+    }
+
+    #[test]
+    fn quick_scan_prioritizes_recent_deleted_candidates_first() {
+        let image = build_test_ntfs_image_with_recent_deleted_priority();
+
+        let summary =
+            quick_scan_ntfs_metadata(&image, QuickScanConfig { max_records: 16 }).unwrap();
+
+        assert!(summary.candidates.len() >= 3);
+        assert_eq!(summary.candidates[0].record_number, 22);
+        assert_eq!(summary.candidates[1].record_number, 21);
+        assert!(!summary.candidates[2].deleted);
+    }
+
+    #[test]
     fn quick_scan_skips_zero_record_gap_before_later_records() {
         let image = build_test_ntfs_image_with_named_records_at_indexes(0, 20);
 
@@ -1452,6 +1518,87 @@ mod tests {
         build_test_ntfs_image_with_named_records_at_indexes(0, 1)
     }
 
+    fn build_test_ntfs_image_with_deleted_nested_records() -> Vec<u8> {
+        let mut image = vec![0u8; 14 * 1024];
+
+        image[0x03..0x0B].copy_from_slice(b"NTFS    ");
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u64(&mut image, 0x28, 24_000);
+        write_u64(&mut image, 0x30, 4);
+        write_u64(&mut image, 0x38, 2);
+        image[0x40] = (-10i8) as u8;
+        image[0x44] = 1;
+        write_u16(&mut image, 0x1FE, 0xAA55);
+
+        let mft_offset = 4 * 512;
+        let deleted_directory = build_named_record(10, 0x0002, "Archive", 0);
+        let deleted_child = build_named_record(11, 0x0000, "nested.txt", 10);
+
+        image[mft_offset..mft_offset + deleted_directory.len()].copy_from_slice(&deleted_directory);
+        image[mft_offset + 1024..mft_offset + 1024 + deleted_child.len()]
+            .copy_from_slice(&deleted_child);
+
+        image
+    }
+
+    fn build_test_ntfs_image_with_recent_deleted_priority() -> Vec<u8> {
+        let mut image = vec![0u8; 16 * 1024];
+
+        image[0x03..0x0B].copy_from_slice(b"NTFS    ");
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u64(&mut image, 0x28, 24_000);
+        write_u64(&mut image, 0x30, 4);
+        write_u64(&mut image, 0x38, 2);
+        image[0x40] = (-10i8) as u8;
+        image[0x44] = 1;
+        write_u16(&mut image, 0x1FE, 0xAA55);
+
+        let mft_offset = 4 * 512;
+        let active_record = build_named_record_with_metadata(
+            20,
+            0x0001,
+            "active.txt",
+            0,
+            0x0000_0020,
+            132_537_600_000_000_000,
+            132_537_600_000_000_000,
+            132_537_600_000_000_000,
+            132_537_600_000_000_000,
+        );
+        let deleted_older = build_named_record_with_metadata(
+            21,
+            0x0000,
+            "old-delete.txt",
+            0,
+            0x0000_0020,
+            132_537_600_100_000_000,
+            132_537_600_100_000_000,
+            132_537_600_100_000_000,
+            132_537_600_100_000_000,
+        );
+        let deleted_newer = build_named_record_with_metadata(
+            22,
+            0x0000,
+            "new-delete.txt",
+            0,
+            0x0000_0020,
+            132_537_600_300_000_000,
+            132_537_600_300_000_000,
+            132_537_600_300_000_000,
+            132_537_600_300_000_000,
+        );
+
+        image[mft_offset..mft_offset + active_record.len()].copy_from_slice(&active_record);
+        image[mft_offset + 1024..mft_offset + 1024 + deleted_older.len()]
+            .copy_from_slice(&deleted_older);
+        image[mft_offset + 2048..mft_offset + 2048 + deleted_newer.len()]
+            .copy_from_slice(&deleted_newer);
+
+        image
+    }
+
     fn build_test_ntfs_image_with_named_records_at_indexes(
         parent_record_index: usize,
         child_record_index: usize,
@@ -1522,6 +1669,30 @@ mod tests {
         file_name: &str,
         parent_record: u64,
     ) -> Vec<u8> {
+        build_named_record_with_metadata(
+            record_number,
+            flags,
+            file_name,
+            parent_record,
+            0x0000_0020,
+            132_537_600_000_000_000,
+            132_537_600_100_000_000,
+            132_537_600_200_000_000,
+            132_537_600_300_000_000,
+        )
+    }
+
+    fn build_named_record_with_metadata(
+        record_number: u32,
+        flags: u16,
+        file_name: &str,
+        parent_record: u64,
+        file_attributes: u32,
+        created_filetime_utc: u64,
+        modified_filetime_utc: u64,
+        mft_modified_filetime_utc: u64,
+        accessed_filetime_utc: u64,
+    ) -> Vec<u8> {
         let mut record = vec![0u8; 1024];
         record[0x00..0x04].copy_from_slice(b"FILE");
         write_u16(&mut record, 0x04, 0x30);
@@ -1540,7 +1711,15 @@ mod tests {
         write_u16(&mut record, 1022, 0xAAAA);
 
         let attr_offset = 0x38usize;
-        let file_name_attr = build_file_name_attribute(file_name, parent_record);
+        let file_name_attr = build_file_name_attribute(
+            file_name,
+            parent_record,
+            file_attributes,
+            created_filetime_utc,
+            modified_filetime_utc,
+            mft_modified_filetime_utc,
+            accessed_filetime_utc,
+        );
         record[attr_offset..attr_offset + file_name_attr.len()].copy_from_slice(&file_name_attr);
 
         let end_offset = attr_offset + file_name_attr.len();
@@ -1550,7 +1729,15 @@ mod tests {
         record
     }
 
-    fn build_file_name_attribute(file_name: &str, parent_record: u64) -> Vec<u8> {
+    fn build_file_name_attribute(
+        file_name: &str,
+        parent_record: u64,
+        file_attributes: u32,
+        created_filetime_utc: u64,
+        modified_filetime_utc: u64,
+        mft_modified_filetime_utc: u64,
+        accessed_filetime_utc: u64,
+    ) -> Vec<u8> {
         let utf16: Vec<u16> = file_name.encode_utf16().collect();
         let name_len = utf16.len() as u8;
         let value_len = 0x42usize + utf16.len() * 2;
@@ -1568,13 +1755,13 @@ mod tests {
         write_u16(&mut attr, 0x14, 0x18);
 
         write_u64(&mut attr, 0x18, parent_record & 0x0000_FFFF_FFFF_FFFF);
-        write_u64(&mut attr, 0x20, 132_537_600_000_000_000);
-        write_u64(&mut attr, 0x28, 132_537_600_100_000_000);
-        write_u64(&mut attr, 0x30, 132_537_600_200_000_000);
-        write_u64(&mut attr, 0x38, 132_537_600_300_000_000);
+        write_u64(&mut attr, 0x20, created_filetime_utc);
+        write_u64(&mut attr, 0x28, modified_filetime_utc);
+        write_u64(&mut attr, 0x30, mft_modified_filetime_utc);
+        write_u64(&mut attr, 0x38, accessed_filetime_utc);
         write_u64(&mut attr, 0x40, 4096);
         write_u64(&mut attr, 0x48, 1234);
-        write_u32(&mut attr, 0x50, 0x0000_0020);
+        write_u32(&mut attr, 0x50, file_attributes);
         attr[0x18 + 0x40] = name_len;
         attr[0x18 + 0x41] = 1;
 

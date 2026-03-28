@@ -60,6 +60,33 @@ public sealed class SourceDestinationSafetyValidatorTests
     }
 
     [Fact]
+    public void RejectsSameVolumeWhenVolumeIdentityDiffersOnlyByTrailingSlash()
+    {
+        var destination = CreateTemporaryDirectory();
+        var topology = new FakeStorageTopologyService();
+        topology.Map(destination, @"\\?\Volume{ABCDEF}\", 2);
+
+        var source = new SourceCandidate(
+            Id: "vss-snapshot",
+            Kind: RecoverySourceKind.Volume,
+            DisplayName: "VSS Snapshot",
+            DevicePath: @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1",
+            FileSystem: "NTFS (VSS)",
+            SizeBytes: 100,
+            SectorSizeBytes: 512,
+            DiskIndex: 1,
+            VolumeIdentity: @"\\?\Volume{ABCDEF}",
+            SourcePath: @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\",
+            ReadOnlyEnforced: true);
+
+        var validator = new SourceDestinationSafetyValidator(topology);
+        var result = validator.Validate(source, destination, isElevated: true);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Issues, i => i.Code == "same-volume");
+    }
+
+    [Fact]
     public void RejectsSameDiskForPhysicalDiskSource()
     {
         var destination = CreateTemporaryDirectory();

@@ -97,7 +97,7 @@ public sealed class SourceDestinationSafetyValidator
             return;
         }
 
-        if (string.Equals(sourceVolume, destinationVolume, StringComparison.OrdinalIgnoreCase))
+        if (IsSameVolumeIdentity(sourceVolume, destinationVolume))
         {
             issues.Add(new ValidationIssue(
                 ValidationSeverity.Error,
@@ -154,12 +154,28 @@ public sealed class SourceDestinationSafetyValidator
             return;
         }
 
-        if (string.Equals(sourceVolume, destinationVolume, StringComparison.OrdinalIgnoreCase))
+        if (IsSameVolumeIdentity(sourceVolume, destinationVolume))
         {
             issues.Add(new ValidationIssue(
                 ValidationSeverity.Error,
                 "same-volume-image",
                 "Destination must be on a different volume than the source image file."));
         }
+    }
+
+    private static bool IsSameVolumeIdentity(string sourceVolume, string destinationVolume)
+    {
+        static string Normalize(string value)
+        {
+            return value
+                .Trim()
+                .TrimEnd('\\', '/')
+                .ToUpperInvariant();
+        }
+
+        return string.Equals(
+            Normalize(sourceVolume),
+            Normalize(destinationVolume),
+            StringComparison.Ordinal);
     }
 }
