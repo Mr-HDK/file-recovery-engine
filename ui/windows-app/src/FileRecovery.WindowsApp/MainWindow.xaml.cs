@@ -38,6 +38,8 @@ public partial class MainWindow : Window
         public bool IsEncrypted { get; init; }
         public string Name { get; set; } = string.Empty;
         public string OriginalPath { get; set; } = string.Empty;
+        public string RecoveredPath { get; set; } = string.Empty;
+        public string FileType { get; init; } = "unknown";
         public string ParentRecord { get; init; } = string.Empty;
         public string ClusterId { get; init; } = string.Empty;
         public int ClusterSize { get; init; }
@@ -134,6 +136,10 @@ public partial class MainWindow : Window
     private const int SessionRetentionMaxCount = 50;
     private const ulong FullScanCarveMaxBytes = 64UL * 1024UL * 1024UL;
     private static readonly Regex PdfTitleRegex = new("/Title\\s*\\((?<title>[^\\)]{3,120})\\)", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private const int DefaultQuickScanMaxRecords = 256;
+    private const int DefaultCandidateCapacity = 128;
+    private const int DefaultPreviewCapMiB = 8;
+    private const int DefaultPreviewChunkKiB = 1024;
     private SourceCandidate? _selectedSource;
     private ICollectionView? _quickScanCandidatesView;
     private CancellationTokenSource? _previewReadCts;
@@ -146,6 +152,10 @@ public partial class MainWindow : Window
     private bool _filterRecoverableOnly;
     private bool _filterSelectedOnly;
     private string _candidateSearchTerm = string.Empty;
+    private string _filterFileType = "All";
+    private string _filterStatus = "All";
+    private string _filterEvidence = "All";
+    private string _filterConfidence = "All";
     private int _candidateClusterCount;
     private int _candidateDedupedCount;
 
@@ -170,6 +180,10 @@ public partial class MainWindow : Window
         _quickScanCandidatesView = CollectionViewSource.GetDefaultView(_quickScanCandidates);
         _quickScanCandidatesView.Filter = FilterQuickScanCandidate;
         QuickScanCandidatesDataGrid.ItemsSource = _quickScanCandidatesView;
+        InitializeCandidateFilterControls();
+        ClearPreviewPanel();
+        OperationProgressBar.Value = 0;
+        ThroughputStatusTextBlock.Text = "Throughput: -";
 
         ScanModeComboBox.ItemsSource = Enum.GetValues<ScanMode>();
         ScanModeComboBox.SelectedItem = ScanMode.Quick;
@@ -381,6 +395,7 @@ public partial class MainWindow : Window
     private async void StartSessionButton_Click(object sender, RoutedEventArgs e)
     {
         _quickScanCandidates.Clear();
+        ClearPreviewPanel();
         var operationScope = StartNewOperationScope();
         var operationToken = operationScope.Token;
 
@@ -396,6 +411,8 @@ public partial class MainWindow : Window
 
         var selectedSource = _selectedSource;
         var scanMode = ScanModeComboBox.SelectedItem is ScanMode mode ? mode : ScanMode.Quick;
+        var quickScanMaxRecords = GetQuickScanMaxRecords();
+        var candidateCapacity = GetCandidateCapacity();
         Guid? sessionId = null;
 
         try
@@ -453,7 +470,7 @@ public partial class MainWindow : Window
                                 $"NTFS boot details: sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, MFT offset={metadata.MftOffsetBytes}.");
 
                             operationToken.ThrowIfCancellationRequested();
-                            var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(open.SessionId, maxRecords: 256);
+                            var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(open.SessionId, maxRecords: checked((uint)quickScanMaxRecords));
                             AppendSessionMessage(
                 $"NTFS quick scan: {quickScan.Message} (status {quickScan.StatusCode}, parsed={quickScan.ParsedRecords}, failures={quickScan.ParseFailures}, deleted={quickScan.DeletedRecords}, dirs={quickScan.DirectoryRecords}, named={quickScan.NamedRecords}, resident={quickScan.ResidentAttributeCount}, nonresident={quickScan.NonResidentAttributeCount}, nonresident-data={quickScan.RecordsWithNonResidentData}).");
                             AppendSessionMessage(
@@ -464,8 +481,8 @@ public partial class MainWindow : Window
                                 operationToken.ThrowIfCancellationRequested();
                                 var candidateResult = NativeEngineProbe.GetNtfsQuickScanCandidatesFromSession(
                                     open.SessionId,
-                                    maxRecords: 256,
-                                    candidateCapacity: 128);
+                                    maxRecords: checked((uint)quickScanMaxRecords),
+                                    candidateCapacity: candidateCapacity);
 
                                 AppendSessionMessage(
                                     $"NTFS quick scan candidates: {candidateResult.Message} (status {candidateResult.StatusCode}, count={candidateResult.Candidates.Count}).");
@@ -479,7 +496,7 @@ public partial class MainWindow : Window
                                         open.SessionId,
                                         familyFlags,
                                         FullScanCarveMaxBytes,
-                                        candidateCapacity: 256);
+                                        candidateCapacity: Math.Max(candidateCapacity, 256));
                                     AppendSessionMessage(
                                         $"Carving scan: {carveResult.Message} (status {carveResult.StatusCode}, count={carveResult.Candidates.Count}).");
                                     AppendCarveCandidates(carveResult);
@@ -526,7 +543,7 @@ public partial class MainWindow : Window
                     count = candidateRows.Length,
                 }, operationToken);
 
-                var persisted = await _sessionStore.GetQuickScanCandidatesAsync(sessionId.Value, 256, operationToken);
+                var persisted = await _sessionStore.GetQuickScanCandidatesAsync(sessionId.Value, quickScanMaxRecords, operationToken);
                 RenderQuickScanCandidates(persisted);
                 AppendSessionMessage($"Persisted quick-scan candidates: {persisted.Count}.");
             }
@@ -679,6 +696,8 @@ public partial class MainWindow : Window
                 IsEncrypted = candidate.IsEncrypted,
                 Name = candidate.Name ?? "(unknown)",
                 OriginalPath = candidate.OriginalPath ?? "(unresolved)",
+                RecoveredPath = string.Empty,
+                FileType = DetermineFileType(candidate),
                 ParentRecord = candidate.ParentRecordNumber?.ToString() ?? string.Empty,
                 ClusterId = entry.ClusterId,
                 ClusterSize = entry.ClusterSize,
@@ -707,6 +726,8 @@ public partial class MainWindow : Window
 
         _candidateClusterCount = processed.ClusterCount;
         _candidateDedupedCount = processed.RemovedDuplicateCount;
+        PopulateCandidateFilterOptions();
+        ClearPreviewPanel();
         RefreshCandidateView();
         AppendCandidateActivity(
             $"Loaded {_quickScanCandidates.Count} candidate rows (input={processed.InputCount}, clusters={processed.ClusterCount}, deduped={processed.RemovedDuplicateCount}).");
@@ -881,6 +902,112 @@ public partial class MainWindow : Window
             && source.Id.StartsWith("vss:", StringComparison.OrdinalIgnoreCase);
     }
 
+    private void InitializeCandidateFilterControls()
+    {
+        FilterFileTypeComboBox.ItemsSource = new[] { "All" };
+        FilterStatusComboBox.ItemsSource = new[] { "All", "full", "partial", "invalid", "overwritten-risk" };
+        FilterEvidenceComboBox.ItemsSource = new[] { "All", "MFT", "USN", "VSS", "Carve" };
+        FilterConfidenceComboBox.ItemsSource = new[] { "All", "Very high", "High", "Medium", "Low", "Very low" };
+
+        FilterFileTypeComboBox.SelectedIndex = 0;
+        FilterStatusComboBox.SelectedIndex = 0;
+        FilterEvidenceComboBox.SelectedIndex = 0;
+        FilterConfidenceComboBox.SelectedIndex = 0;
+    }
+
+    private static string DetermineFileType(QuickScanCandidateRecord candidate)
+    {
+        if (!string.IsNullOrWhiteSpace(candidate.CarveFormat))
+        {
+            return candidate.CarveFormat.Trim().TrimStart('.').ToLowerInvariant();
+        }
+
+        var ext = Path.GetExtension(candidate.Name ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(ext))
+        {
+            ext = Path.GetExtension(candidate.OriginalPath ?? string.Empty);
+        }
+
+        if (string.IsNullOrWhiteSpace(ext))
+        {
+            return "unknown";
+        }
+
+        return ext.Trim().TrimStart('.').ToLowerInvariant();
+    }
+
+    private static bool TryParsePositiveInt(string? value, int min, int max, int fallback, out int parsed)
+    {
+        if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var raw))
+        {
+            parsed = fallback;
+            return false;
+        }
+
+        parsed = Math.Clamp(raw, min, max);
+        return raw == parsed;
+    }
+
+    private int GetQuickScanMaxRecords()
+    {
+        if (!TryParsePositiveInt(
+                QuickScanMaxRecordsTextBox.Text,
+                min: 32,
+                max: 4096,
+                fallback: DefaultQuickScanMaxRecords,
+                out var value))
+        {
+            QuickScanMaxRecordsTextBox.Text = value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return value;
+    }
+
+    private int GetCandidateCapacity()
+    {
+        if (!TryParsePositiveInt(
+                CandidateCapacityTextBox.Text,
+                min: 32,
+                max: 4096,
+                fallback: DefaultCandidateCapacity,
+                out var value))
+        {
+            CandidateCapacityTextBox.Text = value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return value;
+    }
+
+    private ulong GetPreviewCapBytes()
+    {
+        if (!TryParsePositiveInt(
+                PreviewCapMiBTextBox.Text,
+                min: 1,
+                max: 256,
+                fallback: DefaultPreviewCapMiB,
+                out var mib))
+        {
+            PreviewCapMiBTextBox.Text = mib.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return checked((ulong)mib * 1024UL * 1024UL);
+    }
+
+    private int GetPreviewChunkBytes()
+    {
+        if (!TryParsePositiveInt(
+                PreviewChunkKiBTextBox.Text,
+                min: 64,
+                max: 4096,
+                fallback: DefaultPreviewChunkKiB,
+                out var kib))
+        {
+            PreviewChunkKiBTextBox.Text = kib.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return checked(kib * 1024);
+    }
+
     private static string BuildCandidateSelectionKey(QuickScanCandidateRow row)
     {
         return BuildCandidateSelectionKey(row.RecordNumber, row.Name, row.OriginalPath);
@@ -915,6 +1042,30 @@ public partial class MainWindow : Window
             return false;
         }
 
+        if (!string.Equals(_filterFileType, "All", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.FileType, _filterFileType, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.Equals(_filterStatus, "All", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.CandidateStatusCode, _filterStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.Equals(_filterEvidence, "All", StringComparison.OrdinalIgnoreCase)
+            && !row.EvidenceSource.Contains(_filterEvidence, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.Equals(_filterConfidence, "All", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.ConfidenceTier, _filterConfidence, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (string.IsNullOrWhiteSpace(_candidateSearchTerm))
         {
             return true;
@@ -922,6 +1073,8 @@ public partial class MainWindow : Window
 
         return row.Name.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.OriginalPath.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.RecoveredPath.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
+            || row.FileType.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.RecordNumber.ToString(CultureInfo.InvariantCulture).Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.DataSizeDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
             || row.ModifiedUtcDisplay.Contains(_candidateSearchTerm, StringComparison.OrdinalIgnoreCase)
@@ -954,6 +1107,211 @@ public partial class MainWindow : Window
 
         CandidateSummaryTextBlock.Text =
             $"Visible {visible}/{total} | Selected {selected} | Deleted {deleted} | Recoverable {recoverable} | Clusters {_candidateClusterCount} | Deduped {_candidateDedupedCount}";
+    }
+
+    private void ClearPreviewPanel()
+    {
+        PreviewHeaderTextBlock.Text = "Select a candidate to preview metadata and recovered content.";
+        PreviewSummaryTextBox.Text = "No candidate selected.";
+        PreviewTextTextBox.Text = string.Empty;
+        PreviewMetadataTextBox.Text = string.Empty;
+        PreviewImageControl.Source = null;
+    }
+
+    private void UpdatePreviewPanel(QuickScanCandidateRow candidate)
+    {
+        PreviewHeaderTextBlock.Text = $"Preview: R{candidate.RecordNumber} {candidate.Name}";
+
+        var summary = new StringBuilder();
+        summary.AppendLine($"Record: {candidate.RecordNumber}");
+        summary.AppendLine($"Name: {candidate.Name}");
+        summary.AppendLine($"File type: {candidate.FileType}");
+        summary.AppendLine($"Original path: {candidate.OriginalPath}");
+        summary.AppendLine($"Recovered path: {(string.IsNullOrWhiteSpace(candidate.RecoveredPath) ? "(not yet recovered in this UI session)" : candidate.RecoveredPath)}");
+        summary.AppendLine($"Evidence: {candidate.EvidenceSource}");
+        summary.AppendLine($"Confidence: {candidate.ConfidenceTier}");
+        summary.AppendLine($"Status: {candidate.CandidateStatusCode}");
+        summary.AppendLine($"Cluster: {candidate.ClusterDisplay}");
+        summary.AppendLine($"Deduplicated siblings: {candidate.DeduplicatedCount}");
+        summary.AppendLine($"Diagnostics: {candidate.RecoveryDiagnostics}");
+        PreviewSummaryTextBox.Text = summary.ToString();
+
+        PreviewMetadataTextBox.Text = BuildPreviewMetadata(candidate);
+
+        var resolvedPath = TryResolveRecoveredPreviewPath(candidate);
+        if (resolvedPath is null)
+        {
+            PreviewTextTextBox.Text = "Recover this candidate first to preview content.";
+            PreviewImageControl.Source = null;
+            return;
+        }
+
+        if (IsTextLikeExtension(resolvedPath))
+        {
+            try
+            {
+                PreviewTextTextBox.Text = LoadTextPreview(resolvedPath, maxChars: 16_000);
+            }
+            catch (Exception ex)
+            {
+                PreviewTextTextBox.Text = $"Unable to read text preview: {ex.Message}";
+            }
+        }
+        else
+        {
+            PreviewTextTextBox.Text = "Text preview not available for this file type.";
+        }
+
+        if (IsImageExtension(resolvedPath))
+        {
+            try
+            {
+                using var stream = File.OpenRead(resolvedPath);
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.StreamSource = stream;
+                image.EndInit();
+                image.Freeze();
+                PreviewImageControl.Source = image;
+            }
+            catch
+            {
+                PreviewImageControl.Source = null;
+            }
+        }
+        else
+        {
+            PreviewImageControl.Source = null;
+        }
+    }
+
+    private string? TryResolveRecoveredPreviewPath(QuickScanCandidateRow candidate)
+    {
+        if (!string.IsNullOrWhiteSpace(candidate.RecoveredPath) && File.Exists(candidate.RecoveredPath))
+        {
+            return candidate.RecoveredPath;
+        }
+
+        if (string.IsNullOrWhiteSpace(DestinationPathTextBox.Text))
+        {
+            return null;
+        }
+
+        var destination = Path.GetFullPath(DestinationPathTextBox.Text);
+        var candidatePath = Path.Combine(destination, "RecoveredFiles", BuildRecoveryRelativePath(candidate));
+        if (File.Exists(candidatePath))
+        {
+            candidate.RecoveredPath = candidatePath;
+            return candidatePath;
+        }
+
+        return null;
+    }
+
+    private string BuildPreviewMetadata(QuickScanCandidateRow candidate)
+    {
+        var metadata = new StringBuilder();
+        metadata.AppendLine($"Created FILETIME: {candidate.CreatedFileTimeUtc?.ToString(CultureInfo.InvariantCulture) ?? "-"}");
+        metadata.AppendLine($"Modified FILETIME: {candidate.ModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture) ?? "-"}");
+        metadata.AppendLine($"MFT Modified FILETIME: {candidate.MftModifiedFileTimeUtc?.ToString(CultureInfo.InvariantCulture) ?? "-"}");
+        metadata.AppendLine($"Accessed FILETIME: {candidate.AccessedFileTimeUtc?.ToString(CultureInfo.InvariantCulture) ?? "-"}");
+        metadata.AppendLine($"Attributes: {candidate.FileAttributesDisplay}");
+        metadata.AppendLine($"Size: {candidate.DataSizeDisplay}");
+        metadata.AppendLine($"Carve format: {candidate.CarveFormat}");
+        metadata.AppendLine($"Carve offset: {candidate.CarveOffsetDisplay}");
+        metadata.AppendLine($"Confidence reason: {candidate.ConfidenceReason}");
+
+        var resolved = TryResolveRecoveredPreviewPath(candidate);
+        if (!string.IsNullOrWhiteSpace(resolved))
+        {
+            if (TryExtractPdfTitle(resolved, out var pdfTitle))
+            {
+                metadata.AppendLine($"PDF title: {pdfTitle}");
+            }
+
+            if (TryExtractOpenXmlTitle(resolved, out var openXmlTitle))
+            {
+                metadata.AppendLine($"Document title: {openXmlTitle}");
+            }
+        }
+
+        return metadata.ToString();
+    }
+
+    private static string LoadTextPreview(string path, int maxChars)
+    {
+        using var stream = File.OpenRead(path);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var buffer = new char[maxChars];
+        var read = reader.Read(buffer, 0, buffer.Length);
+        var content = new string(buffer, 0, read);
+        if (reader.Peek() >= 0)
+        {
+            content += $"{Environment.NewLine}... [truncated preview]";
+        }
+
+        return content;
+    }
+
+    private static bool IsTextLikeExtension(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext is ".txt" or ".log" or ".csv" or ".json" or ".xml" or ".md" or ".ini" or ".yaml" or ".yml";
+    }
+
+    private static bool IsImageExtension(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext is ".jpg" or ".jpeg" or ".png" or ".bmp" or ".gif" or ".tif" or ".tiff" or ".webp";
+    }
+
+    private void PopulateCandidateFilterOptions()
+    {
+        var currentFileType = FilterFileTypeComboBox.SelectedItem?.ToString() ?? "All";
+        var currentStatus = FilterStatusComboBox.SelectedItem?.ToString() ?? "All";
+        var currentEvidence = FilterEvidenceComboBox.SelectedItem?.ToString() ?? "All";
+        var currentConfidence = FilterConfidenceComboBox.SelectedItem?.ToString() ?? "All";
+
+        var fileTypes = _quickScanCandidates
+            .Select(candidate => candidate.FileType)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        fileTypes.Insert(0, "All");
+        FilterFileTypeComboBox.ItemsSource = fileTypes;
+
+        var statuses = _quickScanCandidates
+            .Select(candidate => candidate.CandidateStatusCode)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        statuses.Insert(0, "All");
+        FilterStatusComboBox.ItemsSource = statuses;
+
+        var evidence = _quickScanCandidates
+            .SelectMany(candidate => candidate.EvidenceSource
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        evidence.Insert(0, "All");
+        FilterEvidenceComboBox.ItemsSource = evidence;
+
+        var confidence = _quickScanCandidates
+            .Select(candidate => candidate.ConfidenceTier)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        confidence.Insert(0, "All");
+        FilterConfidenceComboBox.ItemsSource = confidence;
+
+        FilterFileTypeComboBox.SelectedItem = fileTypes.Contains(currentFileType, StringComparer.OrdinalIgnoreCase) ? currentFileType : "All";
+        FilterStatusComboBox.SelectedItem = statuses.Contains(currentStatus, StringComparer.OrdinalIgnoreCase) ? currentStatus : "All";
+        FilterEvidenceComboBox.SelectedItem = evidence.Contains(currentEvidence, StringComparer.OrdinalIgnoreCase) ? currentEvidence : "All";
+        FilterConfidenceComboBox.SelectedItem = confidence.Contains(currentConfidence, StringComparer.OrdinalIgnoreCase) ? currentConfidence : "All";
     }
 
     private void AppendCandidateActivity(string message)
@@ -1041,7 +1399,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var persisted = await _sessionStore.GetQuickScanCandidatesAsync(latest.SessionId, 256, cancellationToken);
+        var persisted = await _sessionStore.GetQuickScanCandidatesAsync(latest.SessionId, GetQuickScanMaxRecords(), cancellationToken);
         if (persisted.Count == 0)
         {
             return;
@@ -1055,6 +1413,46 @@ public partial class MainWindow : Window
     private async void SessionMaintenanceButton_Click(object sender, RoutedEventArgs e)
     {
         await RunSessionStoreMaintenanceAsync(userInitiated: true, compactDatabase: true, CancellationToken.None);
+    }
+
+    private async void ResumeLatestSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var sessions = await _sessionStore.GetRecentSessionsAsync(1, CancellationToken.None);
+            var latest = sessions.FirstOrDefault();
+            if (latest is null)
+            {
+                AppendSessionMessage("Resume skipped: no persisted sessions are available.");
+                StatusTextBlock.Text = "No persisted session";
+                return;
+            }
+
+            _activeSessionId = latest.SessionId;
+            DestinationPathTextBox.Text = latest.DestinationPath;
+            ScanModeComboBox.SelectedItem = latest.ScanMode;
+
+            var source = _sources.FirstOrDefault(item =>
+                string.Equals(item.Id, latest.SourceId, StringComparison.OrdinalIgnoreCase));
+            if (source is not null)
+            {
+                SourcesDataGrid.SelectedItem = source;
+            }
+
+            var candidates = await _sessionStore.GetQuickScanCandidatesAsync(
+                latest.SessionId,
+                GetQuickScanMaxRecords(),
+                CancellationToken.None);
+            RenderQuickScanCandidates(candidates);
+            AppendSessionMessage(
+                $"Resumed session {latest.SessionId:D} ({latest.Status}) with {candidates.Count} candidates.");
+            StatusTextBlock.Text = "Latest session resumed";
+        }
+        catch (Exception ex)
+        {
+            AppendSessionMessage($"Resume latest session failed: {ex.Message}");
+            StatusTextBlock.Text = "Resume latest session failed";
+        }
     }
 
     private async Task RunSessionStoreMaintenanceAsync(
@@ -1141,6 +1539,10 @@ public partial class MainWindow : Window
         _filterDeletedOnly = FilterDeletedCheckBox.IsChecked == true;
         _filterRecoverableOnly = FilterRecoverableCheckBox.IsChecked == true;
         _filterSelectedOnly = FilterSelectedCheckBox.IsChecked == true;
+        _filterFileType = FilterFileTypeComboBox.SelectedItem?.ToString() ?? "All";
+        _filterStatus = FilterStatusComboBox.SelectedItem?.ToString() ?? "All";
+        _filterEvidence = FilterEvidenceComboBox.SelectedItem?.ToString() ?? "All";
+        _filterConfidence = FilterConfidenceComboBox.SelectedItem?.ToString() ?? "All";
         RefreshCandidateView();
         AppendCandidateActivity("Candidate filters updated.");
     }
@@ -1156,10 +1558,18 @@ public partial class MainWindow : Window
         FilterDeletedCheckBox.IsChecked = false;
         FilterRecoverableCheckBox.IsChecked = false;
         FilterSelectedCheckBox.IsChecked = false;
+        FilterFileTypeComboBox.SelectedIndex = 0;
+        FilterStatusComboBox.SelectedIndex = 0;
+        FilterEvidenceComboBox.SelectedIndex = 0;
+        FilterConfidenceComboBox.SelectedIndex = 0;
         CandidateSearchTextBox.Text = string.Empty;
         _filterDeletedOnly = false;
         _filterRecoverableOnly = false;
         _filterSelectedOnly = false;
+        _filterFileType = "All";
+        _filterStatus = "All";
+        _filterEvidence = "All";
+        _filterConfidence = "All";
         _candidateSearchTerm = string.Empty;
         RefreshCandidateView();
         AppendCandidateActivity("Candidate view reset.");
@@ -1173,6 +1583,17 @@ public partial class MainWindow : Window
     private void QuickScanCandidatesDataGrid_CurrentCellChanged(object? sender, EventArgs e)
     {
         UpdateCandidateSummary();
+    }
+
+    private void QuickScanCandidatesDataGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (QuickScanCandidatesDataGrid.SelectedItem is not QuickScanCandidateRow candidate)
+        {
+            ClearPreviewPanel();
+            return;
+        }
+
+        UpdatePreviewPanel(candidate);
     }
 
     private void SelectAllCandidatesButton_Click(object sender, RoutedEventArgs e)
@@ -1269,7 +1690,9 @@ public partial class MainWindow : Window
                     sparse = candidate.IsSparse,
                     encrypted = candidate.IsEncrypted,
                     name = candidate.Name,
+                    file_type = candidate.FileType,
                     original_path = candidate.OriginalPath,
+                    recovered_path = candidate.RecoveredPath,
                     parent_record = candidate.ParentRecord,
                     data_size_bytes = candidate.DataSizeBytes,
                     allocated_size_bytes = candidate.AllocatedSizeBytes,
@@ -1466,6 +1889,7 @@ public partial class MainWindow : Window
                             carveResult.DiagnosticsSummary,
                             renameSummary,
                             metadataSummary);
+                        candidate.RecoveredPath = finalCarvePath;
                         candidate.IsSelected = false;
                         AppendSessionMessage(
                             $"Recovered carve candidate {candidate.Name} to {finalCarvePath} ({(carveResult.Partial ? "partial" : "full")}, {carveResult.BytesWritten} bytes). Diagnostics: {candidate.RecoveryDiagnostics}");
@@ -1535,6 +1959,7 @@ public partial class MainWindow : Window
                     candidate.LastRecoveredBytes = result.BytesWritten;
                     candidate.LastRecoveryPartial = result.Partial;
                     candidate.RecoveryDiagnostics = CombineRecoveryDiagnostics(result.DiagnosticsSummary, metadataSummary);
+                    candidate.RecoveredPath = targetPath;
                     candidate.IsSelected = false;
                     AppendSessionMessage(
                         $"Recovered R{candidate.RecordNumber} to {targetPath} ({(result.Partial ? "partial" : "full")}, {result.BytesWritten} bytes). Diagnostics: {candidate.RecoveryDiagnostics}");
@@ -1763,8 +2188,8 @@ public partial class MainWindow : Window
         builder.AppendLine();
         builder.AppendLine("## Candidate Details");
         builder.AppendLine();
-        builder.AppendLine("| Cluster | Dedupe | Evidence | Record | Name | Original Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
-        builder.AppendLine("|---|---:|---|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
+        builder.AppendLine("| Cluster | Dedupe | Evidence | Record | Name | Type | Original Path | Recovered Path | Data Size | Modified UTC | Attr | Status | Recover Code | Diag Flags | Recovered Bytes | Partial | Diagnostics |");
+        builder.AppendLine("|---|---:|---|---|---|---|---|---|---:|---|---|---|---:|---:|---:|---|---|");
 
         foreach (var candidate in selected)
         {
@@ -1790,7 +2215,7 @@ public partial class MainWindow : Window
                 : "-";
 
             builder.AppendLine(
-                $"| {EscapeMarkdownCell(candidate.ClusterDisplay)} | {dedupe} | {EscapeMarkdownCell(candidate.EvidenceSource)} | {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
+                $"| {EscapeMarkdownCell(candidate.ClusterDisplay)} | {dedupe} | {EscapeMarkdownCell(candidate.EvidenceSource)} | {candidate.RecordNumber} | {EscapeMarkdownCell(candidate.Name)} | {EscapeMarkdownCell(candidate.FileType)} | {EscapeMarkdownCell(candidate.OriginalPath)} | {EscapeMarkdownCell(candidate.RecoveredPath)} | {dataSize} | {modifiedUtc} | {fileAttributes} | {EscapeMarkdownCell(candidate.CandidateStatus.ToStorageCode())} | {recoverCode} | {diagnosticsFlags} | {recoveredBytes} | {partialValue} | {EscapeMarkdownCell(candidate.RecoveryDiagnostics)} |");
         }
 
         return builder.ToString();
@@ -1800,7 +2225,7 @@ public partial class MainWindow : Window
     {
         var lines = new List<string>
         {
-            "cluster_id,cluster_size,deduplicated_count,record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,original_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
+            "cluster_id,cluster_size,deduplicated_count,record_number,deleted,is_ghost_record,directory,non_resident_data,has_named_data_streams,compressed,sparse,encrypted,name,file_type,original_path,recovered_path,parent_record,data_size_bytes,allocated_size_bytes,file_attributes,created_filetime_utc,modified_filetime_utc,mft_modified_filetime_utc,accessed_filetime_utc,carve_offset_bytes,carve_length_bytes,carve_format,evidence_source,confidence_tier,status,recovery_status_code,recovery_diagnostics_flags,recovered_bytes,recovery_partial,recovery_diagnostics"
         };
 
         foreach (var candidate in selected)
@@ -1819,7 +2244,9 @@ public partial class MainWindow : Window
                 candidate.IsSparse ? "1" : "0",
                 candidate.IsEncrypted ? "1" : "0",
                 EscapeCsv(candidate.Name),
+                EscapeCsv(candidate.FileType),
                 EscapeCsv(candidate.OriginalPath),
+                EscapeCsv(candidate.RecoveredPath),
                 EscapeCsv(candidate.ParentRecord),
                 EscapeCsv(candidate.DataSizeBytes?.ToString(CultureInfo.InvariantCulture)),
                 EscapeCsv(candidate.AllocatedSizeBytes?.ToString(CultureInfo.InvariantCulture)),
@@ -2731,10 +3158,21 @@ public partial class MainWindow : Window
         _previewReadCts?.Dispose();
         _previewReadCts = new CancellationTokenSource();
 
-        AppendSessionMessage("Starting preview read (8 MiB cap, 1 MiB chunks).");
+        var maxBytes = GetPreviewCapBytes();
+        var chunkBytes = GetPreviewChunkBytes();
+        var maxMiB = maxBytes / (1024UL * 1024UL);
+        var chunkKiB = chunkBytes / 1024;
+        AppendSessionMessage($"Starting preview read ({maxMiB} MiB cap, {chunkKiB} KiB chunks).");
+        OperationProgressBar.Value = 0;
+        ThroughputStatusTextBlock.Text = "Throughput: 0.00 MiB/s";
 
         var progress = new Progress<ReadPreviewProgress>(state =>
         {
+            var percent = state.TargetBytes > 0
+                ? Math.Min(100.0, (double)state.BytesRead * 100.0 / state.TargetBytes)
+                : 0.0;
+            OperationProgressBar.Value = percent;
+            ThroughputStatusTextBlock.Text = $"Throughput: {state.ThroughputMiBPerSec:0.00} MiB/s";
             StatusTextBlock.Text =
                 $"Preview read {state.BytesRead}/{state.TargetBytes} bytes at {state.ThroughputMiBPerSec:0.00} MiB/s";
         });
@@ -2744,8 +3182,8 @@ public partial class MainWindow : Window
         {
             result = await _previewScanner.RunAsync(
                 source,
-                maxBytes: 8UL * 1024 * 1024,
-                chunkSize: 1024 * 1024,
+                maxBytes: maxBytes,
+                chunkSize: chunkBytes,
                 cancellationToken: _previewReadCts.Token,
                 progress: progress);
         }
@@ -2753,6 +3191,8 @@ public partial class MainWindow : Window
         {
             AppendSessionMessage($"Preview read error: {ex.Message}");
             StatusTextBlock.Text = "Preview read failed";
+            ThroughputStatusTextBlock.Text = "Throughput: failed";
+            OperationProgressBar.Value = 0;
             await _sessionLogWriter.LogEventAsync(sessionId, "preview_read", new
             {
                 succeeded = false,
@@ -2781,10 +3221,16 @@ public partial class MainWindow : Window
         if (result.Canceled)
         {
             StatusTextBlock.Text = "Preview read canceled";
+            ThroughputStatusTextBlock.Text = "Throughput: canceled";
+            OperationProgressBar.Value = 0;
             return;
         }
 
         StatusTextBlock.Text = result.Succeeded ? "Preview read completed" : "Preview read failed";
+        ThroughputStatusTextBlock.Text = result.Succeeded
+            ? "Throughput: complete"
+            : "Throughput: failed";
+        OperationProgressBar.Value = result.Succeeded ? 100 : 0;
     }
 
     private void CancelPreviewButton_Click(object sender, RoutedEventArgs e)

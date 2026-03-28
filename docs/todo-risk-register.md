@@ -44,6 +44,7 @@
 35. Completed Phase 4 recovery UX gaps by enabling directory-selection expansion into child-file recovery, formatting snapshot timestamps clearly in source display, and normalizing snapshot volume identity checks for same-volume safety enforcement.
 36. Implemented Phase 5 baseline end-to-end carving path: selective family-based carving in `fr-carving` + validator hardening in `fr-validator`, new FFI carve-candidate API, WPF full-scan carve family selection UI, carve candidate persistence in SQLite, and carve-range export recovery in UI with explicit carve evidence labeling.
 37. Implemented Phase 6 post-processing quality baseline in .NET UI/core: candidate dedupe + logical clustering (`CandidatePostProcessor`), metadata-aware placeholder naming and carve rename heuristics, export-time timestamp/attribute preservation attempts, and recovery report/CSV enrichment with cluster + dedupe context.
+38. Implemented Phase 7 UI batch 1 in WPF: advanced scan/preview settings drawer, richer results filters (file type/status/evidence/confidence), candidate preview pane (summary/text/image/metadata hooks), recovered-path/file-type grid surfacing, resume-latest-session action, and live preview throughput/progress indicators in status bar.
 
 ## Active risks
 

@@ -100,6 +100,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
@@ -123,7 +124,31 @@
                         </WrapPanel>
                     </StackPanel>
 
-                    <StackPanel Grid.Row="5" Orientation="Horizontal" VerticalAlignment="Top">
+                    <Expander Grid.Row="5" Header="Advanced Settings" IsExpanded="False" Margin="0,0,0,10">
+                        <Grid Margin="0,8,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Quick scan max records"/>
+                            <TextBox x:Name="QuickScanMaxRecordsTextBox" Grid.Row="0" Grid.Column="1" Margin="8,0,0,6" Text="256"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Candidate capacity"/>
+                            <TextBox x:Name="CandidateCapacityTextBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" Text="128"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Preview cap MiB / chunk KiB"/>
+                            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                                <TextBox x:Name="PreviewCapMiBTextBox" Width="52" Text="8"/>
+                                <TextBlock Margin="6,4,6,0" Text="/"/>
+                                <TextBox x:Name="PreviewChunkKiBTextBox" Width="52" Text="1024"/>
+                            </StackPanel>
+                        </Grid>
+                    </Expander>
+
+                    <StackPanel Grid.Row="6" Orientation="Horizontal" VerticalAlignment="Top">
                         <Button Content="Validate Safety" Width="120" Margin="0,0,8,0" Click="ValidateSafetyButton_Click"/>
                         <Button Content="Start Session" Width="110" Click="StartSessionButton_Click"/>
                         <Button Content="Cancel Operation" Width="120" Margin="8,0,0,0" Click="CancelPreviewButton_Click"/>
@@ -146,6 +171,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="260"/>
+                    <RowDefinition Height="200"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
@@ -193,22 +219,39 @@
                     <Button Content="Clear Selection" Width="110" Margin="0,0,8,0" Click="ClearCandidateSelectionButton_Click"/>
                     <Button Content="Recover Selected" Width="120" Margin="0,0,8,0" Click="RecoverSelectedCandidatesButton_Click"/>
                     <Button Content="Export Selected" Width="120" Margin="0,0,8,0" Click="ExportSelectedCandidatesButton_Click"/>
+                    <Button Content="Resume Latest Session" Width="150" Margin="0,0,8,0" Click="ResumeLatestSessionButton_Click"/>
                     <Button Content="Session DB Maintenance" Width="170" Click="SessionMaintenanceButton_Click"/>
                 </StackPanel>
 
                 <Border Grid.Row="5" Margin="0,0,0,6" Padding="8" BorderThickness="1" CornerRadius="4" BorderBrush="#D6DBE6" Background="#F8FAFC">
-                    <DockPanel LastChildFill="True">
-                        <StackPanel Orientation="Horizontal">
-                            <CheckBox x:Name="FilterDeletedCheckBox" Content="Deleted only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
-                            <CheckBox x:Name="FilterRecoverableCheckBox" Content="Recoverable only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
-                            <CheckBox x:Name="FilterSelectedCheckBox" Content="Selected only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
-                        </StackPanel>
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                            <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <TextBox x:Name="CandidateSearchTextBox" Width="220" Margin="0,0,8,0" TextChanged="CandidateSearchTextBox_TextChanged"/>
-                            <Button Content="Reset View" Width="90" Click="ResetCandidateFiltersButton_Click"/>
-                        </StackPanel>
-                    </DockPanel>
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,6">
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox x:Name="FilterDeletedCheckBox" Content="Deleted only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                                <CheckBox x:Name="FilterRecoverableCheckBox" Content="Recoverable only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                                <CheckBox x:Name="FilterSelectedCheckBox" Content="Selected only" Margin="0,0,12,0" Checked="CandidateFilterChanged" Unchecked="CandidateFilterChanged"/>
+                            </StackPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBox x:Name="CandidateSearchTextBox" Width="220" Margin="0,0,8,0" TextChanged="CandidateSearchTextBox_TextChanged"/>
+                                <Button Content="Reset View" Width="90" Click="ResetCandidateFiltersButton_Click"/>
+                            </StackPanel>
+                        </DockPanel>
+                        <WrapPanel Grid.Row="1" VerticalAlignment="Center">
+                            <TextBlock Text="File Type:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="FilterFileTypeComboBox" Width="130" Margin="0,0,10,0" SelectionChanged="CandidateFilterChanged"/>
+                            <TextBlock Text="Status:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="FilterStatusComboBox" Width="140" Margin="0,0,10,0" SelectionChanged="CandidateFilterChanged"/>
+                            <TextBlock Text="Evidence:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="FilterEvidenceComboBox" Width="130" Margin="0,0,10,0" SelectionChanged="CandidateFilterChanged"/>
+                            <TextBlock Text="Confidence:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="FilterConfidenceComboBox" Width="130" SelectionChanged="CandidateFilterChanged"/>
+                        </WrapPanel>
+                    </Grid>
                 </Border>
 
                 <DataGrid x:Name="QuickScanCandidatesDataGrid"
@@ -233,7 +276,8 @@
                           ScrollViewer.HorizontalScrollBarVisibility="Auto"
                           ScrollViewer.IsDeferredScrollingEnabled="True"
                           CellEditEnding="QuickScanCandidatesDataGrid_CellEditEnding"
-                          CurrentCellChanged="QuickScanCandidatesDataGrid_CurrentCellChanged">
+                          CurrentCellChanged="QuickScanCandidatesDataGrid_CurrentCellChanged"
+                          SelectionChanged="QuickScanCandidatesDataGrid_SelectionChanged">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow">
                             <Style.Triggers>
@@ -264,8 +308,10 @@
                         <DataGridCheckBoxColumn Header="Sparse" Binding="{Binding IsSparse}" Width="65" IsReadOnly="True"/>
                         <DataGridCheckBoxColumn Header="Encrypted" Binding="{Binding IsEncrypted}" Width="78" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="180" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="File Type" Binding="{Binding FileType}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Original Path" Binding="{Binding OriginalPath}" Width="*"
                                             IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Recovered Path" Binding="{Binding RecoveredPath}" Width="220" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Data Size" Binding="{Binding DataSizeDisplay}" Width="95" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Modified UTC" Binding="{Binding ModifiedUtcDisplay}" Width="165" IsReadOnly="True"/>
                         <DataGridTextColumn Header="Attr" Binding="{Binding FileAttributesDisplay}" Width="92" IsReadOnly="True"/>
@@ -284,7 +330,54 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <Expander Grid.Row="7" Margin="0,8,0,0" Header="Table Activity Log" IsExpanded="False">
+                <GroupBox Grid.Row="7" Header="Candidate Preview" Margin="0,8,0,0" Padding="8">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="PreviewHeaderTextBlock" FontWeight="SemiBold" Text="Select a candidate to preview metadata and recovered content."/>
+                        <Grid Grid.Row="1" Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="3*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="PreviewSummaryTextBox"
+                                     Grid.Column="0"
+                                     Margin="0,0,8,0"
+                                     IsReadOnly="True"
+                                     FontFamily="Consolas"
+                                     TextWrapping="Wrap"
+                                     VerticalScrollBarVisibility="Auto"/>
+                            <TabControl Grid.Column="1">
+                                <TabItem Header="Text Preview">
+                                    <TextBox x:Name="PreviewTextTextBox"
+                                             IsReadOnly="True"
+                                             FontFamily="Consolas"
+                                             TextWrapping="Wrap"
+                                             VerticalScrollBarVisibility="Auto"
+                                             HorizontalScrollBarVisibility="Auto"/>
+                                </TabItem>
+                                <TabItem Header="Image Preview">
+                                    <Border Margin="6" BorderBrush="#D6DBE6" BorderThickness="1">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                            <Image x:Name="PreviewImageControl" Stretch="Uniform"/>
+                                        </ScrollViewer>
+                                    </Border>
+                                </TabItem>
+                                <TabItem Header="Metadata">
+                                    <TextBox x:Name="PreviewMetadataTextBox"
+                                             IsReadOnly="True"
+                                             FontFamily="Consolas"
+                                             TextWrapping="Wrap"
+                                             VerticalScrollBarVisibility="Auto"/>
+                                </TabItem>
+                            </TabControl>
+                        </Grid>
+                    </Grid>
+                </GroupBox>
+
+                <Expander Grid.Row="8" Margin="0,8,0,0" Header="Table Activity Log" IsExpanded="False">
                     <Grid Margin="0,6,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -311,6 +404,13 @@
         <StatusBar Grid.Row="5" Margin="0,14,0,0">
             <StatusBarItem>
                 <TextBlock x:Name="StatusTextBlock" Text="Ready"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock x:Name="ThroughputStatusTextBlock" Text="Throughput: -"/>
+            </StatusBarItem>
+            <StatusBarItem MinWidth="180">
+                <ProgressBar x:Name="OperationProgressBar" Height="14" Minimum="0" Maximum="100" Value="0"/>
             </StatusBarItem>
         </StatusBar>
     </Grid>
