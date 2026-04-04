@@ -18,9 +18,10 @@
 - `cargo test -p fr-ext` passed (`5` tests, includes deleted inode-table candidate coverage).
 - `cargo test -p fr-ffi` passed (`25` tests, includes ext probe/listing tests).
 - `dotnet test ui/windows-app/tests/FileRecovery.WindowsApp.Tests/FileRecovery.WindowsApp.Tests.csproj -c Debug` passed (`35` tests).
+- UI recovery flow now gates ext candidates with explicit status `91` ("not implemented") instead of falling through NTFS/FAT recovery paths.
 
 ## Open items for Phase 9 completion
 
 - Improve ext candidate quality using block-group/inode metadata traversal.
-- Add ext recovery/export implementation or explicit supported gating.
+- Add full ext recovery/export implementation.
 - Add fixture corpus and host/image validation profiles for ext images.

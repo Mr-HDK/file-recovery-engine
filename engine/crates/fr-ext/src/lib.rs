@@ -192,76 +192,97 @@ fn scan_deleted_inodes(
         return;
     }
 
-    let group_desc_offset = first_group_descriptor_offset(superblock);
-    if group_desc_offset + 32 > image.len() {
-        return;
-    }
-
-    let inode_table_block = read_u32_le(
-        image,
-        group_desc_offset + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET,
-    );
-    if inode_table_block == 0 {
-        return;
-    }
-
-    let Some(inode_table_offset) = (inode_table_block as usize).checked_mul(block_size) else {
-        return;
-    };
-    if inode_table_offset >= image.len() {
-        return;
-    }
-
     let inode_size = superblock.inode_size_bytes as usize;
     if inode_size < 128 {
         return;
     }
 
-    let inode_count = (superblock.inodes_count as usize).min(superblock.inodes_per_group as usize);
-    for index in 0..inode_count {
+    let group_desc_base = first_group_descriptor_offset(superblock);
+    let group_count = compute_group_count(superblock);
+    if group_count == 0 {
+        return;
+    }
+
+    let inodes_per_group = superblock.inodes_per_group as usize;
+    if inodes_per_group == 0 {
+        return;
+    }
+
+    for group_index in 0..group_count {
         if out.len() >= max_entries {
             break;
         }
 
-        let Some(rel_offset) = index.checked_mul(inode_size) else {
+        let Some(gd_offset) = group_desc_base.checked_add(group_index.saturating_mul(32)) else {
             break;
         };
-        let Some(inode_offset) = inode_table_offset.checked_add(rel_offset) else {
-            break;
-        };
-        if inode_offset + inode_size > image.len() {
+        if gd_offset + 32 > image.len() {
             break;
         }
 
-        let inode_number = (index + 1) as u64;
-        if inode_number <= 10 {
+        let inode_table_block =
+            read_u32_le(image, gd_offset + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET);
+        if inode_table_block == 0 {
             continue;
         }
 
-        let mode = read_u16_le(image, inode_offset);
-        let links_count = read_u16_le(image, inode_offset + 26);
-        let deletion_time = read_u32_le(image, inode_offset + 20);
-        if mode == 0 || links_count != 0 || deletion_time == 0 {
+        let Some(inode_table_offset) = (inode_table_block as usize).checked_mul(block_size) else {
+            continue;
+        };
+        if inode_table_offset >= image.len() {
             continue;
         }
 
-        let is_directory = (mode & 0xF000) == 0x4000;
-        let size_bytes = read_u32_le(image, inode_offset + 4) as u64;
-        let name = format!("inode-{}", inode_number);
-        let key = format!("inode:{}:{}", inode_number, name);
-        push_candidate(
-            out,
-            seen_keys,
-            key,
-            ExtDeletedCandidate {
-                inode_number,
-                entry_offset_bytes: inode_offset as u64,
-                size_bytes,
-                name: name.clone(),
-                path: format!(r".\{}", name),
-                is_directory,
-            },
-        );
+        let inodes_in_this_group = inodes_in_group(superblock, group_index, group_count);
+        if inodes_in_this_group == 0 {
+            continue;
+        }
+
+        for index in 0..inodes_in_this_group {
+            if out.len() >= max_entries {
+                break;
+            }
+
+            let Some(rel_offset) = index.checked_mul(inode_size) else {
+                break;
+            };
+            let Some(inode_offset) = inode_table_offset.checked_add(rel_offset) else {
+                break;
+            };
+            if inode_offset + inode_size > image.len() {
+                break;
+            }
+
+            let inode_number = (group_index * inodes_per_group + index + 1) as u64;
+            if inode_number <= 10 {
+                continue;
+            }
+
+            let mode = read_u16_le(image, inode_offset);
+            let links_count = read_u16_le(image, inode_offset + 26);
+            let deletion_time = read_u32_le(image, inode_offset + 20);
+            if mode == 0 || links_count != 0 || deletion_time == 0 {
+                continue;
+            }
+
+            let is_directory = (mode & 0xF000) == 0x4000;
+            let size_bytes = read_u32_le(image, inode_offset + 4) as u64;
+            let name = format!("inode-{}", inode_number);
+            let key = format!("inode:{}:{}", inode_number, inode_offset);
+            push_candidate(
+                out,
+                seen_keys,
+                key,
+                ExtDeletedCandidate {
+                    inode_number,
+                    entry_offset_bytes: inode_offset as u64,
+                    size_bytes,
+                    name: name.clone(),
+                    path: format!(r".\{}", name),
+                    is_directory,
+                },
+            );
+        }
     }
 }
 
@@ -271,6 +292,53 @@ fn first_group_descriptor_offset(superblock: &ExtSuperblock) -> usize {
     } else {
         superblock.block_size_bytes as usize
     }
+}
+
+fn compute_group_count(superblock: &ExtSuperblock) -> usize {
+    let block_groups = if superblock.blocks_per_group == 0 {
+        0usize
+    } else {
+        div_ceil_u64(superblock.blocks_count, superblock.blocks_per_group as u64)
+    };
+    let inode_groups = if superblock.inodes_per_group == 0 {
+        0usize
+    } else {
+        div_ceil_u64(
+            superblock.inodes_count as u64,
+            superblock.inodes_per_group as u64,
+        )
+    };
+    block_groups.max(inode_groups)
+}
+
+fn inodes_in_group(superblock: &ExtSuperblock, group_index: usize, group_count: usize) -> usize {
+    let inodes_per_group = superblock.inodes_per_group as usize;
+    if inodes_per_group == 0 || group_index >= group_count {
+        return 0;
+    }
+
+    let total_inodes = superblock.inodes_count as usize;
+    let full_groups = total_inodes / inodes_per_group;
+    let remainder = total_inodes % inodes_per_group;
+
+    if group_index < full_groups {
+        inodes_per_group
+    } else if group_index == full_groups {
+        if remainder == 0 {
+            inodes_per_group
+        } else {
+            remainder
+        }
+    } else {
+        0
+    }
+}
+
+fn div_ceil_u64(numerator: u64, denominator: u64) -> usize {
+    if denominator == 0 {
+        return 0;
+    }
+    numerator.saturating_add(denominator - 1) as usize / denominator as usize
 }
 
 fn push_candidate(
@@ -378,6 +446,22 @@ mod tests {
         assert_eq!(inode_entry.size_bytes, 8192);
     }
 
+    #[test]
+    fn extracts_deleted_inode_from_second_group_inode_table() {
+        let mut image = build_test_ext4_image_two_groups();
+        set_deleted_inode_for_group(&mut image, 1, 3, 0x81A4, 4096, 5678);
+
+        let (_, entries) = scan_deleted_candidates(&image, 64).expect("scan ext");
+        let inode_entry = entries
+            .iter()
+            .find(|candidate| candidate.inode_number == 260)
+            .expect("inode candidate from second group");
+
+        assert_eq!(inode_entry.name, "inode-260");
+        assert_eq!(inode_entry.path, r".\inode-260");
+        assert_eq!(inode_entry.size_bytes, 4096);
+    }
+
     fn build_test_ext4_image() -> Vec<u8> {
         let mut image = vec![0u8; 512 * 256];
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x00, 1024);
@@ -395,6 +479,28 @@ mod tests {
         image
     }
 
+    fn build_test_ext4_image_two_groups() -> Vec<u8> {
+        let mut image = vec![0u8; 4096 * 40];
+        write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x00, 512);
+        write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x04, 65_536);
+        write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x18, 2);
+        write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x20, 32_768);
+        write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x28, 256);
+        write_u16(&mut image, EXT_SUPERBLOCK_MAGIC_OFFSET, 0xEF53);
+        write_u16(&mut image, EXT_SUPERBLOCK_INODE_SIZE_OFFSET, 256);
+        write_u32(
+            &mut image,
+            4096 + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET,
+            10,
+        );
+        write_u32(
+            &mut image,
+            4096 + 32 + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET,
+            20,
+        );
+        image
+    }
+
     fn set_deleted_inode(
         image: &mut [u8],
         inode_index_zero_based: usize,
@@ -404,6 +510,26 @@ mod tests {
     ) {
         let inode_size = 256usize;
         let inode_table_offset = 10usize * 4096usize;
+        let inode_offset = inode_table_offset + inode_index_zero_based * inode_size;
+        write_u16(image, inode_offset + 0, mode);
+        write_u32(image, inode_offset + 4, size_bytes);
+        write_u32(image, inode_offset + 20, deletion_time);
+        write_u16(image, inode_offset + 26, 0);
+    }
+
+    fn set_deleted_inode_for_group(
+        image: &mut [u8],
+        group_index: usize,
+        inode_index_zero_based: usize,
+        mode: u16,
+        size_bytes: u32,
+        deletion_time: u32,
+    ) {
+        let inode_size = 256usize;
+        let gd_offset = 4096 + (group_index * 32);
+        let inode_table_block =
+            read_u32_le(image, gd_offset + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET);
+        let inode_table_offset = (inode_table_block as usize) * 4096usize;
         let inode_offset = inode_table_offset + inode_index_zero_based * inode_size;
         write_u16(image, inode_offset + 0, mode);
         write_u32(image, inode_offset + 4, size_bytes);

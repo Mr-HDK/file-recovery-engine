@@ -1774,6 +1774,11 @@ public partial class MainWindow : Window
             return deleted ? RecoveryCandidateStatus.Partial : RecoveryCandidateStatus.Invalid;
         }
 
+        if (IsExtEvidence(evidenceSources))
+        {
+            return RecoveryCandidateStatus.Invalid;
+        }
+
         if (!deleted)
         {
             return RecoveryCandidateStatus.Invalid;
@@ -1817,6 +1822,22 @@ public partial class MainWindow : Window
                 string.Equals(source, "FAT", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(source, "FAT32", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(source, "exFAT", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsExtEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source =>
+                string.Equals(source, "ext4", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(source, "ext3", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(source, "ext2", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(source, "ext", StringComparison.OrdinalIgnoreCase));
     }
 
     private static RecoveryCandidateStatus MapRecoveryFailureStatus(int statusCode)
@@ -2511,6 +2532,22 @@ public partial class MainWindow : Window
                             $"FAT/exFAT recovery failed for R{candidate.RecordNumber}: {fatResult.Message} (status {fatResult.StatusCode}). Diagnostics: {fatResult.DiagnosticsSummary}");
                     }
 
+                    await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                    continue;
+                }
+
+                if (IsExtEvidence(candidate.EvidenceSource))
+                {
+                    candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    candidate.LastRecoveryStatusCode = 91;
+                    candidate.LastRecoveryDiagnosticsFlags = null;
+                    candidate.LastRecoveredBytes = 0;
+                    candidate.LastRecoveryPartial = null;
+                    candidate.RecoveryDiagnostics =
+                        "ext recovery/export is not implemented in this build. Candidate was skipped.";
+                    failed++;
+                    AppendSessionMessage(
+                        $"Recovery skipped for ext candidate R{candidate.RecordNumber}: recovery/export not implemented (status 91).");
                     await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
                     continue;
                 }
