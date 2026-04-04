@@ -7,6 +7,9 @@ const EXT_SUPERBLOCK_SIZE: usize = 1024;
 const EXT_SUPERBLOCK_MAGIC_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x38;
 const EXT_SUPERBLOCK_INODE_SIZE_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x58;
 const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
+const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
+const EXT_MIN_DELETION_UNIX: u32 = 315_532_800; // 1980-01-01
+const EXT_MAX_DELETION_UNIX: u32 = 4_102_444_800; // 2100-01-01
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleDescriptor {
@@ -261,14 +264,28 @@ fn scan_deleted_inodes(
             let mode = read_u16_le(image, inode_offset);
             let links_count = read_u16_le(image, inode_offset + 26);
             let deletion_time = read_u32_le(image, inode_offset + 20);
-            if mode == 0 || links_count != 0 || deletion_time == 0 {
+            if mode == 0
+                || links_count != 0
+                || deletion_time < EXT_MIN_DELETION_UNIX
+                || deletion_time > EXT_MAX_DELETION_UNIX
+            {
                 continue;
             }
 
-            let is_directory = (mode & 0xF000) == 0x4000;
-            let size_bytes = read_u32_le(image, inode_offset + 4) as u64;
+            let Some(file_type) = decode_inode_file_type(mode) else {
+                continue;
+            };
+            let is_directory = file_type == ExtInodeFileType::Directory;
+
+            let size_lo = read_u32_le(image, inode_offset + 4) as u64;
+            let size_hi = if inode_size >= EXT_INODE_SIZE_HIGH_OFFSET + 4 {
+                read_u32_le(image, inode_offset + EXT_INODE_SIZE_HIGH_OFFSET) as u64
+            } else {
+                0
+            };
+            let size_bytes = (size_hi << 32) | size_lo;
             let name = format!("inode-{}", inode_number);
-            let key = format!("inode:{}:{}", inode_number, inode_offset);
+            let key = format!("inode:{}", inode_number);
             push_candidate(
                 out,
                 seen_keys,
@@ -331,6 +348,22 @@ fn inodes_in_group(superblock: &ExtSuperblock, group_index: usize, group_count: 
         }
     } else {
         0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtInodeFileType {
+    Regular,
+    Directory,
+    Symlink,
+}
+
+fn decode_inode_file_type(mode: u16) -> Option<ExtInodeFileType> {
+    match mode & 0xF000 {
+        0x8000 => Some(ExtInodeFileType::Regular),
+        0x4000 => Some(ExtInodeFileType::Directory),
+        0xA000 => Some(ExtInodeFileType::Symlink),
+        _ => None,
     }
 }
 
@@ -433,7 +466,7 @@ mod tests {
     #[test]
     fn extracts_deleted_inode_candidate_from_inode_table() {
         let mut image = build_test_ext4_image();
-        set_deleted_inode(&mut image, 15, 0x81A4, 8192, 1234);
+        set_deleted_inode(&mut image, 15, 0x81A4, 8192, 1_704_067_200);
 
         let (_, entries) = scan_deleted_candidates(&image, 32).expect("scan ext");
         let inode_entry = entries
@@ -449,7 +482,7 @@ mod tests {
     #[test]
     fn extracts_deleted_inode_from_second_group_inode_table() {
         let mut image = build_test_ext4_image_two_groups();
-        set_deleted_inode_for_group(&mut image, 1, 3, 0x81A4, 4096, 5678);
+        set_deleted_inode_for_group(&mut image, 1, 3, 0x81A4, 4096, 1_704_153_600);
 
         let (_, entries) = scan_deleted_candidates(&image, 64).expect("scan ext");
         let inode_entry = entries
@@ -460,6 +493,45 @@ mod tests {
         assert_eq!(inode_entry.name, "inode-260");
         assert_eq!(inode_entry.path, r".\inode-260");
         assert_eq!(inode_entry.size_bytes, 4096);
+    }
+
+    #[test]
+    fn ignores_inode_with_unsupported_file_type() {
+        let mut image = build_test_ext4_image();
+        set_deleted_inode(&mut image, 15, 0x21A4, 4096, 1_704_067_200);
+
+        let (_, entries) = scan_deleted_candidates(&image, 32).expect("scan ext");
+        assert!(!entries.iter().any(|candidate| candidate.inode_number == 16));
+    }
+
+    #[test]
+    fn ignores_inode_with_invalid_deletion_timestamp() {
+        let mut image = build_test_ext4_image();
+        set_deleted_inode(&mut image, 15, 0x81A4, 4096, 1000);
+
+        let (_, entries) = scan_deleted_candidates(&image, 32).expect("scan ext");
+        assert!(!entries.iter().any(|candidate| candidate.inode_number == 16));
+    }
+
+    #[test]
+    fn reads_high_size_bits_for_large_inode_payloads() {
+        let mut image = build_test_ext4_image();
+        set_deleted_inode_with_high_size(
+            &mut image,
+            15,
+            0x81A4,
+            0x0000_1000,
+            0x0000_0002,
+            1_704_067_200,
+        );
+
+        let (_, entries) = scan_deleted_candidates(&image, 32).expect("scan ext");
+        let inode_entry = entries
+            .iter()
+            .find(|candidate| candidate.inode_number == 16)
+            .expect("inode candidate");
+
+        assert_eq!(inode_entry.size_bytes, 0x0000_0002_0000_1000);
     }
 
     fn build_test_ext4_image() -> Vec<u8> {
@@ -508,11 +580,34 @@ mod tests {
         size_bytes: u32,
         deletion_time: u32,
     ) {
+        set_deleted_inode_with_high_size(
+            image,
+            inode_index_zero_based,
+            mode,
+            size_bytes,
+            0,
+            deletion_time,
+        );
+    }
+
+    fn set_deleted_inode_with_high_size(
+        image: &mut [u8],
+        inode_index_zero_based: usize,
+        mode: u16,
+        size_lo_bytes: u32,
+        size_hi_bytes: u32,
+        deletion_time: u32,
+    ) {
         let inode_size = 256usize;
         let inode_table_offset = 10usize * 4096usize;
         let inode_offset = inode_table_offset + inode_index_zero_based * inode_size;
         write_u16(image, inode_offset + 0, mode);
-        write_u32(image, inode_offset + 4, size_bytes);
+        write_u32(image, inode_offset + 4, size_lo_bytes);
+        write_u32(
+            image,
+            inode_offset + EXT_INODE_SIZE_HIGH_OFFSET,
+            size_hi_bytes,
+        );
         write_u32(image, inode_offset + 20, deletion_time);
         write_u16(image, inode_offset + 26, 0);
     }

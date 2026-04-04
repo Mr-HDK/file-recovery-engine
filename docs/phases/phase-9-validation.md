@@ -15,7 +15,7 @@
 
 ## Evidence
 
-- `cargo test -p fr-ext` passed (`6` tests, includes multi-group inode-table candidate coverage).
+- `cargo test -p fr-ext` passed (`9` tests, includes inode-type gating, deletion-time sanity, 64-bit size parsing, and multi-group inode-table coverage).
 - `cargo test -p fr-ffi` passed (`26` tests, includes ext probe/listing and ext recovery-stub tests).
 - `dotnet test ui/windows-app/tests/FileRecovery.WindowsApp.Tests/FileRecovery.WindowsApp.Tests.csproj -c Debug` passed (`36` tests).
 - `dotnet build tools/benchmarks/ExtCorpusBench/ExtCorpusBench.csproj -c Release` passed.
