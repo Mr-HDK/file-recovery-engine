@@ -1381,6 +1381,41 @@ pub extern "C" fn fr_recover_fat_candidate_to_file(
 }
 
 #[no_mangle]
+pub extern "C" fn fr_recover_ext_candidate_to_file(
+    session_id: u64,
+    _inode_number: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    if output_path.is_null() {
+        return -1;
+    }
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = 0;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = 0;
+        }
+    }
+
+    let Ok(map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    if !map.contains_key(&session_id) {
+        return 20;
+    }
+
+    91
+}
+
+#[no_mangle]
 pub extern "C" fn fr_close_source_session(session_id: u64) -> i32 {
     let Ok(mut map) = read_sessions().lock() else {
         return -200;
@@ -2958,6 +2993,53 @@ mod tests {
             EXT_DELETED_CANDIDATE_FLAG_DELETED
         );
         assert_eq!(c_string_bytes_to_string(&first.name), "deleted-ext.txt");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_returns_not_implemented_status() {
+        let image = build_test_ext4_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4.img");
+        let output_path = temp_dir.join("ext-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 123u64;
+        let mut partial = -1i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            42,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 91);
+        assert_eq!(bytes_written, 0);
+        assert_eq!(partial, 0);
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();

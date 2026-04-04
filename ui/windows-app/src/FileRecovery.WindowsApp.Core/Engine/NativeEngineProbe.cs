@@ -1389,6 +1389,77 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineRecoverCandidateResult RecoverExtCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverExtCandidateToFile(open.SessionId, inodeNumber, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverExtCandidateToFile(
+        ulong sessionId,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        try
+        {
+            var status = fr_recover_ext_candidate_to_file(
+                sessionId,
+                inodeNumber,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
     private static uint TryGetSourceSessionAlignment(ulong sessionId)
     {
         try
@@ -2069,6 +2140,14 @@ public static class NativeEngineProbe
         ulong sessionId,
         uint startCluster,
         ulong sizeBytes,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_ext_candidate_to_file(
+        ulong sessionId,
+        ulong inodeNumber,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
         out ulong bytesWritten,
         out int partial);

@@ -276,4 +276,27 @@ public sealed class NativeEngineProbeTests
 
         Assert.False(string.IsNullOrWhiteSpace(result.DiagnosticsSummary));
     }
+
+    [Fact]
+    public void RecoverExtCandidateToFileReturnsDeterministicStatus()
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), "fr-recover-ext", Guid.NewGuid().ToString("N"), "candidate.bin");
+        var result = NativeEngineProbe.RecoverExtCandidateToFile(987654321, 16, tempPath);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Equal(0UL, result.BytesWritten);
+            Assert.Equal(0U, result.DiagnosticsFlags);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 91, 10, 11, 12, 13, 14, 15, 16 });
+        }
+
+        Assert.False(string.IsNullOrWhiteSpace(result.DiagnosticsSummary));
+    }
 }

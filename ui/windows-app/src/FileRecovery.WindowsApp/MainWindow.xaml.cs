@@ -2538,16 +2538,55 @@ public partial class MainWindow : Window
 
                 if (IsExtEvidence(candidate.EvidenceSource))
                 {
-                    candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
-                    candidate.LastRecoveryStatusCode = 91;
-                    candidate.LastRecoveryDiagnosticsFlags = null;
-                    candidate.LastRecoveredBytes = 0;
-                    candidate.LastRecoveryPartial = null;
-                    candidate.RecoveryDiagnostics =
-                        "ext recovery/export is not implemented in this build. Candidate was skipped.";
-                    failed++;
-                    AppendSessionMessage(
-                        $"Recovery skipped for ext candidate R{candidate.RecordNumber}: recovery/export not implemented (status 91).");
+                    var extRelativePath = BuildRecoveryRelativePath(candidate);
+                    var extTargetPath = Path.Combine(recoveryRoot, extRelativePath);
+                    var extTargetDirectory = Path.GetDirectoryName(extTargetPath);
+                    if (!string.IsNullOrWhiteSpace(extTargetDirectory))
+                    {
+                        Directory.CreateDirectory(extTargetDirectory);
+                    }
+
+                    _ = ulong.TryParse(candidate.ParentRecord, NumberStyles.Integer, CultureInfo.InvariantCulture, out var inodeNumber);
+                    var extResult = NativeEngineProbe.RecoverExtCandidateToFile(
+                        sourcePath,
+                        _selectedSource.Kind,
+                        inodeNumber,
+                        extTargetPath);
+
+                    if (extResult.Success)
+                    {
+                        candidate.CandidateStatus = extResult.Partial ? RecoveryCandidateStatus.Partial : RecoveryCandidateStatus.Full;
+                        candidate.LastRecoveryStatusCode = extResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = extResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = extResult.BytesWritten;
+                        candidate.LastRecoveryPartial = extResult.Partial;
+                        candidate.RecoveryDiagnostics = extResult.DiagnosticsSummary;
+                        candidate.RecoveredPath = extTargetPath;
+                        candidate.IsSelected = false;
+                        if (extResult.Partial)
+                        {
+                            partial++;
+                        }
+                        else
+                        {
+                            recovered++;
+                        }
+                        AppendSessionMessage(
+                            $"Recovered ext candidate R{candidate.RecordNumber} to {extTargetPath} ({(extResult.Partial ? "partial" : "full")}, {extResult.BytesWritten} bytes). Diagnostics: {extResult.DiagnosticsSummary}");
+                    }
+                    else
+                    {
+                        candidate.CandidateStatus = MapRecoveryFailureStatus(extResult.StatusCode);
+                        candidate.LastRecoveryStatusCode = extResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = extResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = extResult.BytesWritten;
+                        candidate.LastRecoveryPartial = null;
+                        candidate.RecoveryDiagnostics = extResult.DiagnosticsSummary;
+                        failed++;
+                        AppendSessionMessage(
+                            $"ext recovery failed for R{candidate.RecordNumber}: {extResult.Message} (status {extResult.StatusCode}). Diagnostics: {extResult.DiagnosticsSummary}");
+                    }
+
                     await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
                     continue;
                 }
