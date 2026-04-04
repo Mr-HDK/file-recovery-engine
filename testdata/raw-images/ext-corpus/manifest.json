@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Fixed ext image corpus for metadata probe and deleted-candidate benchmark runs.",
+  "cases": [
+    {
+      "id": "ext4-recent-delete",
+      "relativePath": "ext4-recent-delete.img",
+      "maxEntries": 4096,
+      "iterations": 3,
+      "candidateCapacity": 2048
+    },
+    {
+      "id": "ext4-deleted-tree",
+      "relativePath": "ext4-deleted-tree.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ext4-journal-rotated",
+      "relativePath": "ext4-journal-rotated.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ext4-partial-overwrite",
+      "relativePath": "ext4-partial-overwrite.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    }
+  ]
+}

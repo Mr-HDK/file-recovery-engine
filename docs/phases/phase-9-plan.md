@@ -30,6 +30,11 @@
 - UI probe path + candidate rendering for ext evidence.
 - deterministic .NET tests for ext probe/candidates.
 
+3. Fixture/benchmark scaffolding:
+- fixed ext corpus manifest and README under `testdata/raw-images/ext-corpus/`.
+- `ExtCorpusBench` benchmark tool for ext probe/candidate throughput baselines.
+- `scripts/benchmark-ext-corpus.ps1` benchmark runner wrapper.
+
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.

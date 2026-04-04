@@ -8,6 +8,7 @@ This folder stores deterministic fixture artifacts for parser and recovery tests
 - `golden/` parser expected outputs.
 - `fixtures/` source trees used to generate images.
 - `raw-images/ntfs-corpus/manifest.json` fixed image set for benchmark runs.
+- `raw-images/ext-corpus/manifest.json` fixed ext image set for benchmark runs.
 
 ## Initial workflow
 
@@ -23,4 +24,10 @@ This folder stores deterministic fixture artifacts for parser and recovery tests
 
 ```powershell
 ./scripts/benchmark-ntfs-corpus.ps1
+```
+
+5. Run ext benchmark harness against fixed corpus:
+
+```powershell
+./scripts/benchmark-ext-corpus.ps1
 ```
