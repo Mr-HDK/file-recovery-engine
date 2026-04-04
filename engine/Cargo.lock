@@ -86,6 +86,7 @@ name = "fr-fat"
 version = "0.1.0"
 dependencies = [
  "fr-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -93,8 +94,10 @@ name = "fr-ffi"
 version = "0.1.0"
 dependencies = [
  "fr-carving",
+ "fr-fat",
  "fr-mft",
  "fr-ntfs",
+ "fr-refs",
  "fr-scoring",
  "fr-session",
  "fr-types",
@@ -131,6 +134,15 @@ name = "fr-path-recon"
 version = "0.1.0"
 dependencies = [
  "fr-types",
+]
+
+[[package]]
+name = "fr-refs"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "fr-usn",
+ "thiserror",
 ]
 
 [[package]]

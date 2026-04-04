@@ -296,8 +296,11 @@ public sealed class CandidatePostProcessor
             "DIRECTORY_INDEX" => 1,
             "USN" => 2,
             "VSS" => 3,
-            "CARVE" => 4,
-            _ => 5,
+            "FAT" => 4,
+            "FAT32" => 4,
+            "EXFAT" => 4,
+            "CARVE" => 5,
+            _ => 6,
         };
     }
 

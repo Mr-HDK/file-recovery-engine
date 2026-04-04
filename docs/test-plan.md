@@ -65,8 +65,11 @@
 - `scripts/run-host-ntfs-stream-validation.ps1` to execute host integration coverage in an elevated shell.
 - `scripts/compare-host-validation-artifacts.ps1` to compare archived host-validation manifest/TRX outputs across runs and detect drift in counters/outcomes.
 - `scripts/run-host-vss-validation.ps1` plus `HostVssSnapshotRecoveryTests` for elevated host VSS enumeration and snapshot-source quick-scan/recovery validation.
+- `scripts/run-host-validation-profile.ps1` + `scripts/compare-host-validation-profiles.ps1` for repeatable multi-host profile execution and drift review across real machine/storage layouts.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
+- Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction.
+- Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions.
 
 ## Benchmarks
 

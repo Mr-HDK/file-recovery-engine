@@ -51,6 +51,60 @@ public sealed record EngineNtfsBootProbeResult(
     int StatusCode
 );
 
+public sealed record EngineRefsBootMetadata(
+    ushort BytesPerSector,
+    byte SectorsPerCluster,
+    uint ClusterSizeBytes,
+    ulong TotalSectors,
+    ulong VolumeSizeBytes,
+    ulong VolumeSerial
+);
+
+public sealed record EngineRefsBootProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineRefsBootMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineRefsDeletedCandidate(
+    bool Deleted,
+    ulong ObjectId,
+    ulong SizeBytes,
+    string? Name,
+    string? ReconstructedPath
+);
+
+public sealed record EngineRefsDeletedCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineRefsDeletedCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineFatBootMetadata(
+    string Filesystem,
+    ushort BytesPerSector,
+    byte SectorsPerCluster,
+    byte FatCount,
+    uint ClusterSizeBytes,
+    ulong TotalSectors,
+    uint RootDirectoryFirstCluster,
+    ulong FatOffsetBytes,
+    ulong DataRegionOffsetBytes,
+    uint VolumeSerial
+);
+
+public sealed record EngineFatBootProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineFatBootMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineNtfsQuickScanResult(
     bool EngineAvailable,
     bool Success,
@@ -98,6 +152,23 @@ public sealed record EngineNtfsQuickScanCandidatesResult(
     bool EngineAvailable,
     bool Success,
     IReadOnlyList<EngineNtfsQuickScanCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineFatDeletedCandidate(
+    bool Deleted,
+    bool IsDirectory,
+    uint StartCluster,
+    ulong SizeBytes,
+    string? Name,
+    string? ReconstructedPath
+);
+
+public sealed record EngineFatDeletedCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineFatDeletedCandidate> Candidates,
     string Message,
     int StatusCode
 );
@@ -354,6 +425,263 @@ public static class NativeEngineProbe
         catch (EntryPointNotFoundException)
         {
             return new EngineNtfsBootProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineRefsBootProbeResult ProbeRefsBootFromSession(ulong sessionId)
+    {
+        try
+        {
+            var status = fr_probe_refs_boot_from_session(sessionId, out var nativeMetadata);
+            if (status == 0)
+            {
+                var metadata = new EngineRefsBootMetadata(
+                    nativeMetadata.BytesPerSector,
+                    nativeMetadata.SectorsPerCluster,
+                    nativeMetadata.ClusterSizeBytes,
+                    nativeMetadata.TotalSectors,
+                    nativeMetadata.VolumeSizeBytes,
+                    nativeMetadata.VolumeSerial);
+
+                return new EngineRefsBootProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "ReFS boot sector parsed.",
+                    status);
+            }
+
+            return new EngineRefsBootProbeResult(
+                true,
+                false,
+                null,
+                MapRefsStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRefsBootProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRefsBootProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineRefsDeletedCandidatesResult GetRefsDeletedCandidatesFromSession(
+        ulong sessionId,
+        uint maxEntries = 512,
+        int candidateCapacity = 128)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeRefsDeletedCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeRefsDeletedCandidate>();
+            }
+            else
+            {
+                buffer = new NativeRefsDeletedCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Name = new byte[128];
+                    buffer[i].ReconstructedPath = new byte[256];
+                }
+            }
+
+            var status = fr_get_refs_deleted_candidates_from_session(
+                sessionId,
+                maxEntries,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineRefsDeletedCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineRefsDeletedCandidate>(),
+                    MapRefsStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var candidates = new List<EngineRefsDeletedCandidate>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                candidates.Add(new EngineRefsDeletedCandidate(
+                    Deleted: (candidate.Flags & RefsDeletedCandidateFlagDeleted) != 0,
+                    ObjectId: candidate.ObjectId,
+                    SizeBytes: candidate.SizeBytes,
+                    Name: DecodeUtf8(candidate.Name),
+                    ReconstructedPath: DecodeUtf8(candidate.ReconstructedPath)));
+            }
+
+            return new EngineRefsDeletedCandidatesResult(
+                true,
+                true,
+                candidates,
+                "ReFS deleted-candidate scan completed.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRefsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineRefsDeletedCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRefsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineRefsDeletedCandidate>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineFatBootProbeResult ProbeFatBootFromSession(ulong sessionId)
+    {
+        try
+        {
+            var status = fr_probe_fat_boot_from_session(sessionId, out var nativeMetadata);
+            if (status == 0)
+            {
+                var metadata = new EngineFatBootMetadata(
+                    MapFatFilesystem(nativeMetadata.FilesystemKind),
+                    nativeMetadata.BytesPerSector,
+                    nativeMetadata.SectorsPerCluster,
+                    nativeMetadata.FatCount,
+                    nativeMetadata.ClusterSizeBytes,
+                    nativeMetadata.TotalSectors,
+                    nativeMetadata.RootDirFirstCluster,
+                    nativeMetadata.FatOffsetBytes,
+                    nativeMetadata.DataRegionOffsetBytes,
+                    nativeMetadata.VolumeSerial);
+
+                return new EngineFatBootProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "FAT/exFAT boot sector parsed.",
+                    status);
+            }
+
+            return new EngineFatBootProbeResult(
+                true,
+                false,
+                null,
+                MapFatStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineFatBootProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineFatBootProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineFatDeletedCandidatesResult GetFatDeletedCandidatesFromSession(
+        ulong sessionId,
+        uint maxEntries = 512,
+        int candidateCapacity = 128)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeFatDeletedCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeFatDeletedCandidate>();
+            }
+            else
+            {
+                buffer = new NativeFatDeletedCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Name = new byte[128];
+                    buffer[i].ReconstructedPath = new byte[256];
+                }
+            }
+
+            var status = fr_get_fat_deleted_candidates_from_session(
+                sessionId,
+                maxEntries,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineFatDeletedCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineFatDeletedCandidate>(),
+                    MapFatStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var candidates = new List<EngineFatDeletedCandidate>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                candidates.Add(new EngineFatDeletedCandidate(
+                    Deleted: (candidate.Flags & FatDeletedCandidateFlagDeleted) != 0,
+                    IsDirectory: (candidate.Flags & FatDeletedCandidateFlagDirectory) != 0,
+                    StartCluster: candidate.StartCluster,
+                    SizeBytes: candidate.SizeBytes,
+                    Name: DecodeUtf8(candidate.Name),
+                    ReconstructedPath: DecodeUtf8(candidate.ReconstructedPath)));
+            }
+
+            var message = written > (uint)buffer.Length
+                ? $"FAT/exFAT deleted-entry quick scan completed (returned {count} of {written}; increase candidate capacity to load more)."
+                : "FAT/exFAT deleted-entry quick scan completed.";
+
+            return new EngineFatDeletedCandidatesResult(
+                true,
+                true,
+                candidates,
+                message,
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineFatDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineFatDeletedCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineFatDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineFatDeletedCandidate>(),
+                "Engine ABI mismatch",
+                -101);
         }
     }
 
@@ -828,6 +1156,80 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineRecoverCandidateResult RecoverFatCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        uint startCluster,
+        ulong sizeBytes,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverFatCandidateToFile(open.SessionId, startCluster, sizeBytes, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverFatCandidateToFile(
+        ulong sessionId,
+        uint startCluster,
+        ulong sizeBytes,
+        string outputPath)
+    {
+        try
+        {
+            var status = fr_recover_fat_candidate_to_file(
+                sessionId,
+                startCluster,
+                sizeBytes,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
     private static uint TryGetSourceSessionAlignment(ulong sessionId)
     {
         try
@@ -872,6 +1274,57 @@ public static class NativeEngineProbe
             52 => "USN journal payload is malformed.",
             53 => "USN journal version is unsupported.",
             _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapRefsStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required metadata could be loaded.",
+            80 => "Source does not contain a valid ReFS boot sector.",
+            81 => "ReFS deleted-candidate extraction is not implemented in this build.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapFatStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required metadata could be loaded.",
+            70 => "Source does not contain a valid FAT32/exFAT boot sector.",
+            71 => "FAT/exFAT scan encountered an invalid cluster chain.",
+            72 => "FAT/exFAT scan overflowed internal limits.",
+            73 => "FAT/exFAT scan detected a cluster loop.",
+            74 => "FAT/exFAT directory entry set is truncated.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapFatFilesystem(uint filesystemKind)
+    {
+        return filesystemKind switch
+        {
+            FatFilesystemKindFat32 => "FAT32",
+            FatFilesystemKindExFat => "exFAT",
+            _ => "Unknown",
         };
     }
 
@@ -968,6 +1421,10 @@ public static class NativeEngineProbe
             45 => "Compressed NTFS data stream could not be decompressed for export in this mode.",
             46 => "Encrypted NTFS data stream requires decryption keys and is not recoverable in this mode.",
             47 => "No exportable data stream was recovered (default stream unavailable and named streams were skipped).",
+            70 => "Source does not contain a valid FAT32/exFAT boot sector.",
+            72 => "FAT/exFAT recovery overflowed internal limits.",
+            75 => "FAT/exFAT candidate start cluster is invalid.",
+            76 => "No bytes were recoverable for the requested FAT/exFAT candidate.",
             10 => "Invalid source path.",
             11 => "Unsupported platform.",
             12 => "Access denied.",
@@ -1102,6 +1559,11 @@ public static class NativeEngineProbe
     private const uint CandidateFlagEvidenceCarve = 0x0001_0000;
     private const uint CandidateFlagHasFileMetadata = 0x0002_0000;
     private const uint CandidateFlagGhostRecord = 0x0004_0000;
+    private const uint RefsDeletedCandidateFlagDeleted = 0x0001;
+    private const uint FatDeletedCandidateFlagDeleted = 0x0001;
+    private const uint FatDeletedCandidateFlagDirectory = 0x0002;
+    private const uint FatFilesystemKindFat32 = 1;
+    private const uint FatFilesystemKindExFat = 2;
     private const uint CarveCandidateFlagPartial = 0x0001;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
@@ -1127,6 +1589,49 @@ public static class NativeEngineProbe
         public ulong MftOffsetBytes;
         public ulong VolumeSizeBytes;
         public ulong VolumeSerial;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRefsBootMetadata
+    {
+        public ushort BytesPerSector;
+        public byte SectorsPerCluster;
+        public byte Reserved0;
+        public uint ClusterSizeBytes;
+        public ulong TotalSectors;
+        public ulong VolumeSizeBytes;
+        public ulong VolumeSerial;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRefsDeletedCandidate
+    {
+        public uint Flags;
+        public ulong ObjectId;
+        public ulong SizeBytes;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] Name;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ReconstructedPath;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFatBootMetadata
+    {
+        public uint FilesystemKind;
+        public ushort BytesPerSector;
+        public byte SectorsPerCluster;
+        public byte FatCount;
+        public uint ClusterSizeBytes;
+        public ulong TotalSectors;
+        public uint RootDirFirstCluster;
+        public uint Reserved0;
+        public ulong FatOffsetBytes;
+        public ulong DataRegionOffsetBytes;
+        public uint VolumeSerial;
+        public uint Reserved1;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1169,6 +1674,20 @@ public static class NativeEngineProbe
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
         public byte[] ConfidenceReason;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFatDeletedCandidate
+    {
+        public uint Flags;
+        public uint StartCluster;
+        public ulong SizeBytes;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] Name;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ReconstructedPath;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1246,6 +1765,32 @@ public static class NativeEngineProbe
         out NativeNtfsBootMetadata metadata);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_refs_boot_from_session(
+        ulong sessionId,
+        out NativeRefsBootMetadata metadata);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_refs_deleted_candidates_from_session(
+        ulong sessionId,
+        uint maxEntries,
+        [Out] NativeRefsDeletedCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_fat_boot_from_session(
+        ulong sessionId,
+        out NativeFatBootMetadata metadata);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_fat_deleted_candidates_from_session(
+        ulong sessionId,
+        uint maxEntries,
+        [Out] NativeFatDeletedCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_quick_scan_ntfs_from_session(
         ulong sessionId,
         uint maxRecords,
@@ -1300,6 +1845,15 @@ public static class NativeEngineProbe
         out ulong bytesWritten,
         out int partial,
         out uint diagnosticsFlags);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_fat_candidate_to_file(
+        ulong sessionId,
+        uint startCluster,
+        ulong sizeBytes,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_close_source_session(ulong sessionId);

@@ -22,6 +22,7 @@
 - Reconstruct paths and collect timestamps/attributes.
 - Current implementation includes parser primitives plus a quick-scan orchestration entry that reads boot-sector metadata and iterates parsable MFT records from raw source bytes.
 - Quick-scan candidate payloads now surface NTFS ADS/compressed/sparse/encrypted indicators to drive pre-recovery warnings.
+- Phase 8 baseline adds ReFS boot-sector probing and deleted-candidate metadata scanning in-session.
 
 5. Artifact-assisted pass
 - Parse USN records and merge rename/move evidence.

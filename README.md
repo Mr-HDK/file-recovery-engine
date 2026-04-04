@@ -59,6 +59,22 @@ If you want snapshot enumeration coverage without requiring an existing snapshot
 ./scripts/run-host-vss-validation.ps1 -AllowNoSnapshots
 ```
 
+Profile-based host validation orchestration (run on multiple real host machines/layouts and persist profile manifests):
+
+```powershell
+./scripts/run-host-validation-profile.ps1 -ProfileName office-laptop
+./scripts/run-host-validation-profile.ps1 -ProfileName lab-desktop -AllowNoSnapshots
+```
+
+Compare profile artifacts after collecting runs:
+
+```powershell
+./scripts/compare-host-validation-profiles.ps1 `
+  -BaselineProfile office-laptop `
+  -CandidateProfile lab-desktop `
+  -OutputPath artifacts/host-matrix/profile-compare.json
+```
+
 Compare host-validation artifact runs (manifest + TRX drift):
 
 ```powershell
@@ -71,6 +87,16 @@ Compare host-validation artifact runs (manifest + TRX drift):
   -CandidateRun 20260328-110601 `
   -OutputPath artifacts/host-validation/drift-20260328.json
 ```
+
+## FAT/exFAT engine probes
+
+Engine ABI now includes FAT/exFAT boot probing and deleted-root-entry quick scan:
+- `fr_probe_fat_boot_from_session`
+- `fr_get_fat_deleted_candidates_from_session`
+
+.NET wrappers are available via `NativeEngineProbe`:
+- `ProbeFatBootFromSession`
+- `GetFatDeletedCandidatesFromSession`
 
 ## UI run/release helpers
 

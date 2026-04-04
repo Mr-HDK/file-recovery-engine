@@ -11,6 +11,8 @@ crate-type = ["cdylib", "rlib"]
 fr-types = { path = "../fr-types" }
 fr-winio = { path = "../fr-winio" }
 fr-ntfs = { path = "../fr-ntfs" }
+fr-refs = { path = "../fr-refs" }
+fr-fat = { path = "../fr-fat" }
 fr-mft = { path = "../fr-mft" }
 fr-scoring = { path = "../fr-scoring" }
 fr-session = { path = "../fr-session" }

@@ -1,6 +1,13 @@
 use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
+use fr_fat::{
+    parse_boot_sector as parse_fat_boot_sector, scan_deleted_root_entries_with_boot,
+    FatFilesystemKind,
+};
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
-use fr_ntfs::parse_boot_sector;
+use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
+use fr_refs::{
+    parse_boot_sector as parse_refs_boot_sector, scan_deleted_candidates_with_boot,
+};
 use fr_scoring::score_candidate_with_reasons;
 use fr_session::{
     enrich_summary_with_usn_journal_bytes, quick_scan_ntfs_from_read_session, QuickScanConfig,
@@ -40,6 +47,45 @@ pub struct FrNtfsBootMetadata {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
+pub struct FrFatBootMetadata {
+    pub filesystem_kind: u32,
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u8,
+    pub fat_count: u8,
+    pub cluster_size_bytes: u32,
+    pub total_sectors: u64,
+    pub root_dir_first_cluster: u32,
+    pub _reserved0: u32,
+    pub fat_offset_bytes: u64,
+    pub data_region_offset_bytes: u64,
+    pub volume_serial: u32,
+    pub _reserved1: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrRefsBootMetadata {
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u8,
+    pub _reserved0: u8,
+    pub cluster_size_bytes: u32,
+    pub total_sectors: u64,
+    pub volume_size_bytes: u64,
+    pub volume_serial: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrRefsDeletedCandidate {
+    pub flags: u32,
+    pub object_id: u64,
+    pub size_bytes: u64,
+    pub name: [u8; 128],
+    pub reconstructed_path: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct FrNtfsQuickScanSummary {
     pub parsed_records: u32,
     pub parse_failures: u32,
@@ -72,6 +118,16 @@ pub struct FrNtfsQuickScanCandidate {
     pub name: [u8; 128],
     pub reconstructed_path: [u8; 256],
     pub confidence_reason: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrFatDeletedCandidate {
+    pub flags: u32,
+    pub start_cluster: u32,
+    pub size_bytes: u64,
+    pub name: [u8; 128],
+    pub reconstructed_path: [u8; 256],
 }
 
 #[repr(C)]
@@ -114,6 +170,12 @@ const CANDIDATE_FLAG_EVIDENCE_CARVE: u32 = 0x0001_0000;
 const CANDIDATE_FLAG_HAS_FILE_METADATA: u32 = 0x0002_0000;
 const CANDIDATE_FLAG_GHOST_RECORD: u32 = 0x0004_0000;
 const CARVE_CANDIDATE_FLAG_PARTIAL: u32 = 0x0001;
+const REFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const FAT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
+const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
+const FAT_FILESYSTEM_KIND_EXFAT: u32 = 2;
+const FAT_EOC_MIN: u32 = 0x0FFF_FFF8;
 
 const CARVE_FAMILY_IMAGES: u32 = 0x0001;
 const CARVE_FAMILY_DOCUMENTS: u32 = 0x0002;
@@ -362,7 +424,7 @@ pub extern "C" fn fr_probe_ntfs_boot_from_session(
         Err(err) => return map_winio_error(err),
     }
 
-    let Ok(boot) = parse_boot_sector(&sector) else {
+    let Ok(boot) = parse_ntfs_boot_sector(&sector) else {
         return 30;
     };
 
@@ -379,6 +441,227 @@ pub extern "C" fn fr_probe_ntfs_boot_from_session(
             volume_size_bytes: boot.volume_size_bytes().unwrap_or(0),
             volume_serial: boot.volume_serial,
         };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_refs_boot_from_session(
+    session_id: u64,
+    out_boot: *mut FrRefsBootMetadata,
+) -> i32 {
+    if out_boot.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut sector = [0u8; 512];
+    match read_from_session(session, 0, &mut sector) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(boot) = parse_refs_boot_sector(&sector) else {
+        return 80;
+    };
+
+    unsafe {
+        *out_boot = FrRefsBootMetadata {
+            bytes_per_sector: boot.bytes_per_sector,
+            sectors_per_cluster: boot.sectors_per_cluster,
+            _reserved0: 0,
+            cluster_size_bytes: boot.cluster_size_bytes(),
+            total_sectors: boot.total_sectors,
+            volume_size_bytes: boot.volume_size_bytes().unwrap_or(0),
+            volume_serial: boot.volume_serial,
+        };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_refs_deleted_candidates_from_session(
+    session_id: u64,
+    max_entries: u32,
+    out_candidates: *mut FrRefsDeletedCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_refs_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if image.len() < 512 {
+        return 31;
+    }
+
+    let Ok(boot) = parse_refs_boot_sector(&image[..512]) else {
+        return 80;
+    };
+
+    let max_entries = if max_entries == 0 {
+        512usize
+    } else {
+        max_entries as usize
+    };
+    let candidates = scan_deleted_candidates_with_boot(&image, &boot, max_entries);
+
+    let total = usize_to_u32_saturating(candidates.len());
+    let write_count = candidates.len().min(candidate_capacity as usize);
+    for (index, candidate) in candidates.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_candidates.add(index) = encode_refs_deleted_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_fat_boot_from_session(
+    session_id: u64,
+    out_boot: *mut FrFatBootMetadata,
+) -> i32 {
+    if out_boot.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut sector = [0u8; 512];
+    match read_from_session(session, 0, &mut sector) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(boot) = parse_fat_boot_sector(&sector) else {
+        return 70;
+    };
+
+    unsafe {
+        *out_boot = FrFatBootMetadata {
+            filesystem_kind: encode_fat_filesystem_kind(boot.filesystem),
+            bytes_per_sector: boot.bytes_per_sector,
+            sectors_per_cluster: boot.sectors_per_cluster,
+            fat_count: boot.fat_count,
+            cluster_size_bytes: boot.cluster_size_bytes(),
+            total_sectors: boot.total_sectors,
+            root_dir_first_cluster: boot.root_dir_first_cluster,
+            _reserved0: 0,
+            fat_offset_bytes: boot.fat_offset_bytes().unwrap_or(0),
+            data_region_offset_bytes: boot.data_region_offset_bytes().unwrap_or(0),
+            volume_serial: boot.volume_serial,
+            _reserved1: 0,
+        };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_fat_deleted_candidates_from_session(
+    session_id: u64,
+    max_entries: u32,
+    out_candidates: *mut FrFatDeletedCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_fat_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if image.len() < 512 {
+        return 31;
+    }
+
+    let boot = match parse_fat_boot_sector(&image[..512]) {
+        Ok(boot) => boot,
+        Err(_) => return 70,
+    };
+
+    let max_entries = if max_entries == 0 {
+        512usize
+    } else {
+        max_entries as usize
+    };
+    let candidates = match scan_deleted_root_entries_with_boot(&image, &boot, max_entries, 256) {
+        Ok(entries) => entries,
+        Err(err) => return map_fat_scan_error(err),
+    };
+
+    let total = usize_to_u32_saturating(candidates.len());
+    let write_count = candidates.len().min(candidate_capacity as usize);
+    for (index, candidate) in candidates.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_candidates.add(index) = encode_fat_deleted_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
     }
 
     0
@@ -679,7 +962,7 @@ fn fr_recover_ntfs_candidate_to_file_impl(
         Err(err) => return map_winio_error(err),
     }
 
-    let Ok(boot) = parse_boot_sector(&sector) else {
+    let Ok(boot) = parse_ntfs_boot_sector(&sector) else {
         return 30;
     };
 
@@ -867,6 +1150,104 @@ fn fr_recover_ntfs_candidate_to_file_impl(
     }
 
     write_diagnostics_flags(out_diagnostics_flags, diagnostics_flags);
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_recover_fat_candidate_to_file(
+    session_id: u64,
+    start_cluster: u32,
+    size_bytes: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    if output_path.is_null() {
+        return -1;
+    }
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = 0;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = 0;
+        }
+    }
+
+    if start_cluster < 2 {
+        return 75;
+    }
+
+    let output_path_cstr = unsafe { CStr::from_ptr(output_path) };
+    let Ok(output_path_str) = output_path_cstr.to_str() else {
+        return 43;
+    };
+
+    if output_path_str.trim().is_empty() {
+        return 43;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut sector = [0u8; 512];
+    match read_from_session(session, 0, &mut sector) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(boot) = parse_fat_boot_sector(&sector) else {
+        return 70;
+    };
+
+    let output_path = Path::new(output_path_str);
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {
+            return 44;
+        }
+    }
+
+    let Ok(mut output_file) = File::create(output_path) else {
+        return 44;
+    };
+
+    let (written, partial) = match recover_fat_candidate_data(
+        session,
+        &boot,
+        start_cluster,
+        size_bytes,
+        &mut output_file,
+    ) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = written;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = if partial { 1 } else { 0 };
+        }
+    }
+
+    if written == 0 && size_bytes > 0 {
+        return 76;
+    }
 
     0
 }
@@ -1169,6 +1550,235 @@ fn encode_vss_snapshot(snapshot: &fr_vss::VssSnapshot) -> FrVssSnapshot {
     write_utf8(&snapshot.snapshot_path, &mut out.snapshot_path);
 
     out
+}
+
+fn encode_fat_filesystem_kind(filesystem: FatFilesystemKind) -> u32 {
+    match filesystem {
+        FatFilesystemKind::Fat32 => FAT_FILESYSTEM_KIND_FAT32,
+        FatFilesystemKind::ExFat => FAT_FILESYSTEM_KIND_EXFAT,
+    }
+}
+
+fn encode_refs_deleted_candidate(candidate: &fr_refs::RefsDeletedCandidate) -> FrRefsDeletedCandidate {
+    let mut out = FrRefsDeletedCandidate {
+        flags: REFS_DELETED_CANDIDATE_FLAG_DELETED,
+        object_id: candidate.object_id,
+        size_bytes: candidate.size_bytes,
+        name: [0u8; 128],
+        reconstructed_path: [0u8; 256],
+    };
+    write_utf8(&candidate.name, &mut out.name);
+    write_utf8(&candidate.path, &mut out.reconstructed_path);
+    out
+}
+
+fn encode_fat_deleted_candidate(candidate: &fr_fat::FatDeletedEntry) -> FrFatDeletedCandidate {
+    let mut flags = FAT_DELETED_CANDIDATE_FLAG_DELETED;
+    if candidate.is_directory {
+        flags |= FAT_DELETED_CANDIDATE_FLAG_DIRECTORY;
+    }
+
+    let mut out = FrFatDeletedCandidate {
+        flags,
+        start_cluster: candidate.start_cluster,
+        size_bytes: candidate.size_bytes,
+        name: [0u8; 128],
+        reconstructed_path: [0u8; 256],
+    };
+    write_utf8(&candidate.name, &mut out.name);
+    write_utf8(&candidate.path, &mut out.reconstructed_path);
+    out
+}
+
+fn recover_fat_candidate_data(
+    session: &mut fr_winio::ReadSession,
+    boot: &fr_fat::FatBootSector,
+    start_cluster: u32,
+    size_bytes: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if size_bytes == 0 {
+        return Ok((0, false));
+    }
+
+    let cluster_size = boot.cluster_size_bytes() as usize;
+    if cluster_size == 0 {
+        return Err(72);
+    }
+
+    let mut current_cluster = start_cluster;
+    let mut remaining = size_bytes;
+    let mut bytes_written = 0u64;
+    let mut partial = false;
+    let mut cluster_buffer = vec![0u8; cluster_size];
+    let mut seen_clusters = std::collections::HashSet::new();
+    let mut used_contiguous_fallback = false;
+
+    while remaining > 0 {
+        if current_cluster < 2 {
+            partial = true;
+            break;
+        }
+
+        if !seen_clusters.insert(current_cluster) {
+            partial = true;
+            break;
+        }
+
+        let Some(cluster_offset) = boot.cluster_offset_bytes(current_cluster) else {
+            partial = true;
+            break;
+        };
+
+        let to_read = (remaining.min(cluster_size as u64)) as usize;
+        match read_from_session(session, cluster_offset, &mut cluster_buffer[..to_read]) {
+            Ok(true) => {}
+            Ok(false) => {
+                partial = true;
+                break;
+            }
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        if output_file.write_all(&cluster_buffer[..to_read]).is_err() {
+            return Err(44);
+        }
+
+        bytes_written = bytes_written.saturating_add(to_read as u64);
+        remaining = remaining.saturating_sub(to_read as u64);
+
+        if remaining == 0 {
+            break;
+        }
+
+        let next_cluster = read_fat_next_cluster_from_session(session, boot, current_cluster)?;
+        if next_cluster >= 2 && next_cluster < FAT_EOC_MIN {
+            current_cluster = next_cluster;
+            continue;
+        }
+
+        if next_cluster == 0 || next_cluster >= FAT_EOC_MIN {
+            let (fallback_written, fallback_remaining, fallback_used) =
+                recover_fat_contiguous_fallback(
+                    session,
+                    boot,
+                    current_cluster,
+                    remaining,
+                    &mut cluster_buffer,
+                    output_file,
+                    &mut seen_clusters,
+                )?;
+            bytes_written = bytes_written.saturating_add(fallback_written);
+            remaining = fallback_remaining;
+            used_contiguous_fallback |= fallback_used;
+        }
+
+        partial = true;
+        break;
+    }
+
+    if used_contiguous_fallback {
+        // Contiguous recovery after a broken chain is heuristic by definition.
+        partial = true;
+    }
+
+    if remaining > 0 {
+        partial = true;
+    }
+
+    Ok((bytes_written, partial))
+}
+
+fn recover_fat_contiguous_fallback(
+    session: &mut fr_winio::ReadSession,
+    boot: &fr_fat::FatBootSector,
+    current_cluster: u32,
+    mut remaining: u64,
+    cluster_buffer: &mut [u8],
+    output_file: &mut File,
+    seen_clusters: &mut std::collections::HashSet<u32>,
+) -> Result<(u64, u64, bool), i32> {
+    if remaining == 0 {
+        return Ok((0, 0, false));
+    }
+
+    let cluster_size = cluster_buffer.len();
+    if cluster_size == 0 {
+        return Err(72);
+    }
+
+    let mut contiguous_cluster = current_cluster;
+    let mut bytes_written = 0u64;
+    let mut used = false;
+
+    while remaining > 0 {
+        let Some(next_contiguous) = contiguous_cluster.checked_add(1) else {
+            break;
+        };
+        contiguous_cluster = next_contiguous;
+
+        if contiguous_cluster < 2 {
+            break;
+        }
+
+        if !seen_clusters.insert(contiguous_cluster) {
+            break;
+        }
+
+        let Some(cluster_offset) = boot.cluster_offset_bytes(contiguous_cluster) else {
+            break;
+        };
+
+        // Deleted FAT/exFAT entries often clear chain values to zero. Continue only while
+        // contiguous clusters still look free to reduce cross-file contamination.
+        let fat_entry_value =
+            read_fat_next_cluster_from_session(session, boot, contiguous_cluster)?;
+        if fat_entry_value != 0 {
+            break;
+        }
+
+        let to_read = (remaining.min(cluster_size as u64)) as usize;
+        match read_from_session(session, cluster_offset, &mut cluster_buffer[..to_read]) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        if output_file.write_all(&cluster_buffer[..to_read]).is_err() {
+            return Err(44);
+        }
+
+        bytes_written = bytes_written.saturating_add(to_read as u64);
+        remaining = remaining.saturating_sub(to_read as u64);
+        used = true;
+    }
+
+    Ok((bytes_written, remaining, used))
+}
+
+fn read_fat_next_cluster_from_session(
+    session: &mut fr_winio::ReadSession,
+    boot: &fr_fat::FatBootSector,
+    cluster: u32,
+) -> Result<u32, i32> {
+    let Some(fat_offset_bytes) = boot.fat_offset_bytes() else {
+        return Err(72);
+    };
+    let Some(entry_delta) = (cluster as u64).checked_mul(4) else {
+        return Err(72);
+    };
+    let Some(entry_offset) = fat_offset_bytes.checked_add(entry_delta) else {
+        return Err(72);
+    };
+
+    let mut entry = [0u8; 4];
+    match read_from_session(session, entry_offset, &mut entry) {
+        Ok(true) => {}
+        Ok(false) => return Ok(0),
+        Err(err) => return Err(map_winio_error(err)),
+    }
+
+    Ok(u32::from_le_bytes(entry) & 0x0FFF_FFFF)
 }
 
 fn recover_data_attribute(
@@ -1877,6 +2487,46 @@ fn read_prefix_for_carving(
     }
 }
 
+fn read_prefix_for_refs_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn read_prefix_for_fat_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn normalize_max_scan_bytes(max_scan_bytes: u64) -> u64 {
     const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_ALLOWED_SCAN_BYTES: u64 = 256 * 1024 * 1024;
@@ -1921,6 +2571,17 @@ fn map_quick_scan_error(err: QuickScanError) -> i32 {
     }
 }
 
+fn map_fat_scan_error(err: fr_fat::ScanError) -> i32 {
+    match err {
+        fr_fat::ScanError::Boot(_) => 70,
+        fr_fat::ScanError::InvalidCluster(_) => 71,
+        fr_fat::ScanError::ArithmeticOverflow(_) => 72,
+        fr_fat::ScanError::OutOfBounds { .. } => 31,
+        fr_fat::ScanError::ClusterLoop(_) => 73,
+        fr_fat::ScanError::DirectoryEntryTruncated => 74,
+    }
+}
+
 fn map_usn_parse_error(err: fr_usn::UsnParseError) -> i32 {
     match err {
         fr_usn::UsnParseError::TruncatedRecordHeader { .. }
@@ -1962,6 +2623,338 @@ mod tests {
     #[test]
     fn health_check_returns_zero() {
         assert_eq!(fr_health_check(), 0);
+    }
+
+    #[test]
+    fn ffi_probe_fat_boot_from_session_parses_fat32_image() {
+        let image = build_test_fat32_image_with_deleted_entry();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-boot-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut boot = FrFatBootMetadata::default();
+        let status = fr_probe_fat_boot_from_session(session_id, &mut boot);
+        assert_eq!(status, 0);
+        assert_eq!(boot.filesystem_kind, FAT_FILESYSTEM_KIND_FAT32);
+        assert_eq!(boot.bytes_per_sector, 512);
+        assert_eq!(boot.sectors_per_cluster, 1);
+        assert_eq!(boot.root_dir_first_cluster, 2);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_probe_refs_boot_from_session_parses_refs_image() {
+        let image = build_test_refs_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-refs-boot-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("refs.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut boot = FrRefsBootMetadata::default();
+        assert_eq!(fr_probe_refs_boot_from_session(session_id, &mut boot), 0);
+        assert_eq!(boot.bytes_per_sector, 4096);
+        assert_eq!(boot.sectors_per_cluster, 1);
+        assert_eq!(boot.cluster_size_bytes, 4096);
+        assert_eq!(boot.total_sectors, 2_000_000);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_refs_deleted_candidates_returns_success_with_no_candidates() {
+        let image = build_test_refs_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-refs-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("refs.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_refs_deleted_candidate(); 4];
+        let mut written = 99u32;
+        let status = fr_get_refs_deleted_candidates_from_session(
+            session_id,
+            64,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(written, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_refs_deleted_candidates_extracts_usn_deleted_candidate() {
+        let image = build_test_refs_image_with_deleted_usn_record();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-refs-candidates-extract-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("refs-usn.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_refs_deleted_candidate(); 8];
+        let mut written = 0u32;
+        let status = fr_get_refs_deleted_candidates_from_session(
+            session_id,
+            128,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert!(written >= 1);
+        let first = candidates[0];
+        assert_eq!(first.flags & REFS_DELETED_CANDIDATE_FLAG_DELETED, REFS_DELETED_CANDIDATE_FLAG_DELETED);
+        assert_eq!(first.object_id, 42);
+        assert_eq!(c_string_bytes_to_string(&first.name), "refs-deleted.txt");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_fat_deleted_candidates_from_session_returns_deleted_entry() {
+        let image = build_test_fat32_image_with_deleted_entry();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-scan-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_fat_deleted_candidate(); 16];
+        let mut written = 0u32;
+        let status = fr_get_fat_deleted_candidates_from_session(
+            session_id,
+            32,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert!(written >= 1);
+        assert_eq!(
+            c_string_bytes_to_string(&candidates[0].name),
+            "_EST.TXT".to_string()
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&candidates[0].reconstructed_path),
+            r".\_EST.TXT".to_string()
+        );
+        assert_eq!(candidates[0].start_cluster, 5);
+        assert_eq!(candidates[0].size_bytes, 1234);
+        assert_ne!(candidates[0].flags & FAT_DELETED_CANDIDATE_FLAG_DELETED, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_fat_candidate_to_file_writes_expected_bytes() {
+        let payload = b"fat-recovery-ok";
+        let image = build_test_fat32_image_with_recoverable_file(payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-recover-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32.img");
+        let output_path = temp_dir.join("recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = -1i32;
+        let status = fr_recover_fat_candidate_to_file(
+            session_id,
+            5,
+            payload.len() as u64,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(partial, 0);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_fat_candidate_to_file_uses_contiguous_fallback_after_chain_gap() {
+        let payload = b"fat-partial";
+        let image = build_test_fat32_image_with_recoverable_file(payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-recover-partial-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32.img");
+        let output_path = temp_dir.join("recovered-partial.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_fat_candidate_to_file(
+            session_id,
+            5,
+            800,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+
+        assert_eq!(status, 0);
+        assert_eq!(bytes_written, 800);
+        assert_eq!(partial, 1);
+        let recovered = fs::read(&output_path).unwrap();
+        assert_eq!(recovered.len(), 800);
+        assert_eq!(&recovered[..payload.len()], payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&output_path).unwrap();
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
@@ -3308,6 +4301,108 @@ mod tests {
             suggested_name: [0u8; 128],
             confidence_reason: [0u8; 256],
         }
+    }
+
+    fn empty_refs_deleted_candidate() -> FrRefsDeletedCandidate {
+        FrRefsDeletedCandidate {
+            flags: 0,
+            object_id: 0,
+            size_bytes: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+        }
+    }
+
+    fn empty_fat_deleted_candidate() -> FrFatDeletedCandidate {
+        FrFatDeletedCandidate {
+            flags: 0,
+            start_cluster: 0,
+            size_bytes: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+        }
+    }
+
+    fn build_test_refs_image() -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 128];
+        image[0x03..0x0B].copy_from_slice(b"ReFS    ");
+        write_u16(&mut image, 0x0B, 4096);
+        image[0x0D] = 1;
+        write_u64(&mut image, 0x28, 2_000_000);
+        write_u64(&mut image, 0x48, 0xA1A2_A3A4_A5A6_A7A8);
+        image
+    }
+
+    fn build_test_refs_image_with_deleted_usn_record() -> Vec<u8> {
+        let mut image = build_test_refs_image();
+        let usn_record = build_usn_v2_record("refs-deleted.txt", 0x0000_0200, 42, 5);
+        let start = 4096usize;
+        image[start..start + usn_record.len()].copy_from_slice(&usn_record);
+        image
+    }
+
+    fn build_test_fat32_image_with_deleted_entry() -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 128];
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u16(&mut image, 0x0E, 32);
+        image[0x10] = 1;
+        write_u16(&mut image, 0x16, 0);
+        write_u32(&mut image, 0x20, 128);
+        write_u32(&mut image, 0x24, 1);
+        write_u32(&mut image, 0x2C, 2);
+        write_u16(&mut image, 0x1FE, 0xAA55);
+        image[0x52..0x5A].copy_from_slice(b"FAT32   ");
+
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset, 0x0FFF_FFF8);
+        write_u32(&mut image, fat_sector_offset + 4, 0x0FFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + 8, 0x0FFF_FFFF);
+
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset] = 0xE5;
+        image[root_sector_offset + 1..root_sector_offset + 8].copy_from_slice(b"EST    ");
+        image[root_sector_offset + 8..root_sector_offset + 11].copy_from_slice(b"TXT");
+        image[root_sector_offset + 11] = 0x20;
+        write_u16(&mut image, root_sector_offset + 26, 5);
+        write_u32(&mut image, root_sector_offset + 28, 1234);
+        image[root_sector_offset + 32] = 0x00;
+        image
+    }
+
+    fn build_test_fat32_image_with_recoverable_file(payload: &[u8]) -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 128];
+        write_u16(&mut image, 0x0B, 512);
+        image[0x0D] = 1;
+        write_u16(&mut image, 0x0E, 32);
+        image[0x10] = 1;
+        write_u16(&mut image, 0x16, 0);
+        write_u32(&mut image, 0x20, 128);
+        write_u32(&mut image, 0x24, 1);
+        write_u32(&mut image, 0x2C, 2);
+        write_u16(&mut image, 0x1FE, 0xAA55);
+        image[0x52..0x5A].copy_from_slice(b"FAT32   ");
+
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset, 0x0FFF_FFF8);
+        write_u32(&mut image, fat_sector_offset + 4, 0x0FFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + 8, 0x0FFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + (5 * 4), 0x0FFF_FFFF);
+
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset] = 0xE5;
+        image[root_sector_offset + 1..root_sector_offset + 8].copy_from_slice(b"ILE    ");
+        image[root_sector_offset + 8..root_sector_offset + 11].copy_from_slice(b"BIN");
+        image[root_sector_offset + 11] = 0x20;
+        write_u16(&mut image, root_sector_offset + 26, 5);
+        write_u32(&mut image, root_sector_offset + 28, payload.len() as u32);
+        image[root_sector_offset + 32] = 0x00;
+
+        let file_cluster_sector_offset = 36 * 512;
+        image[file_cluster_sector_offset..file_cluster_sector_offset + payload.len()]
+            .copy_from_slice(payload);
+
+        image
     }
 
     fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {

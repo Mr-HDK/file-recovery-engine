@@ -118,7 +118,7 @@
                         <WrapPanel Margin="0,6,0,0">
                             <CheckBox x:Name="CarveImagesCheckBox" Content="Images" Margin="0,0,12,0" IsChecked="True"/>
                             <CheckBox x:Name="CarveDocumentsCheckBox" Content="Documents" Margin="0,0,12,0" IsChecked="True"/>
-                            <CheckBox x:Name="CarveArchivesCheckBox" Content="Archives" Margin="0,0,12,0"/>
+                            <CheckBox x:Name="CarveArchivesCheckBox" Content="Archives" Margin="0,0,12,0" IsChecked="True"/>
                             <CheckBox x:Name="CarveOfficeCheckBox" Content="Office" Margin="0,0,12,0"/>
                             <CheckBox x:Name="CarveMediaCheckBox" Content="Media"/>
                         </WrapPanel>
@@ -136,9 +136,9 @@
                                 <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Quick scan max records"/>
-                            <TextBox x:Name="QuickScanMaxRecordsTextBox" Grid.Row="0" Grid.Column="1" Margin="8,0,0,6" Text="256"/>
+                                <TextBox x:Name="QuickScanMaxRecordsTextBox" Grid.Row="0" Grid.Column="1" Margin="8,0,0,6" Text="2048"/>
                             <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Candidate capacity"/>
-                            <TextBox x:Name="CandidateCapacityTextBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" Text="128"/>
+                                <TextBox x:Name="CandidateCapacityTextBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" Text="1024"/>
                             <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Preview cap MiB / chunk KiB"/>
                             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
                                 <TextBox x:Name="PreviewCapMiBTextBox" Width="52" Text="8"/>
