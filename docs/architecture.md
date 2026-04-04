@@ -22,6 +22,7 @@
 - `fr-device-enum`: source discovery abstraction.
 - `fr-volume-meta`: partition and volume metadata model.
 - `fr-ntfs`: NTFS parsing boundary.
+- `fr-ext`: ext superblock/deleted-entry parsing boundary (Phase 9 baseline).
 - `fr-refs`: ReFS boot metadata parsing boundary (Phase 8 baseline).
 - `fr-fat`: FAT/exFAT parser scaffolding.
 - `fr-mft`: MFT record processing.
@@ -58,6 +59,7 @@
 - Read-only source sessions expose open/read/close operations with alignment metadata so UI orchestration can keep chunk reads bounded and cancellation-friendly.
 - Engine now includes NTFS boot sector parsing and MFT record parsing (including resident/non-resident attribute decoding and mapping-pairs data-run parsing) as standalone parser primitives for Phase 2 integration.
 - Engine now includes a ReFS boot-sector parser boundary (`fr-refs`) with FFI exposure for source classification/probing in Phase 8.
+- Engine now includes an ext superblock parser boundary (`fr-ext`) with FFI/UI candidate-listing wiring in Phase 9.
 - Engine now includes concrete USN v2/v3 record parsing (`fr-usn`) and evidence-source propagation flags over the FFI quick-scan candidate boundary.
 - Recovery export now includes non-resident NTFS compressed-stream decompression and encrypted-stream raw export with explicit diagnostics/partial signaling through the FFI boundary.
 

@@ -1,4 +1,7 @@
 use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
+use fr_ext::{
+    parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock,
+};
 use fr_fat::{
     parse_boot_sector as parse_fat_boot_sector, scan_deleted_root_entries_with_boot,
     FatFilesystemKind,
@@ -79,6 +82,28 @@ pub struct FrRefsBootMetadata {
 pub struct FrRefsDeletedCandidate {
     pub flags: u32,
     pub object_id: u64,
+    pub size_bytes: u64,
+    pub name: [u8; 128],
+    pub reconstructed_path: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrExtSuperblockMetadata {
+    pub block_size_bytes: u32,
+    pub inode_size_bytes: u16,
+    pub _reserved0: u16,
+    pub inodes_per_group: u32,
+    pub total_inodes: u32,
+    pub total_blocks: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrExtDeletedCandidate {
+    pub flags: u32,
+    pub inode_number: u64,
+    pub entry_offset_bytes: u64,
     pub size_bytes: u64,
     pub name: [u8; 128],
     pub reconstructed_path: [u8; 256],
@@ -171,6 +196,8 @@ const CANDIDATE_FLAG_HAS_FILE_METADATA: u32 = 0x0002_0000;
 const CANDIDATE_FLAG_GHOST_RECORD: u32 = 0x0004_0000;
 const CARVE_CANDIDATE_FLAG_PARTIAL: u32 = 0x0001;
 const REFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const EXT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const EXT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
@@ -542,6 +569,111 @@ pub extern "C" fn fr_get_refs_deleted_candidates_from_session(
     for (index, candidate) in candidates.iter().take(write_count).enumerate() {
         unsafe {
             *out_candidates.add(index) = encode_refs_deleted_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_ext_superblock_from_session(
+    session_id: u64,
+    out_superblock: *mut FrExtSuperblockMetadata,
+) -> i32 {
+    if out_superblock.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut header = [0u8; 4096];
+    match read_from_session(session, 0, &mut header) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(superblock) = parse_ext_superblock(&header) else {
+        return 90;
+    };
+
+    unsafe {
+        *out_superblock = FrExtSuperblockMetadata {
+            block_size_bytes: superblock.block_size_bytes,
+            inode_size_bytes: superblock.inode_size_bytes,
+            _reserved0: 0,
+            inodes_per_group: superblock.inodes_per_group,
+            total_inodes: superblock.inodes_count,
+            total_blocks: superblock.blocks_count,
+        };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_ext_deleted_candidates_from_session(
+    session_id: u64,
+    max_entries: u32,
+    out_candidates: *mut FrExtDeletedCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_ext_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if image.len() < 2048 {
+        return 31;
+    }
+
+    let Ok(superblock) = parse_ext_superblock(&image) else {
+        return 90;
+    };
+
+    let max_entries = if max_entries == 0 {
+        512usize
+    } else {
+        max_entries as usize
+    };
+    let candidates = scan_deleted_candidates_with_superblock(&image, &superblock, max_entries);
+
+    let total = usize_to_u32_saturating(candidates.len());
+    let write_count = candidates.len().min(candidate_capacity as usize);
+    for (index, candidate) in candidates.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_candidates.add(index) = encode_ext_deleted_candidate(candidate);
         }
     }
 
@@ -1572,6 +1704,25 @@ fn encode_refs_deleted_candidate(candidate: &fr_refs::RefsDeletedCandidate) -> F
     out
 }
 
+fn encode_ext_deleted_candidate(candidate: &fr_ext::ExtDeletedCandidate) -> FrExtDeletedCandidate {
+    let mut flags = EXT_DELETED_CANDIDATE_FLAG_DELETED;
+    if candidate.is_directory {
+        flags |= EXT_DELETED_CANDIDATE_FLAG_DIRECTORY;
+    }
+
+    let mut out = FrExtDeletedCandidate {
+        flags,
+        inode_number: candidate.inode_number,
+        entry_offset_bytes: candidate.entry_offset_bytes,
+        size_bytes: candidate.size_bytes,
+        name: [0u8; 128],
+        reconstructed_path: [0u8; 256],
+    };
+    write_utf8(&candidate.name, &mut out.name);
+    write_utf8(&candidate.path, &mut out.reconstructed_path);
+    out
+}
+
 fn encode_fat_deleted_candidate(candidate: &fr_fat::FatDeletedEntry) -> FrFatDeletedCandidate {
     let mut flags = FAT_DELETED_CANDIDATE_FLAG_DELETED;
     if candidate.is_directory {
@@ -2507,6 +2658,26 @@ fn read_prefix_for_refs_scan(
     }
 }
 
+fn read_prefix_for_ext_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn read_prefix_for_fat_scan(
     session: &mut fr_winio::ReadSession,
 ) -> Result<Vec<u8>, fr_winio::WinIoError> {
@@ -2698,6 +2869,97 @@ mod tests {
         assert_eq!(boot.sectors_per_cluster, 1);
         assert_eq!(boot.cluster_size_bytes, 4096);
         assert_eq!(boot.total_sectors, 2_000_000);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_probe_ext_superblock_from_session_parses_ext_image() {
+        let image = build_test_ext4_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-superblock-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut superblock = FrExtSuperblockMetadata::default();
+        assert_eq!(
+            fr_probe_ext_superblock_from_session(session_id, &mut superblock),
+            0
+        );
+        assert_eq!(superblock.block_size_bytes, 4096);
+        assert_eq!(superblock.inode_size_bytes, 256);
+        assert_eq!(superblock.total_inodes, 1024);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_ext_deleted_candidates_extracts_deleted_entry() {
+        let image = build_test_ext4_image_with_deleted_entry();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-deleted.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_ext_deleted_candidate(); 8];
+        let mut written = 0u32;
+        let status = fr_get_ext_deleted_candidates_from_session(
+            session_id,
+            128,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert!(written >= 1);
+        let first = candidates[0];
+        assert_eq!(
+            first.flags & EXT_DELETED_CANDIDATE_FLAG_DELETED,
+            EXT_DELETED_CANDIDATE_FLAG_DELETED
+        );
+        assert_eq!(c_string_bytes_to_string(&first.name), "deleted-ext.txt");
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -4313,6 +4575,17 @@ mod tests {
         }
     }
 
+    fn empty_ext_deleted_candidate() -> FrExtDeletedCandidate {
+        FrExtDeletedCandidate {
+            flags: 0,
+            inode_number: 0,
+            entry_offset_bytes: 0,
+            size_bytes: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+        }
+    }
+
     fn empty_fat_deleted_candidate() -> FrFatDeletedCandidate {
         FrFatDeletedCandidate {
             flags: 0,
@@ -4339,6 +4612,38 @@ mod tests {
         let start = 4096usize;
         image[start..start + usn_record.len()].copy_from_slice(&usn_record);
         image
+    }
+
+    fn build_test_ext4_image() -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 256];
+        write_u32(&mut image, 1024 + 0x00, 1024);
+        write_u32(&mut image, 1024 + 0x04, 8192);
+        write_u32(&mut image, 1024 + 0x18, 2);
+        write_u32(&mut image, 1024 + 0x20, 32768);
+        write_u32(&mut image, 1024 + 0x28, 256);
+        write_u16(&mut image, 1024 + 0x38, 0xEF53);
+        write_u16(&mut image, 1024 + 0x58, 256);
+        image
+    }
+
+    fn build_test_ext4_image_with_deleted_entry() -> Vec<u8> {
+        let mut image = build_test_ext4_image();
+        let entry = build_ext_directory_entry(0, "deleted-ext.txt", 1);
+        let offset = 8192usize;
+        image[offset..offset + entry.len()].copy_from_slice(&entry);
+        image
+    }
+
+    fn build_ext_directory_entry(inode: u32, name: &str, file_type: u8) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let rec_len = align_to_4(8 + name_bytes.len());
+        let mut entry = vec![0u8; rec_len];
+        write_u32(&mut entry, 0, inode);
+        write_u16(&mut entry, 4, rec_len as u16);
+        entry[6] = name_bytes.len() as u8;
+        entry[7] = file_type;
+        entry[8..8 + name_bytes.len()].copy_from_slice(name_bytes);
+        entry
     }
 
     fn build_test_fat32_image_with_deleted_entry() -> Vec<u8> {
@@ -4415,6 +4720,10 @@ mod tests {
 
     fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
         bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn align_to_4(value: usize) -> usize {
+        (value + 3) & !3
     }
 
     fn write_i64(bytes: &mut [u8], offset: usize, value: i64) {

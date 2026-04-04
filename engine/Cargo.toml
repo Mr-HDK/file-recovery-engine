@@ -6,6 +6,7 @@ members = [
   "crates/fr-device-enum",
   "crates/fr-volume-meta",
   "crates/fr-ntfs",
+  "crates/fr-ext",
   "crates/fr-refs",
   "crates/fr-fat",
   "crates/fr-mft",

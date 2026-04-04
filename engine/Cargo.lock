@@ -82,6 +82,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-ext"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "thiserror",
+]
+
+[[package]]
 name = "fr-fat"
 version = "0.1.0"
 dependencies = [
@@ -94,6 +102,7 @@ name = "fr-ffi"
 version = "0.1.0"
 dependencies = [
  "fr-carving",
+ "fr-ext",
  "fr-fat",
  "fr-mft",
  "fr-ntfs",

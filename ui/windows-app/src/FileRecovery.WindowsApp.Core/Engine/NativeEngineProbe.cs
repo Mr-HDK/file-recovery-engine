@@ -84,6 +84,40 @@ public sealed record EngineRefsDeletedCandidatesResult(
     int StatusCode
 );
 
+public sealed record EngineExtSuperblockMetadata(
+    uint BlockSizeBytes,
+    ushort InodeSizeBytes,
+    uint InodesPerGroup,
+    uint TotalInodes,
+    ulong TotalBlocks
+);
+
+public sealed record EngineExtSuperblockProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineExtSuperblockMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineExtDeletedCandidate(
+    bool Deleted,
+    bool IsDirectory,
+    ulong InodeNumber,
+    ulong EntryOffsetBytes,
+    ulong SizeBytes,
+    string? Name,
+    string? ReconstructedPath
+);
+
+public sealed record EngineExtDeletedCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineExtDeletedCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineFatBootMetadata(
     string Filesystem,
     ushort BytesPerSector,
@@ -547,6 +581,131 @@ public static class NativeEngineProbe
                 false,
                 false,
                 Array.Empty<EngineRefsDeletedCandidate>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineExtSuperblockProbeResult ProbeExtSuperblockFromSession(ulong sessionId)
+    {
+        try
+        {
+            var status = fr_probe_ext_superblock_from_session(sessionId, out var nativeMetadata);
+            if (status == 0)
+            {
+                var metadata = new EngineExtSuperblockMetadata(
+                    nativeMetadata.BlockSizeBytes,
+                    nativeMetadata.InodeSizeBytes,
+                    nativeMetadata.InodesPerGroup,
+                    nativeMetadata.TotalInodes,
+                    nativeMetadata.TotalBlocks);
+
+                return new EngineExtSuperblockProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "ext superblock parsed.",
+                    status);
+            }
+
+            return new EngineExtSuperblockProbeResult(
+                true,
+                false,
+                null,
+                MapExtStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineExtSuperblockProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineExtSuperblockProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineExtDeletedCandidatesResult GetExtDeletedCandidatesFromSession(
+        ulong sessionId,
+        uint maxEntries = 512,
+        int candidateCapacity = 128)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeExtDeletedCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeExtDeletedCandidate>();
+            }
+            else
+            {
+                buffer = new NativeExtDeletedCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Name = new byte[128];
+                    buffer[i].ReconstructedPath = new byte[256];
+                }
+            }
+
+            var status = fr_get_ext_deleted_candidates_from_session(
+                sessionId,
+                maxEntries,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineExtDeletedCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineExtDeletedCandidate>(),
+                    MapExtStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var candidates = new List<EngineExtDeletedCandidate>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                candidates.Add(new EngineExtDeletedCandidate(
+                    Deleted: (candidate.Flags & ExtDeletedCandidateFlagDeleted) != 0,
+                    IsDirectory: (candidate.Flags & ExtDeletedCandidateFlagDirectory) != 0,
+                    InodeNumber: candidate.InodeNumber,
+                    EntryOffsetBytes: candidate.EntryOffsetBytes,
+                    SizeBytes: candidate.SizeBytes,
+                    Name: DecodeUtf8(candidate.Name),
+                    ReconstructedPath: DecodeUtf8(candidate.ReconstructedPath)));
+            }
+
+            return new EngineExtDeletedCandidatesResult(
+                true,
+                true,
+                candidates,
+                "ext deleted-candidate scan completed.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineExtDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineExtDeletedCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineExtDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineExtDeletedCandidate>(),
                 "Engine ABI mismatch",
                 -101);
         }
@@ -1284,7 +1443,24 @@ public static class NativeEngineProbe
             20 => "Session not found.",
             31 => "Source read ended before required metadata could be loaded.",
             80 => "Source does not contain a valid ReFS boot sector.",
-            81 => "ReFS deleted-candidate extraction is not implemented in this build.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapExtStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required metadata could be loaded.",
+            90 => "Source does not contain a valid ext superblock.",
             10 => "Invalid source path.",
             11 => "Unsupported platform.",
             12 => "Access denied.",
@@ -1560,6 +1736,8 @@ public static class NativeEngineProbe
     private const uint CandidateFlagHasFileMetadata = 0x0002_0000;
     private const uint CandidateFlagGhostRecord = 0x0004_0000;
     private const uint RefsDeletedCandidateFlagDeleted = 0x0001;
+    private const uint ExtDeletedCandidateFlagDeleted = 0x0001;
+    private const uint ExtDeletedCandidateFlagDirectory = 0x0002;
     private const uint FatDeletedCandidateFlagDeleted = 0x0001;
     private const uint FatDeletedCandidateFlagDirectory = 0x0002;
     private const uint FatFilesystemKindFat32 = 1;
@@ -1608,6 +1786,32 @@ public static class NativeEngineProbe
     {
         public uint Flags;
         public ulong ObjectId;
+        public ulong SizeBytes;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] Name;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ReconstructedPath;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeExtSuperblockMetadata
+    {
+        public uint BlockSizeBytes;
+        public ushort InodeSizeBytes;
+        public ushort Reserved0;
+        public uint InodesPerGroup;
+        public uint TotalInodes;
+        public ulong TotalBlocks;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeExtDeletedCandidate
+    {
+        public uint Flags;
+        public ulong InodeNumber;
+        public ulong EntryOffsetBytes;
         public ulong SizeBytes;
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
@@ -1774,6 +1978,19 @@ public static class NativeEngineProbe
         ulong sessionId,
         uint maxEntries,
         [Out] NativeRefsDeletedCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_ext_superblock_from_session(
+        ulong sessionId,
+        out NativeExtSuperblockMetadata metadata);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_ext_deleted_candidates_from_session(
+        ulong sessionId,
+        uint maxEntries,
+        [Out] NativeExtDeletedCandidate[] candidates,
         uint candidateCapacity,
         out uint written);
 

@@ -132,7 +132,45 @@ public sealed class NativeEngineProbeTests
         }
         else
         {
-            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 80, 81, 10, 11, 12, 13, 14, 15, 16 });
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 80, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void ProbeExtSuperblockFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeExtSuperblockFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 90, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void ExtDeletedCandidatesFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.GetExtDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Empty(result.Candidates);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 90, 10, 11, 12, 13, 14, 15, 16 });
         }
     }
 

@@ -547,23 +547,45 @@ public partial class MainWindow : Window
                             else
                             {
                                 operationToken.ThrowIfCancellationRequested();
-                                var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(open.SessionId);
-                                AppendSessionMessage($"FAT boot probe: {fatBoot.Message} (status {fatBoot.StatusCode}).");
-                                if (fatBoot.Success && fatBoot.Metadata is not null)
+                                var extSuperblock = NativeEngineProbe.ProbeExtSuperblockFromSession(open.SessionId);
+                                AppendSessionMessage($"ext superblock probe: {extSuperblock.Message} (status {extSuperblock.StatusCode}).");
+                                if (extSuperblock.Success && extSuperblock.Metadata is not null)
                                 {
-                                    var metadata = fatBoot.Metadata;
+                                    var metadata = extSuperblock.Metadata;
                                     AppendSessionMessage(
-                                        $"FAT boot details: fs={metadata.Filesystem}, sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, FAT offset={metadata.FatOffsetBytes}, data offset={metadata.DataRegionOffsetBytes}, root cluster={metadata.RootDirectoryFirstCluster}.");
+                                        $"ext superblock details: block={metadata.BlockSizeBytes}, inode-size={metadata.InodeSizeBytes}, inodes/group={metadata.InodesPerGroup}, total-inodes={metadata.TotalInodes}, total-blocks={metadata.TotalBlocks}.");
 
                                     operationToken.ThrowIfCancellationRequested();
-                                    var fatCandidates = NativeEngineProbe.GetFatDeletedCandidatesFromSession(
+                                    var extCandidates = NativeEngineProbe.GetExtDeletedCandidatesFromSession(
                                         open.SessionId,
                                         maxEntries: checked((uint)quickScanMaxRecords),
                                         candidateCapacity: candidateCapacity);
                                     AppendSessionMessage(
-                                        $"FAT quick scan candidates: {fatCandidates.Message} (status {fatCandidates.StatusCode}, count={fatCandidates.Candidates.Count}).");
-                                    RenderQuickScanCandidates(fatCandidates, metadata.Filesystem);
-                                    quickScanLoaded = fatCandidates.Success;
+                                        $"ext quick scan candidates: {extCandidates.Message} (status {extCandidates.StatusCode}, count={extCandidates.Candidates.Count}).");
+                                    RenderQuickScanCandidates(extCandidates, "ext4");
+                                    quickScanLoaded = extCandidates.Success;
+                                }
+                                else
+                                {
+                                    operationToken.ThrowIfCancellationRequested();
+                                    var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(open.SessionId);
+                                    AppendSessionMessage($"FAT boot probe: {fatBoot.Message} (status {fatBoot.StatusCode}).");
+                                    if (fatBoot.Success && fatBoot.Metadata is not null)
+                                    {
+                                        var metadata = fatBoot.Metadata;
+                                        AppendSessionMessage(
+                                            $"FAT boot details: fs={metadata.Filesystem}, sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, FAT offset={metadata.FatOffsetBytes}, data offset={metadata.DataRegionOffsetBytes}, root cluster={metadata.RootDirectoryFirstCluster}.");
+
+                                        operationToken.ThrowIfCancellationRequested();
+                                        var fatCandidates = NativeEngineProbe.GetFatDeletedCandidatesFromSession(
+                                            open.SessionId,
+                                            maxEntries: checked((uint)quickScanMaxRecords),
+                                            candidateCapacity: candidateCapacity);
+                                        AppendSessionMessage(
+                                            $"FAT quick scan candidates: {fatCandidates.Message} (status {fatCandidates.StatusCode}, count={fatCandidates.Candidates.Count}).");
+                                        RenderQuickScanCandidates(fatCandidates, metadata.Filesystem);
+                                        quickScanLoaded = fatCandidates.Success;
+                                    }
                                 }
                             }
                         }
@@ -887,6 +909,61 @@ public partial class MainWindow : Window
         RenderQuickScanCandidates(mapped);
     }
 
+    private void RenderQuickScanCandidates(EngineExtDeletedCandidatesResult result, string filesystem)
+    {
+        if (!result.Success)
+        {
+            _quickScanCandidates.Clear();
+            _candidateClusterCount = 0;
+            _candidateDedupedCount = 0;
+            RefreshCandidateView();
+            AppendCandidateActivity("ext candidate load failed: engine result was not successful.");
+            return;
+        }
+
+        var evidenceSources = string.IsNullOrWhiteSpace(filesystem) ? "ext4" : filesystem.Trim();
+        var mapped = result.Candidates
+            .Select((candidate, index) =>
+            {
+                var name = string.IsNullOrWhiteSpace(candidate.Name)
+                    ? $"ext-entry-{candidate.EntryOffsetBytes}"
+                    : candidate.Name;
+                var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
+                    ? $".\\{name}"
+                    : candidate.ReconstructedPath;
+                var confidenceReason =
+                    $"{evidenceSources} deleted directory-entry candidate from metadata scan (recovery path not implemented yet).";
+                return new QuickScanCandidateRecord(
+                    Ordinal: index,
+                    RecordNumber: BuildExtSyntheticRecordNumber(candidate.EntryOffsetBytes, index),
+                    Deleted: candidate.Deleted,
+                    IsGhostRecord: false,
+                    Directory: candidate.IsDirectory,
+                    NonResidentData: false,
+                    HasNamedDataStreams: false,
+                    IsCompressed: false,
+                    IsSparse: false,
+                    IsEncrypted: false,
+                    Name: name,
+                    OriginalPath: path,
+                    ParentRecordNumber: candidate.InodeNumber > 0 ? candidate.InodeNumber : null,
+                    DataSizeBytes: candidate.SizeBytes > 0 ? candidate.SizeBytes : null,
+                    AllocatedSizeBytes: null,
+                    FileAttributes: null,
+                    CreatedFileTimeUtc: null,
+                    ModifiedFileTimeUtc: null,
+                    MftModifiedFileTimeUtc: null,
+                    AccessedFileTimeUtc: null,
+                    EvidenceSources: evidenceSources,
+                    ConfidenceTier: "Low",
+                    ConfidenceReason: confidenceReason,
+                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+            })
+            .ToArray();
+
+        RenderQuickScanCandidates(mapped);
+    }
+
     private void RenderQuickScanCandidates(IReadOnlyList<QuickScanCandidateRecord> candidates)
     {
         var processed = _candidatePostProcessor.Process(candidates);
@@ -1137,7 +1214,7 @@ public partial class MainWindow : Window
     {
         FilterFileTypeComboBox.ItemsSource = new[] { "All" };
         FilterStatusComboBox.ItemsSource = new[] { "All", "full", "partial", "invalid", "overwritten-risk" };
-        FilterEvidenceComboBox.ItemsSource = new[] { "All", "MFT", "USN", "VSS", "ReFS", "FAT32", "exFAT", "Carve" };
+        FilterEvidenceComboBox.ItemsSource = new[] { "All", "MFT", "USN", "VSS", "ReFS", "ext4", "FAT32", "exFAT", "Carve" };
         FilterConfidenceComboBox.ItemsSource = new[] { "All", "Very high", "High", "Medium", "Low", "Very low" };
 
         FilterFileTypeComboBox.SelectedIndex = 0;
@@ -3440,6 +3517,13 @@ public partial class MainWindow : Window
         var folded = (uint)(objectId ^ (objectId >> 32));
         var mixed = unchecked(folded ^ ((uint)ordinal * 2246822519u));
         return unchecked(0xB000_0000u | (mixed & 0x1FFF_FFFFu));
+    }
+
+    private static uint BuildExtSyntheticRecordNumber(ulong entryOffsetBytes, int ordinal)
+    {
+        var folded = (uint)(entryOffsetBytes ^ (entryOffsetBytes >> 32));
+        var mixed = unchecked(folded ^ ((uint)ordinal * 3266489917u));
+        return unchecked(0xD000_0000u | (mixed & 0x1FFF_FFFFu));
     }
 
     private static string NormalizeFatEvidenceLabel(string? filesystem)
