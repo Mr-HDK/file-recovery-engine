@@ -1,7 +1,9 @@
 param(
   [switch]$IncludeHostIntegration,
   [switch]$IncludeHostVssIntegration,
-  [switch]$AllowNoSnapshots
+  [switch]$IncludeExtImageValidation,
+  [switch]$AllowNoSnapshots,
+  [switch]$AllowMissingExtImages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -125,11 +127,26 @@ if ($IncludeHostIntegration) {
 
 if ($IncludeHostVssIntegration) {
   Invoke-External -Description "host VSS validation" -Command {
-    $vssArgs = @("-NoBuild")
+    $vssArgs = @{
+      NoBuild = $true
+    }
     if ($AllowNoSnapshots) {
-      $vssArgs += "-AllowNoSnapshots"
+      $vssArgs.AllowNoSnapshots = $true
     }
 
     & "$PSScriptRoot\run-host-vss-validation.ps1" @vssArgs
+  }
+}
+
+if ($IncludeExtImageValidation) {
+  Invoke-External -Description "host ext image validation" -Command {
+    $extArgs = @{
+      NoBuild = $true
+    }
+    if ($AllowMissingExtImages) {
+      $extArgs.AllowMissingImages = $true
+    }
+
+    & "$PSScriptRoot\run-host-ext-image-validation.ps1" @extArgs
   }
 }

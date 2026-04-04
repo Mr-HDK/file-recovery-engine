@@ -66,6 +66,7 @@
 - `scripts/compare-host-validation-artifacts.ps1` to compare archived host-validation manifest/TRX outputs across runs and detect drift in counters/outcomes.
 - `scripts/run-host-vss-validation.ps1` plus `HostVssSnapshotRecoveryTests` for elevated host VSS enumeration and snapshot-source quick-scan/recovery validation.
 - `scripts/run-host-validation-profile.ps1` + `scripts/compare-host-validation-profiles.ps1` for repeatable multi-host profile execution and drift review across real machine/storage layouts.
+- `scripts/run-host-ext-image-validation.ps1` for host/image ext corpus validation artifacts, plus profile-matrix integration under `scripts/run-host-validation-profile.ps1`.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 - Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction.
@@ -75,4 +76,5 @@
 
 - `scripts/new-test-fixture.ps1` generates filesystem fixture trees.
 - `scripts/benchmark-ntfs-corpus.ps1` runs the fixed NTFS corpus benchmark defined in `testdata/raw-images/ntfs-corpus/manifest.json`.
+- `scripts/benchmark-ext-corpus.ps1` runs the fixed ext corpus benchmark defined in `testdata/raw-images/ext-corpus/manifest.json`.
 - Benchmark outputs are written to `tools/benchmark-results/` as JSON + Markdown summaries.

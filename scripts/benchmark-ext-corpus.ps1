@@ -2,6 +2,7 @@ param(
   [string]$ManifestPath = ".\testdata\raw-images\ext-corpus\manifest.json",
   [string]$OutputPath = "",
   [switch]$AllowMissing,
+  [switch]$NoBuild,
   [int]$Iterations = 0,
   [uint32]$MaxEntries = 0,
   [switch]$NoWarmup
@@ -10,7 +11,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$manifestFullPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ManifestPath))
+$manifestInputPath = if ([System.IO.Path]::IsPathRooted($ManifestPath)) {
+  $ManifestPath
+} else {
+  Join-Path $repoRoot $ManifestPath
+}
+$manifestFullPath = [System.IO.Path]::GetFullPath($manifestInputPath)
 if (!(Test-Path $manifestFullPath)) {
   throw "Manifest not found: $manifestFullPath"
 }
@@ -28,7 +34,14 @@ $projectPath = Join-Path $repoRoot "tools\benchmarks\ExtCorpusBench\ExtCorpusBen
 $runnerArgs = @(
   "run",
   "--project", $projectPath,
-  "-c", "Release",
+  "-c", "Release"
+)
+
+if ($NoBuild) {
+  $runnerArgs += "--no-build"
+}
+
+$runnerArgs += @(
   "--",
   "--manifest", $manifestFullPath,
   "--output", $outputFullPath

@@ -21,9 +21,10 @@
 - `dotnet build tools/benchmarks/ExtCorpusBench/ExtCorpusBench.csproj -c Release` passed.
 - UI recovery flow now gates ext candidates with explicit status `91` ("not implemented") instead of falling through NTFS/FAT recovery paths.
 - ext benchmark corpus scaffolding is in place (`testdata/raw-images/ext-corpus` + benchmark script/tooling).
+- ext host/image validation scaffolding is now available via `scripts/run-host-ext-image-validation.ps1` and integrated in profile orchestration/comparison scripts.
 
 ## Open items for Phase 9 completion
 
 - Improve ext candidate quality using block-group/inode metadata traversal.
 - Add full ext recovery/export implementation.
-- Add fixture corpus and host/image validation profiles for ext images.
+- Expand ext fixed corpus coverage with additional real-world image fixtures.

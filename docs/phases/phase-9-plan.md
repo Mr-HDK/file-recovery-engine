@@ -35,8 +35,13 @@
 - `ExtCorpusBench` benchmark tool for ext probe/candidate throughput baselines.
 - `scripts/benchmark-ext-corpus.ps1` benchmark runner wrapper.
 
+4. Host/image validation scaffolding:
+- `scripts/run-host-ext-image-validation.ps1` to archive ext corpus validation artifacts per run.
+- `scripts/run-host-validation-profile.ps1` now orchestrates `ext` validation lane alongside `ntfs`/`vss`.
+- `scripts/compare-host-validation-profiles.ps1` now includes `ext` drift summaries per profile.
+
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
 - ext recovery/export path implementation.
-- fixture corpus expansion and host validation scripts.
+- fixture corpus expansion beyond fixed scaffolding.

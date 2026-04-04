@@ -6,7 +6,9 @@ param(
   [switch]$NoArchive,
   [switch]$SkipNtfs,
   [switch]$SkipVss,
-  [switch]$AllowNoSnapshots
+  [switch]$SkipExt,
+  [switch]$AllowNoSnapshots,
+  [switch]$AllowMissingExtImages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,8 +17,8 @@ if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
   $ArtifactRoot = Join-Path $PSScriptRoot "..\artifacts\host-matrix"
 }
 
-if ($SkipNtfs -and $SkipVss) {
-  throw "At least one validation target must be enabled (remove -SkipNtfs or -SkipVss)."
+if ($SkipNtfs -and $SkipVss -and $SkipExt) {
+  throw "At least one validation target must be enabled (remove -SkipNtfs, -SkipVss, or -SkipExt)."
 }
 
 if ([string]::IsNullOrWhiteSpace($ProfileName)) {
@@ -31,6 +33,7 @@ if ([string]::IsNullOrWhiteSpace($sanitizedProfile)) {
 $profileRoot = Join-Path $ArtifactRoot $sanitizedProfile
 $ntfsRoot = Join-Path $profileRoot "ntfs"
 $vssRoot = Join-Path $profileRoot "vss"
+$extRoot = Join-Path $profileRoot "ext"
 New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
 
 $runUtc = [DateTimeOffset]::UtcNow
@@ -69,26 +72,27 @@ function Invoke-HostValidationScript {
     [string]$ScriptPath,
     [Parameter(Mandatory = $true)]
     [string]$TargetRoot,
-    [switch]$AllowSnapshotsOptional
+    [hashtable]$ExtraArgs
   )
 
-  $args = @()
+  $invokeArgs = @{}
   if ($NoArchive) {
-    $args += "-NoArchive"
+    $invokeArgs.NoArchive = $true
   } else {
-    $args += "-ArtifactRoot"
-    $args += $TargetRoot
+    $invokeArgs.ArtifactRoot = $TargetRoot
   }
 
   if ($NoBuild -or $buildAlreadyExecuted) {
-    $args += "-NoBuild"
+    $invokeArgs.NoBuild = $true
   }
 
-  if ($AllowSnapshotsOptional) {
-    $args += "-AllowNoSnapshots"
+  if ($ExtraArgs) {
+    foreach ($key in $ExtraArgs.Keys) {
+      $invokeArgs[$key] = $ExtraArgs[$key]
+    }
   }
 
-  & $ScriptPath @args
+  & $ScriptPath @invokeArgs
   if ($LASTEXITCODE -ne 0) {
     throw "$ScriptPath failed with exit code $LASTEXITCODE."
   }
@@ -103,10 +107,27 @@ if (-not $SkipNtfs) {
 }
 
 if (-not $SkipVss) {
+  $vssArgs = @{}
+  if ($AllowNoSnapshots) {
+    $vssArgs.AllowNoSnapshots = $true
+  }
+
   Invoke-HostValidationScript `
     -ScriptPath (Join-Path $PSScriptRoot "run-host-vss-validation.ps1") `
     -TargetRoot $vssRoot `
-    -AllowSnapshotsOptional:$AllowNoSnapshots
+    -ExtraArgs $vssArgs
+}
+
+if (-not $SkipExt) {
+  $extArgs = @{}
+  if ($AllowMissingExtImages) {
+    $extArgs.AllowMissingImages = $true
+  }
+
+  Invoke-HostValidationScript `
+    -ScriptPath (Join-Path $PSScriptRoot "run-host-ext-image-validation.ps1") `
+    -TargetRoot $extRoot `
+    -ExtraArgs $extArgs
 }
 
 $diskProfile = @(
@@ -136,6 +157,12 @@ $manifest = [ordered]@{
     allow_no_snapshots = [bool]$AllowNoSnapshots
     artifact_root = if ($NoArchive) { $null } else { [System.IO.Path]::GetFullPath($vssRoot) }
     latest_run = if ($NoArchive) { $null } else { Get-LatestRunName -Root $vssRoot }
+  }
+  ext = [ordered]@{
+    enabled = -not $SkipExt
+    allow_missing_images = [bool]$AllowMissingExtImages
+    artifact_root = if ($NoArchive) { $null } else { [System.IO.Path]::GetFullPath($extRoot) }
+    latest_run = if ($NoArchive) { $null } else { Get-LatestRunName -Root $extRoot }
   }
   disk_profile = $diskProfile
   volume_profile = $volumeProfile

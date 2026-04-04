@@ -25,6 +25,7 @@ Commercial-grade local desktop recovery foundation targeting Windows and NTFS fi
 ./scripts/bootstrap.ps1
 ./scripts/test.ps1
 ./scripts/benchmark-ntfs-corpus.ps1 -AllowMissing
+./scripts/benchmark-ext-corpus.ps1 -AllowMissing
 ```
 
 Optional elevated host-integration validation (provisions a temporary NTFS VHD and validates compressed/encrypted deleted-file recovery paths):
@@ -59,11 +60,19 @@ If you want snapshot enumeration coverage without requiring an existing snapshot
 ./scripts/run-host-vss-validation.ps1 -AllowNoSnapshots
 ```
 
+Optional ext image host validation (runs ext corpus probe/candidate benchmark and archives host artifact manifests):
+
+```powershell
+./scripts/run-host-ext-image-validation.ps1 -AllowMissingImages
+# or:
+./scripts/test.ps1 -IncludeExtImageValidation -AllowMissingExtImages
+```
+
 Profile-based host validation orchestration (run on multiple real host machines/layouts and persist profile manifests):
 
 ```powershell
-./scripts/run-host-validation-profile.ps1 -ProfileName office-laptop
-./scripts/run-host-validation-profile.ps1 -ProfileName lab-desktop -AllowNoSnapshots
+./scripts/run-host-validation-profile.ps1 -ProfileName office-laptop -AllowMissingExtImages
+./scripts/run-host-validation-profile.ps1 -ProfileName lab-desktop -AllowNoSnapshots -AllowMissingExtImages
 ```
 
 Compare profile artifacts after collecting runs:

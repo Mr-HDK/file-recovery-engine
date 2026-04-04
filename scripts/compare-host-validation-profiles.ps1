@@ -73,6 +73,8 @@ $baselineNtfsRoot = Join-Path $baselineRoot "ntfs"
 $candidateNtfsRoot = Join-Path $candidateRoot "ntfs"
 $baselineVssRoot = Join-Path $baselineRoot "vss"
 $candidateVssRoot = Join-Path $candidateRoot "vss"
+$baselineExtRoot = Join-Path $baselineRoot "ext"
+$candidateExtRoot = Join-Path $candidateRoot "ext"
 
 $report = [ordered]@{
   generated_utc = [DateTimeOffset]::UtcNow.ToString("O")
@@ -102,6 +104,12 @@ $report = [ordered]@{
     candidate_root = if (Test-Path $candidateVssRoot) { $candidateVssRoot } else { $null }
     baseline_latest_compare = Invoke-ArtifactCompare -Root $baselineVssRoot
     candidate_latest_compare = Invoke-ArtifactCompare -Root $candidateVssRoot
+  }
+  ext = [ordered]@{
+    baseline_root = if (Test-Path $baselineExtRoot) { $baselineExtRoot } else { $null }
+    candidate_root = if (Test-Path $candidateExtRoot) { $candidateExtRoot } else { $null }
+    baseline_latest_compare = Invoke-ArtifactCompare -Root $baselineExtRoot
+    candidate_latest_compare = Invoke-ArtifactCompare -Root $candidateExtRoot
   }
 }
 
