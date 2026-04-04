@@ -20,6 +20,7 @@
 1. `fr-ext` scaffold:
 - `ExtSuperblock` parser boundary.
 - ext deleted directory-entry scanner (`inode=0` metadata candidates).
+- ext deleted-inode scanner from first group inode table (`links=0` + `dtime>0`).
 - parser/scanner unit tests.
 
 2. Interop/UI wiring:
