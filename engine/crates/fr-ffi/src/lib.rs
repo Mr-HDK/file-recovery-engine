@@ -1,16 +1,12 @@
 use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
-use fr_ext::{
-    parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock,
-};
+use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
     parse_boot_sector as parse_fat_boot_sector, scan_deleted_root_entries_with_boot,
     FatFilesystemKind,
 };
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
-use fr_refs::{
-    parse_boot_sector as parse_refs_boot_sector, scan_deleted_candidates_with_boot,
-};
+use fr_refs::{parse_boot_sector as parse_refs_boot_sector, scan_deleted_candidates_with_boot};
 use fr_scoring::score_candidate_with_reasons;
 use fr_session::{
     enrich_summary_with_usn_journal_bytes, quick_scan_ntfs_from_read_session, QuickScanConfig,
@@ -1691,7 +1687,9 @@ fn encode_fat_filesystem_kind(filesystem: FatFilesystemKind) -> u32 {
     }
 }
 
-fn encode_refs_deleted_candidate(candidate: &fr_refs::RefsDeletedCandidate) -> FrRefsDeletedCandidate {
+fn encode_refs_deleted_candidate(
+    candidate: &fr_refs::RefsDeletedCandidate,
+) -> FrRefsDeletedCandidate {
     let mut out = FrRefsDeletedCandidate {
         flags: REFS_DELETED_CANDIDATE_FLAG_DELETED,
         object_id: candidate.object_id,
@@ -3049,7 +3047,10 @@ mod tests {
         assert_eq!(status, 0);
         assert!(written >= 1);
         let first = candidates[0];
-        assert_eq!(first.flags & REFS_DELETED_CANDIDATE_FLAG_DELETED, REFS_DELETED_CANDIDATE_FLAG_DELETED);
+        assert_eq!(
+            first.flags & REFS_DELETED_CANDIDATE_FLAG_DELETED,
+            REFS_DELETED_CANDIDATE_FLAG_DELETED
+        );
         assert_eq!(first.object_id, 42);
         assert_eq!(c_string_bytes_to_string(&first.name), "refs-deleted.txt");
 

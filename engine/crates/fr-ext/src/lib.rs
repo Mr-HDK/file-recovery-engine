@@ -76,7 +76,9 @@ pub fn parse_superblock(image: &[u8]) -> Result<ExtSuperblock, SuperblockParseEr
 
     let block_size_shift = read_u32_le(image, EXT_SUPERBLOCK_OFFSET + 0x18);
     if block_size_shift > 6 {
-        return Err(SuperblockParseError::InvalidBlockSizeShift(block_size_shift));
+        return Err(SuperblockParseError::InvalidBlockSizeShift(
+            block_size_shift,
+        ));
     }
     let block_size_bytes = 1024u32 << block_size_shift;
 

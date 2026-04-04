@@ -1,9 +1,7 @@
 use thiserror::Error;
 
 use fr_types::RecoverySourceKind;
-use fr_usn::{
-    parse_usn_records, UsnRecord, USN_REASON_FILE_DELETE, USN_REASON_RENAME_OLD_NAME,
-};
+use fr_usn::{parse_usn_records, UsnRecord, USN_REASON_FILE_DELETE, USN_REASON_RENAME_OLD_NAME};
 
 pub const REFS_OEM_PREFIX: &[u8; 4] = b"ReFS";
 
@@ -263,12 +261,7 @@ mod tests {
         image[0x28..0x30].copy_from_slice(&2_000_000u64.to_le_bytes());
         image[0x48..0x50].copy_from_slice(&0xA1A2_A3A4_A5A6_A7A8u64.to_le_bytes());
 
-        let usn_record = build_usn_v2_record(
-            "deleted-report.txt",
-            USN_REASON_FILE_DELETE,
-            42,
-            5,
-        );
+        let usn_record = build_usn_v2_record("deleted-report.txt", USN_REASON_FILE_DELETE, 42, 5);
         let start = 4096usize;
         image[start..start + usn_record.len()].copy_from_slice(&usn_record);
 
