@@ -194,6 +194,10 @@ const CARVE_CANDIDATE_FLAG_PARTIAL: u32 = 0x0001;
 const REFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const EXT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const EXT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
+const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
+const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
+const EXT_INODE_BLOCK_POINTERS_OFFSET: usize = 40;
+const EXT_DIRECT_BLOCK_POINTERS: usize = 12;
 const FAT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
@@ -1383,7 +1387,7 @@ pub extern "C" fn fr_recover_fat_candidate_to_file(
 #[no_mangle]
 pub extern "C" fn fr_recover_ext_candidate_to_file(
     session_id: u64,
-    _inode_number: u64,
+    inode_number: u64,
     output_path: *const c_char,
     out_bytes_written: *mut u64,
     out_partial: *mut i32,
@@ -1404,15 +1408,104 @@ pub extern "C" fn fr_recover_ext_candidate_to_file(
         }
     }
 
-    let Ok(map) = read_sessions().lock() else {
+    if inode_number == 0 {
+        return 91;
+    }
+
+    let output_path_cstr = unsafe { CStr::from_ptr(output_path) };
+    let Ok(output_path_str) = output_path_cstr.to_str() else {
+        return 43;
+    };
+
+    if output_path_str.trim().is_empty() {
+        return 43;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
         return -200;
     };
 
-    if !map.contains_key(&session_id) {
+    let Some(session) = map.get_mut(&session_id) else {
         return 20;
+    };
+
+    let mut header = [0u8; 4096];
+    match read_from_session(session, 0, &mut header) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
     }
 
-    91
+    let Ok(superblock) = parse_ext_superblock(&header) else {
+        return 90;
+    };
+
+    let inode_offset = match locate_ext_inode_offset(session, &superblock, inode_number) {
+        Ok(Some(offset)) => offset,
+        Ok(None) => return 91,
+        Err(status) => return status,
+    };
+
+    let inode_size = superblock.inode_size_bytes as usize;
+    if inode_size < 128 {
+        return 91;
+    }
+
+    let mut inode = vec![0u8; inode_size];
+    match read_from_session(session, inode_offset, &mut inode) {
+        Ok(true) => {}
+        Ok(false) => return 91,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let mode = read_u16_le_at(&inode, 0);
+    if (mode & 0xF000) != 0x8000 {
+        return 91;
+    }
+
+    let size_lo = read_u32_le_at(&inode, 4) as u64;
+    let size_hi = if inode_size >= EXT_INODE_SIZE_HIGH_OFFSET + 4 {
+        read_u32_le_at(&inode, EXT_INODE_SIZE_HIGH_OFFSET) as u64
+    } else {
+        0
+    };
+    let file_size = (size_hi << 32) | size_lo;
+
+    let output_path = Path::new(output_path_str);
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {
+            return 44;
+        }
+    }
+
+    let Ok(mut output_file) = File::create(output_path) else {
+        return 44;
+    };
+
+    let (written, partial) =
+        match recover_ext_candidate_data(session, &superblock, &inode, file_size, &mut output_file)
+        {
+            Ok(result) => result,
+            Err(status) => return status,
+        };
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = written;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = if partial { 1 } else { 0 };
+        }
+    }
+
+    if written == 0 && file_size > 0 {
+        return 76;
+    }
+
+    0
 }
 
 #[no_mangle]
@@ -1963,6 +2056,173 @@ fn read_fat_next_cluster_from_session(
     }
 
     Ok(u32::from_le_bytes(entry) & 0x0FFF_FFFF)
+}
+
+fn recover_ext_candidate_data(
+    session: &mut fr_winio::ReadSession,
+    superblock: &fr_ext::ExtSuperblock,
+    inode: &[u8],
+    file_size: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if file_size == 0 {
+        return Ok((0, false));
+    }
+
+    let block_size = superblock.block_size_bytes as usize;
+    if block_size < 1024 {
+        return Err(91);
+    }
+
+    if inode.len() < EXT_INODE_BLOCK_POINTERS_OFFSET + (15 * 4) {
+        return Err(91);
+    }
+
+    let mut remaining = file_size;
+    let mut written = 0u64;
+    let mut partial = false;
+    let mut block_buffer = vec![0u8; block_size];
+
+    for pointer_index in 0..EXT_DIRECT_BLOCK_POINTERS {
+        if remaining == 0 {
+            break;
+        }
+
+        let pointer_offset = EXT_INODE_BLOCK_POINTERS_OFFSET + (pointer_index * 4);
+        let block_pointer = read_u32_le_at(inode, pointer_offset);
+        if block_pointer == 0 {
+            partial = true;
+            break;
+        }
+
+        let Some(block_offset) = (block_pointer as u64).checked_mul(block_size as u64) else {
+            partial = true;
+            break;
+        };
+
+        let to_read = remaining.min(block_size as u64) as usize;
+        match read_from_session(session, block_offset, &mut block_buffer[..to_read]) {
+            Ok(true) => {}
+            Ok(false) => {
+                partial = true;
+                break;
+            }
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        if output_file.write_all(&block_buffer[..to_read]).is_err() {
+            return Err(44);
+        }
+
+        written = written.saturating_add(to_read as u64);
+        remaining = remaining.saturating_sub(to_read as u64);
+    }
+
+    if remaining > 0 {
+        // Direct block recovery only for now; unresolved tail means partial export.
+        partial = true;
+    }
+
+    Ok((written, partial))
+}
+
+fn locate_ext_inode_offset(
+    session: &mut fr_winio::ReadSession,
+    superblock: &fr_ext::ExtSuperblock,
+    inode_number: u64,
+) -> Result<Option<u64>, i32> {
+    if inode_number == 0 {
+        return Ok(None);
+    }
+
+    let inodes_per_group = superblock.inodes_per_group as u64;
+    if inodes_per_group == 0 {
+        return Ok(None);
+    }
+
+    let group_count = ext_group_count(superblock);
+    if group_count == 0 {
+        return Ok(None);
+    }
+
+    let inode_index = inode_number - 1;
+    let group_index = inode_index / inodes_per_group;
+    let index_in_group = inode_index % inodes_per_group;
+    if group_index >= group_count {
+        return Ok(None);
+    }
+
+    let Some(descriptor_offset) =
+        ext_first_group_descriptor_offset(superblock).checked_add(group_index.saturating_mul(32))
+    else {
+        return Ok(None);
+    };
+
+    let mut descriptor = [0u8; 32];
+    match read_from_session(session, descriptor_offset, &mut descriptor) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(err) => return Err(map_winio_error(err)),
+    }
+
+    let inode_table_block = read_u32_le_at(&descriptor, EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET);
+    if inode_table_block == 0 {
+        return Ok(None);
+    }
+
+    let block_size = superblock.block_size_bytes as u64;
+    let inode_size = superblock.inode_size_bytes as u64;
+
+    let Some(inode_table_offset) = (inode_table_block as u64).checked_mul(block_size) else {
+        return Ok(None);
+    };
+    let Some(inode_delta) = index_in_group.checked_mul(inode_size) else {
+        return Ok(None);
+    };
+    let Some(inode_offset) = inode_table_offset.checked_add(inode_delta) else {
+        return Ok(None);
+    };
+
+    Ok(Some(inode_offset))
+}
+
+fn ext_first_group_descriptor_offset(superblock: &fr_ext::ExtSuperblock) -> u64 {
+    if superblock.block_size_bytes == 1024 {
+        2048
+    } else {
+        superblock.block_size_bytes as u64
+    }
+}
+
+fn ext_group_count(superblock: &fr_ext::ExtSuperblock) -> u64 {
+    let block_groups = if superblock.blocks_per_group == 0 {
+        0
+    } else {
+        superblock
+            .blocks_count
+            .saturating_add(superblock.blocks_per_group as u64 - 1)
+            / superblock.blocks_per_group as u64
+    };
+    let inode_groups = if superblock.inodes_per_group == 0 {
+        0
+    } else {
+        (superblock.inodes_count as u64).saturating_add(superblock.inodes_per_group as u64 - 1)
+            / superblock.inodes_per_group as u64
+    };
+
+    block_groups.max(inode_groups)
+}
+
+fn read_u16_le_at(bytes: &[u8], offset: usize) -> u16 {
+    let mut value = [0u8; 2];
+    value.copy_from_slice(&bytes[offset..offset + 2]);
+    u16::from_le_bytes(value)
+}
+
+fn read_u32_le_at(bytes: &[u8], offset: usize) -> u32 {
+    let mut value = [0u8; 4];
+    value.copy_from_slice(&bytes[offset..offset + 4]);
+    u32::from_le_bytes(value)
 }
 
 fn recover_data_attribute(
@@ -3000,7 +3260,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_recover_ext_candidate_to_file_returns_not_implemented_status() {
+    fn ffi_recover_ext_candidate_to_file_returns_unsupported_for_missing_inode() {
         let image = build_test_ext4_image();
         let temp_dir = std::env::temp_dir().join(format!(
             "fr-ffi-ext-recover-{}",
@@ -3040,6 +3300,55 @@ mod tests {
         assert_eq!(status, 91);
         assert_eq!(bytes_written, 0);
         assert_eq!(partial, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_direct_blocks() {
+        let payload = b"EXT-RECOVERY-DIRECT-BLOCK";
+        let image = build_test_ext4_image_with_recoverable_inode(payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-recoverable.img");
+        let output_path = temp_dir.join("ext-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -4714,6 +5023,43 @@ mod tests {
         let entry = build_ext_directory_entry(0, "deleted-ext.txt", 1);
         let offset = 8192usize;
         image[offset..offset + entry.len()].copy_from_slice(&entry);
+        image
+    }
+
+    fn build_test_ext4_image_with_recoverable_inode(payload: &[u8]) -> Vec<u8> {
+        let mut image = vec![0u8; 4096 * 64];
+        write_u32(&mut image, 1024 + 0x00, 1024);
+        write_u32(&mut image, 1024 + 0x04, 65_536);
+        write_u32(&mut image, 1024 + 0x14, 0);
+        write_u32(&mut image, 1024 + 0x18, 2);
+        write_u32(&mut image, 1024 + 0x20, 32_768);
+        write_u32(&mut image, 1024 + 0x28, 256);
+        write_u16(&mut image, 1024 + 0x38, 0xEF53);
+        write_u16(&mut image, 1024 + 0x58, 256);
+
+        // Group descriptor table starts at block 1 for 4 KiB block-size images.
+        write_u32(
+            &mut image,
+            4096 + EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET,
+            10,
+        );
+
+        let inode_table_offset = 10usize * 4096usize;
+        let inode_offset = inode_table_offset + 15usize * 256usize; // inode 16
+        write_u16(&mut image, inode_offset + 0, 0x81A4);
+        write_u32(&mut image, inode_offset + 4, payload.len() as u32);
+        write_u32(&mut image, inode_offset + 20, 1_704_067_200);
+        write_u16(&mut image, inode_offset + 26, 0);
+
+        let data_block = 30u32;
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET,
+            data_block,
+        );
+        let data_offset = data_block as usize * 4096usize;
+        image[data_offset..data_offset + payload.len()].copy_from_slice(payload);
+
         image
     }
 

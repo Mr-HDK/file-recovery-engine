@@ -16,15 +16,15 @@
 ## Evidence
 
 - `cargo test -p fr-ext` passed (`9` tests, includes inode-type gating, deletion-time sanity, 64-bit size parsing, and multi-group inode-table coverage).
-- `cargo test -p fr-ffi` passed (`26` tests, includes ext probe/listing and ext recovery-stub tests).
+- `cargo test -p fr-ffi` passed (`27` tests, includes ext direct-block recovery success path and unsupported-candidate fallback).
 - `dotnet test ui/windows-app/tests/FileRecovery.WindowsApp.Tests/FileRecovery.WindowsApp.Tests.csproj -c Debug` passed (`36` tests).
 - `dotnet build tools/benchmarks/ExtCorpusBench/ExtCorpusBench.csproj -c Release` passed.
-- UI recovery flow now gates ext candidates with explicit status `91` ("not implemented") instead of falling through NTFS/FAT recovery paths.
+- UI recovery flow now executes ext direct-block recovery for supported regular-file candidates and returns status `91` for unsupported candidates.
 - ext benchmark corpus scaffolding is in place (`testdata/raw-images/ext-corpus` + benchmark script/tooling).
 - ext host/image validation scaffolding is now available via `scripts/run-host-ext-image-validation.ps1` and integrated in profile orchestration/comparison scripts.
 
 ## Open items for Phase 9 completion
 
 - Improve ext candidate quality using block-group/inode metadata traversal.
-- Add full ext recovery/export implementation.
+- Expand ext recovery beyond direct blocks (indirect trees/extents) and non-regular inode semantics.
 - Expand ext fixed corpus coverage with additional real-world image fixtures.

@@ -1672,7 +1672,7 @@ public static class NativeEngineProbe
             72 => "FAT/exFAT recovery overflowed internal limits.",
             75 => "FAT/exFAT candidate start cluster is invalid.",
             76 => "No bytes were recoverable for the requested FAT/exFAT candidate.",
-            91 => "ext recovery/export is not implemented in this build.",
+            91 => "ext recovery is unavailable for this candidate in the current build.",
             10 => "Invalid source path.",
             11 => "Unsupported platform.",
             12 => "Access denied.",
