@@ -42,11 +42,11 @@
 - `scripts/compare-host-validation-profiles.ps1` now includes `ext` drift summaries per profile.
 
 5. ext recovery baseline:
-- `fr_recover_ext_candidate_to_file` now supports regular-file recovery from direct block pointers.
-- recovery marks partial when unresolved tail requires indirect blocks or reads fail.
+- `fr_recover_ext_candidate_to_file` now supports regular-file recovery from direct and single-indirect block pointers.
+- recovery marks partial when unresolved tail requires double/triple indirect handling or reads fail.
 
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
-- ext recovery/export coverage for indirect block trees, extents, and directory/symlink semantics.
+- ext recovery/export coverage for double/triple indirect trees, extents, and directory/symlink semantics.
 - fixture corpus expansion beyond fixed scaffolding.

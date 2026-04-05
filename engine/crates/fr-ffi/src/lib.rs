@@ -198,6 +198,9 @@ const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
 const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
 const EXT_INODE_BLOCK_POINTERS_OFFSET: usize = 40;
 const EXT_DIRECT_BLOCK_POINTERS: usize = 12;
+const EXT_SINGLE_INDIRECT_POINTER_INDEX: usize = 12;
+const EXT_DOUBLE_INDIRECT_POINTER_INDEX: usize = 13;
+const EXT_TRIPLE_INDIRECT_POINTER_INDEX: usize = 14;
 const FAT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
@@ -2119,7 +2122,110 @@ fn recover_ext_candidate_data(
     }
 
     if remaining > 0 {
-        // Direct block recovery only for now; unresolved tail means partial export.
+        let single_indirect_pointer = read_u32_le_at(
+            inode,
+            EXT_INODE_BLOCK_POINTERS_OFFSET + (EXT_SINGLE_INDIRECT_POINTER_INDEX * 4),
+        );
+        if single_indirect_pointer == 0 {
+            partial = true;
+        } else {
+            let (single_written, single_partial) = recover_ext_single_indirect_data(
+                session,
+                block_size,
+                single_indirect_pointer,
+                remaining,
+                output_file,
+            )?;
+            written = written.saturating_add(single_written);
+            remaining = remaining.saturating_sub(single_written);
+            partial |= single_partial;
+        }
+    }
+
+    if remaining > 0 {
+        let double_indirect_pointer = read_u32_le_at(
+            inode,
+            EXT_INODE_BLOCK_POINTERS_OFFSET + (EXT_DOUBLE_INDIRECT_POINTER_INDEX * 4),
+        );
+        let triple_indirect_pointer = read_u32_le_at(
+            inode,
+            EXT_INODE_BLOCK_POINTERS_OFFSET + (EXT_TRIPLE_INDIRECT_POINTER_INDEX * 4),
+        );
+        if double_indirect_pointer != 0 || triple_indirect_pointer != 0 {
+            // Double/triple indirect trees are not implemented yet.
+        }
+        partial = true;
+    }
+
+    if remaining > 0 {
+        partial = true;
+    }
+
+    Ok((written, partial))
+}
+
+fn recover_ext_single_indirect_data(
+    session: &mut fr_winio::ReadSession,
+    block_size: usize,
+    pointer_block: u32,
+    mut remaining: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if remaining == 0 {
+        return Ok((0, false));
+    }
+
+    let Some(pointer_block_offset) = (pointer_block as u64).checked_mul(block_size as u64) else {
+        return Ok((0, true));
+    };
+
+    let mut indirect_table = vec![0u8; block_size];
+    match read_from_session(session, pointer_block_offset, &mut indirect_table) {
+        Ok(true) => {}
+        Ok(false) => return Ok((0, true)),
+        Err(err) => return Err(map_winio_error(err)),
+    }
+
+    let mut data_block = vec![0u8; block_size];
+    let mut written = 0u64;
+    let mut partial = false;
+    let entry_count = block_size / 4;
+
+    for entry_index in 0..entry_count {
+        if remaining == 0 {
+            break;
+        }
+
+        let block_pointer = read_u32_le_at(&indirect_table, entry_index * 4);
+        if block_pointer == 0 {
+            partial = true;
+            break;
+        }
+
+        let Some(block_offset) = (block_pointer as u64).checked_mul(block_size as u64) else {
+            partial = true;
+            break;
+        };
+
+        let to_read = remaining.min(block_size as u64) as usize;
+        match read_from_session(session, block_offset, &mut data_block[..to_read]) {
+            Ok(true) => {}
+            Ok(false) => {
+                partial = true;
+                break;
+            }
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        if output_file.write_all(&data_block[..to_read]).is_err() {
+            return Err(44);
+        }
+
+        written = written.saturating_add(to_read as u64);
+        remaining = remaining.saturating_sub(to_read as u64);
+    }
+
+    if remaining > 0 {
         partial = true;
     }
 
@@ -3349,6 +3455,105 @@ mod tests {
         assert_eq!(partial, 0);
         assert_eq!(bytes_written, payload.len() as u64);
         assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_single_indirect_blocks() {
+        let payload = build_ext_single_indirect_payload();
+        let image = build_test_ext4_image_with_single_indirect_recoverable_inode(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-single-indirect-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-single-indirect.img");
+        let output_path = temp_dir.join("ext-single-indirect-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_marks_partial_when_single_indirect_pointer_missing() {
+        let payload = build_ext_single_indirect_payload();
+        let image =
+            build_test_ext4_image_with_single_indirect_recoverable_inode_missing_pointer(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-single-indirect-partial-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-single-indirect-missing.img");
+        let output_path = temp_dir.join("ext-single-indirect-partial.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
+        assert_eq!(bytes_written, (12 * 4096) as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload[..12 * 4096]);
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -5027,6 +5232,102 @@ mod tests {
     }
 
     fn build_test_ext4_image_with_recoverable_inode(payload: &[u8]) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(payload.len() as u32);
+
+        let data_block = 30u32;
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET,
+            data_block,
+        );
+        let data_offset = data_block as usize * 4096usize;
+        image[data_offset..data_offset + payload.len()].copy_from_slice(payload);
+
+        image
+    }
+
+    fn build_test_ext4_image_with_single_indirect_recoverable_inode(payload: &[u8]) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(payload.len() as u32);
+
+        let block_size = 4096usize;
+        let direct_block_count = EXT_DIRECT_BLOCK_POINTERS;
+        for direct_index in 0..direct_block_count {
+            let block = 30u32 + direct_index as u32;
+            write_u32(
+                &mut image,
+                inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET + (direct_index * 4),
+                block,
+            );
+
+            let payload_offset = direct_index * block_size;
+            let payload_end = payload_offset + block_size;
+            let data_offset = block as usize * block_size;
+            image[data_offset..data_offset + block_size]
+                .copy_from_slice(&payload[payload_offset..payload_end]);
+        }
+
+        let pointer_block = 50u32;
+        let indirect_data_block = 60u32;
+        write_u32(
+            &mut image,
+            inode_offset
+                + EXT_INODE_BLOCK_POINTERS_OFFSET
+                + (EXT_SINGLE_INDIRECT_POINTER_INDEX * 4),
+            pointer_block,
+        );
+
+        let pointer_block_offset = pointer_block as usize * block_size;
+        write_u32(&mut image, pointer_block_offset, indirect_data_block);
+
+        let tail_offset = direct_block_count * block_size;
+        let tail_end = tail_offset + block_size;
+        let indirect_data_offset = indirect_data_block as usize * block_size;
+        image[indirect_data_offset..indirect_data_offset + block_size]
+            .copy_from_slice(&payload[tail_offset..tail_end]);
+
+        image
+    }
+
+    fn build_test_ext4_image_with_single_indirect_recoverable_inode_missing_pointer(
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(payload.len() as u32);
+
+        let block_size = 4096usize;
+        let direct_block_count = EXT_DIRECT_BLOCK_POINTERS;
+        for direct_index in 0..direct_block_count {
+            let block = 30u32 + direct_index as u32;
+            write_u32(
+                &mut image,
+                inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET + (direct_index * 4),
+                block,
+            );
+
+            let payload_offset = direct_index * block_size;
+            let payload_end = payload_offset + block_size;
+            let data_offset = block as usize * block_size;
+            image[data_offset..data_offset + block_size]
+                .copy_from_slice(&payload[payload_offset..payload_end]);
+        }
+
+        // Single-indirect pointer intentionally left as zero to trigger partial export.
+        image
+    }
+
+    fn build_ext_single_indirect_payload() -> Vec<u8> {
+        let block_size = 4096usize;
+        let block_count = EXT_DIRECT_BLOCK_POINTERS + 1;
+        let mut payload = vec![0u8; block_size * block_count];
+        for block_index in 0..block_count {
+            let fill = (block_index as u8).wrapping_mul(17).wrapping_add(3);
+            let start = block_index * block_size;
+            let end = start + block_size;
+            payload[start..end].fill(fill);
+        }
+        payload
+    }
+
+    fn initialize_ext4_recovery_image(file_size_bytes: u32) -> (Vec<u8>, usize) {
         let mut image = vec![0u8; 4096 * 64];
         write_u32(&mut image, 1024 + 0x00, 1024);
         write_u32(&mut image, 1024 + 0x04, 65_536);
@@ -5047,20 +5348,11 @@ mod tests {
         let inode_table_offset = 10usize * 4096usize;
         let inode_offset = inode_table_offset + 15usize * 256usize; // inode 16
         write_u16(&mut image, inode_offset + 0, 0x81A4);
-        write_u32(&mut image, inode_offset + 4, payload.len() as u32);
+        write_u32(&mut image, inode_offset + 4, file_size_bytes);
         write_u32(&mut image, inode_offset + 20, 1_704_067_200);
         write_u16(&mut image, inode_offset + 26, 0);
 
-        let data_block = 30u32;
-        write_u32(
-            &mut image,
-            inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET,
-            data_block,
-        );
-        let data_offset = data_block as usize * 4096usize;
-        image[data_offset..data_offset + payload.len()].copy_from_slice(payload);
-
-        image
+        (image, inode_offset)
     }
 
     fn build_ext_directory_entry(inode: u32, name: &str, file_type: u8) -> Vec<u8> {
