@@ -81,4 +81,5 @@
 - `scripts/benchmark-ntfs-corpus.ps1` runs the fixed NTFS corpus benchmark defined in `testdata/raw-images/ntfs-corpus/manifest.json`.
 - `scripts/benchmark-ext-corpus.ps1` runs the fixed ext corpus benchmark defined in `testdata/raw-images/ext-corpus/manifest.json`.
 - `scripts/benchmark-ext-synthetic-corpus.ps1` regenerates and benchmarks the committed synthetic ext mini-corpus defined in `testdata/raw-images/ext-corpus/manifest.synthetic.json`.
+- ext primary corpus manifest now includes dedicated slots for sparse-extents, symlink-heavy, and inode-linked-name real-world scenarios.
 - Benchmark outputs are written to `tools/benchmark-results/` as JSON + Markdown summaries.

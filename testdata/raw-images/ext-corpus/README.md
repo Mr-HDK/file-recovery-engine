@@ -14,6 +14,9 @@ This directory defines the fixed ext corpus used by the ext benchmark harness.
 2. `ext4-deleted-tree.img`
 3. `ext4-journal-rotated.img`
 4. `ext4-partial-overwrite.img`
+5. `ext4-sparse-extents.img`
+6. `ext4-symlink-heavy.img`
+7. `ext4-inode-linked-names.img`
 
 ## Build guidance
 
@@ -22,6 +25,11 @@ This directory defines the fixed ext corpus used by the ext benchmark harness.
 3. Place resulting images in this folder with the exact names from the manifest.
 4. Run benchmark harness:
    - `scripts/benchmark-ext-corpus.ps1`
+
+Suggested scenario emphasis for the expanded matrix:
+- `ext4-sparse-extents.img`: sparse and uninitialized extents.
+- `ext4-symlink-heavy.img`: inline and non-inline symlink targets.
+- `ext4-inode-linked-names.img`: deleted directory-entry names that still reference deleted inode metadata.
 
 ## Notes
 

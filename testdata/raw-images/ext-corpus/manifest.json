@@ -29,6 +29,27 @@
       "maxEntries": 8192,
       "iterations": 3,
       "candidateCapacity": 4096
+    },
+    {
+      "id": "ext4-sparse-extents",
+      "relativePath": "ext4-sparse-extents.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ext4-symlink-heavy",
+      "relativePath": "ext4-symlink-heavy.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
+    },
+    {
+      "id": "ext4-inode-linked-names",
+      "relativePath": "ext4-inode-linked-names.img",
+      "maxEntries": 8192,
+      "iterations": 3,
+      "candidateCapacity": 4096
     }
   ]
 }

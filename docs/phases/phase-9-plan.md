@@ -34,6 +34,7 @@
 
 3. Fixture/benchmark scaffolding:
 - fixed ext corpus manifest and README under `testdata/raw-images/ext-corpus/`.
+- primary ext corpus manifest now includes expanded real-world case slots (`sparse-extents`, `symlink-heavy`, `inode-linked-names`) alongside baseline scenarios.
 - committed synthetic ext mini-corpus manifest/images under `testdata/raw-images/ext-corpus/manifest.synthetic.json` + `synthetic/*.img`.
 - `ExtCorpusBench` benchmark tool for ext probe/candidate throughput baselines.
 - `scripts/benchmark-ext-corpus.ps1` benchmark runner wrapper.
