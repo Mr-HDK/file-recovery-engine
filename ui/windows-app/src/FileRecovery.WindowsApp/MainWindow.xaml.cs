@@ -555,6 +555,12 @@ public partial class MainWindow : Window
         var candidateCapacity = GetCandidateCapacity();
         Guid? sessionId = null;
 
+        if (!ConfirmImageFirstRecommendation(selectedSource, "session initialization"))
+        {
+            StatusTextBlock.Text = "Session canceled (image-first recommended)";
+            return;
+        }
+
         try
         {
             operationToken.ThrowIfCancellationRequested();
@@ -1316,6 +1322,35 @@ public partial class MainWindow : Window
     {
         return source is not null
             && source.Id.StartsWith("vss:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ConfirmImageFirstRecommendation(SourceCandidate source, string operationName)
+    {
+        if (source.Kind == RecoverySourceKind.ImageFile || IsVssSnapshotSource(source))
+        {
+            return true;
+        }
+
+        var sourceLabel = string.IsNullOrWhiteSpace(source.DisplayName)
+            ? source.Kind.ToString()
+            : source.DisplayName;
+        var result = System.Windows.MessageBox.Show(
+            this,
+            "Recommended workflow is to acquire a forensic image first and run scan/recovery from that image."
+                + Environment.NewLine + Environment.NewLine
+                + $"Selected source: {sourceLabel}" + Environment.NewLine
+                + $"Requested operation: {operationName}" + Environment.NewLine + Environment.NewLine
+                + "Continue directly on the live source?",
+            "Image-First Recommendation",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+        if (result != MessageBoxResult.Yes)
+        {
+            AppendSessionMessage($"Canceled {operationName}: image-first recommendation not accepted.");
+        }
+
+        return result == MessageBoxResult.Yes;
     }
 
     private void InitializeCandidateFilterControls()
@@ -2416,6 +2451,13 @@ public partial class MainWindow : Window
             {
                 AppendSessionMessage("Recovery blocked: source is not selected.");
                 AppendCandidateActivity("Recovery blocked: no source selected.");
+                return;
+            }
+
+            if (!ConfirmImageFirstRecommendation(_selectedSource, "recovery"))
+            {
+                StatusTextBlock.Text = "Recovery canceled (image-first recommended)";
+                AppendCandidateActivity("Recovery canceled (image-first recommended).");
                 return;
             }
 

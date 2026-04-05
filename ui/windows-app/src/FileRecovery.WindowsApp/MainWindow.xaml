@@ -63,10 +63,16 @@
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                        <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
-                        <Button Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
-                        <Button Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
+                    <StackPanel Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
+                            <Button Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
+                            <Button Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
+                        </StackPanel>
+                        <TextBlock Margin="0,6,0,0"
+                                   FontSize="11"
+                                   Foreground="#6B7280"
+                                   Text="Recommended workflow: acquire an image first, then scan/recover from the image."/>
                     </StackPanel>
 
                     <DataGrid x:Name="SourcesDataGrid"

@@ -52,6 +52,7 @@
 44. Added FAT/exFAT engine ABI surface (`fr_probe_fat_boot_from_session`, `fr_get_fat_deleted_candidates_from_session`) and .NET `NativeEngineProbe` wrappers/tests.
 45. Added profile-level host validation orchestration (`scripts/run-host-validation-profile.ps1`) and cross-profile comparison tooling (`scripts/compare-host-validation-profiles.ps1`) for real-machine/storage-layout validation campaigns.
 46. Added clone-first image acquisition foundation in `.NET` core (`FileImageAcquisitionService`) with resumable checkpoint logs, resume-prefix validation, and source/destination SHA-256 verification, plus UI trigger wiring and unit coverage.
+47. Added image-first UX safeguards in WPF session/recovery flows: live-media operations now require explicit user confirmation to proceed without prior imaging.
 
 ## Active risks
 
