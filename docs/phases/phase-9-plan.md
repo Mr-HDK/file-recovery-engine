@@ -47,10 +47,10 @@
 - sparse gaps and uninitialized extent runs now zero-fill during export.
 - inline (fast) symlink inodes now export the stored target bytes.
 - non-inline symlink inodes now export through data-block recovery paths.
+- directory inodes now export raw directory data bytes.
 - recovery marks partial when unresolved pointers/reads prevent full export.
 
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
-- directory export semantics.
 - fixture corpus expansion beyond fixed scaffolding.

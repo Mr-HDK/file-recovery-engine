@@ -1471,7 +1471,8 @@ pub extern "C" fn fr_recover_ext_candidate_to_file(
     let inode_type = mode & 0xF000;
     let is_regular_file = inode_type == 0x8000;
     let is_symlink = inode_type == 0xA000;
-    if !is_regular_file && !is_symlink {
+    let is_directory = inode_type == 0x4000;
+    if !is_regular_file && !is_symlink && !is_directory {
         return 91;
     }
 
@@ -4411,6 +4412,55 @@ mod tests {
     }
 
     #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_directory_inode_bytes() {
+        let payload = build_ext_directory_payload();
+        let image = build_test_ext4_image_with_directory_inode(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-directory-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-directory.img");
+        let output_path = temp_dir.join("ext-directory-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_get_refs_deleted_candidates_returns_success_with_no_candidates() {
         let image = build_test_refs_image();
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6501,6 +6551,30 @@ mod tests {
         image[data_offset..data_offset + target_bytes.len()].copy_from_slice(target_bytes);
 
         image
+    }
+
+    fn build_test_ext4_image_with_directory_inode(payload: &[u8]) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(payload.len() as u32);
+
+        write_u16(&mut image, inode_offset + 0, 0x41ED);
+        let data_block = 30u32;
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET,
+            data_block,
+        );
+
+        let data_offset = data_block as usize * 4096usize;
+        image[data_offset..data_offset + payload.len()].copy_from_slice(payload);
+
+        image
+    }
+
+    fn build_ext_directory_payload() -> Vec<u8> {
+        let mut payload = vec![0u8; 4096];
+        let entry = build_ext_directory_entry(42, "docs", 2);
+        payload[..entry.len()].copy_from_slice(&entry);
+        payload
     }
 
     fn initialize_ext4_recovery_image(file_size_bytes: u32) -> (Vec<u8>, usize) {
