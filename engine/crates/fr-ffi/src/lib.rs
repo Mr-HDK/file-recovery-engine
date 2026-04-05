@@ -2168,10 +2168,20 @@ fn recover_ext_candidate_data(
             inode,
             EXT_INODE_BLOCK_POINTERS_OFFSET + (EXT_TRIPLE_INDIRECT_POINTER_INDEX * 4),
         );
-        if triple_indirect_pointer != 0 {
-            // Triple indirect trees are not implemented yet.
+        if triple_indirect_pointer == 0 {
+            partial = true;
+        } else {
+            let (triple_written, triple_partial) = recover_ext_triple_indirect_data(
+                session,
+                block_size,
+                triple_indirect_pointer,
+                remaining,
+                output_file,
+            )?;
+            written = written.saturating_add(triple_written);
+            remaining = remaining.saturating_sub(triple_written);
+            partial |= triple_partial;
         }
-        partial = true;
     }
 
     if remaining > 0 {
@@ -2341,6 +2351,132 @@ fn recover_ext_double_indirect_data(
 
             written = written.saturating_add(to_read as u64);
             remaining = remaining.saturating_sub(to_read as u64);
+        }
+    }
+
+    if remaining > 0 {
+        partial = true;
+    }
+
+    Ok((written, partial))
+}
+
+fn recover_ext_triple_indirect_data(
+    session: &mut fr_winio::ReadSession,
+    block_size: usize,
+    pointer_block: u32,
+    mut remaining: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if remaining == 0 {
+        return Ok((0, false));
+    }
+
+    let Some(pointer_block_offset) = (pointer_block as u64).checked_mul(block_size as u64) else {
+        return Ok((0, true));
+    };
+
+    let mut first_level_table = vec![0u8; block_size];
+    match read_from_session(session, pointer_block_offset, &mut first_level_table) {
+        Ok(true) => {}
+        Ok(false) => return Ok((0, true)),
+        Err(err) => return Err(map_winio_error(err)),
+    }
+
+    let mut second_level_table = vec![0u8; block_size];
+    let mut third_level_table = vec![0u8; block_size];
+    let mut data_block = vec![0u8; block_size];
+    let mut written = 0u64;
+    let mut partial = false;
+    let entry_count = block_size / 4;
+
+    'first_level: for first_index in 0..entry_count {
+        if remaining == 0 {
+            break;
+        }
+
+        let second_level_pointer = read_u32_le_at(&first_level_table, first_index * 4);
+        if second_level_pointer == 0 {
+            partial = true;
+            break;
+        }
+
+        let Some(second_level_offset) =
+            (second_level_pointer as u64).checked_mul(block_size as u64)
+        else {
+            partial = true;
+            break;
+        };
+
+        match read_from_session(session, second_level_offset, &mut second_level_table) {
+            Ok(true) => {}
+            Ok(false) => {
+                partial = true;
+                break;
+            }
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        for second_index in 0..entry_count {
+            if remaining == 0 {
+                break 'first_level;
+            }
+
+            let third_level_pointer = read_u32_le_at(&second_level_table, second_index * 4);
+            if third_level_pointer == 0 {
+                partial = true;
+                break 'first_level;
+            }
+
+            let Some(third_level_offset) =
+                (third_level_pointer as u64).checked_mul(block_size as u64)
+            else {
+                partial = true;
+                break 'first_level;
+            };
+
+            match read_from_session(session, third_level_offset, &mut third_level_table) {
+                Ok(true) => {}
+                Ok(false) => {
+                    partial = true;
+                    break 'first_level;
+                }
+                Err(err) => return Err(map_winio_error(err)),
+            }
+
+            for third_index in 0..entry_count {
+                if remaining == 0 {
+                    break 'first_level;
+                }
+
+                let data_pointer = read_u32_le_at(&third_level_table, third_index * 4);
+                if data_pointer == 0 {
+                    partial = true;
+                    break 'first_level;
+                }
+
+                let Some(data_offset) = (data_pointer as u64).checked_mul(block_size as u64) else {
+                    partial = true;
+                    break 'first_level;
+                };
+
+                let to_read = remaining.min(block_size as u64) as usize;
+                match read_from_session(session, data_offset, &mut data_block[..to_read]) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        partial = true;
+                        break 'first_level;
+                    }
+                    Err(err) => return Err(map_winio_error(err)),
+                }
+
+                if output_file.write_all(&data_block[..to_read]).is_err() {
+                    return Err(44);
+                }
+
+                written = written.saturating_add(to_read as u64);
+                remaining = remaining.saturating_sub(to_read as u64);
+            }
         }
     }
 
@@ -3720,6 +3856,55 @@ mod tests {
         );
         assert_eq!(status, 0);
         assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_triple_indirect_blocks() {
+        let payload = build_ext_triple_indirect_payload();
+        let image = build_test_ext4_image_with_triple_indirect_recoverable_inode(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-triple-indirect-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-triple-indirect.img");
+        let output_path = temp_dir.join("ext-triple-indirect-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 1);
         assert_eq!(bytes_written, payload.len() as u64);
         assert_eq!(fs::read(&output_path).unwrap(), payload);
 
@@ -5580,6 +5765,116 @@ mod tests {
         let mut payload = vec![0u8; block_size * block_count];
         for block_index in 0..block_count {
             let fill = (block_index as u8).wrapping_mul(13).wrapping_add(7);
+            let start = block_index * block_size;
+            let end = start + block_size;
+            payload[start..end].fill(fill);
+        }
+        payload
+    }
+
+    fn build_test_ext4_image_with_triple_indirect_recoverable_inode(payload: &[u8]) -> Vec<u8> {
+        let (mut image, inode_offset) =
+            initialize_ext4_recovery_image_with_block_capacity(payload.len() as u32, 512);
+
+        let block_size = 4096usize;
+        let direct_block_count = EXT_DIRECT_BLOCK_POINTERS;
+
+        for direct_index in 0..direct_block_count {
+            let block = 30u32 + direct_index as u32;
+            write_u32(
+                &mut image,
+                inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET + (direct_index * 4),
+                block,
+            );
+
+            let payload_offset = direct_index * block_size;
+            let payload_end = payload_offset + block_size;
+            let data_offset = block as usize * block_size;
+            image[data_offset..data_offset + block_size]
+                .copy_from_slice(&payload[payload_offset..payload_end]);
+        }
+
+        let single_pointer_block = 50u32;
+        let single_data_block = 100u32;
+        write_u32(
+            &mut image,
+            inode_offset
+                + EXT_INODE_BLOCK_POINTERS_OFFSET
+                + (EXT_SINGLE_INDIRECT_POINTER_INDEX * 4),
+            single_pointer_block,
+        );
+        let single_pointer_block_offset = single_pointer_block as usize * block_size;
+        write_u32(&mut image, single_pointer_block_offset, single_data_block);
+        let single_payload_offset = direct_block_count * block_size;
+        let single_payload_end = single_payload_offset + block_size;
+        let single_data_offset = single_data_block as usize * block_size;
+        image[single_data_offset..single_data_offset + block_size]
+            .copy_from_slice(&payload[single_payload_offset..single_payload_end]);
+
+        let double_pointer_block = 60u32;
+        let double_second_level_block = 61u32;
+        let double_data_block = 120u32;
+        write_u32(
+            &mut image,
+            inode_offset
+                + EXT_INODE_BLOCK_POINTERS_OFFSET
+                + (EXT_DOUBLE_INDIRECT_POINTER_INDEX * 4),
+            double_pointer_block,
+        );
+        let double_pointer_block_offset = double_pointer_block as usize * block_size;
+        write_u32(
+            &mut image,
+            double_pointer_block_offset,
+            double_second_level_block,
+        );
+        let double_second_level_offset = double_second_level_block as usize * block_size;
+        write_u32(&mut image, double_second_level_offset, double_data_block);
+        let double_payload_offset = (direct_block_count + 1) * block_size;
+        let double_payload_end = double_payload_offset + block_size;
+        let double_data_offset = double_data_block as usize * block_size;
+        image[double_data_offset..double_data_offset + block_size]
+            .copy_from_slice(&payload[double_payload_offset..double_payload_end]);
+
+        let triple_pointer_block = 70u32;
+        let triple_second_level_block = 71u32;
+        let triple_third_level_block = 72u32;
+        let triple_data_block = 140u32;
+        write_u32(
+            &mut image,
+            inode_offset
+                + EXT_INODE_BLOCK_POINTERS_OFFSET
+                + (EXT_TRIPLE_INDIRECT_POINTER_INDEX * 4),
+            triple_pointer_block,
+        );
+        let triple_pointer_block_offset = triple_pointer_block as usize * block_size;
+        write_u32(
+            &mut image,
+            triple_pointer_block_offset,
+            triple_second_level_block,
+        );
+        let triple_second_level_offset = triple_second_level_block as usize * block_size;
+        write_u32(
+            &mut image,
+            triple_second_level_offset,
+            triple_third_level_block,
+        );
+        let triple_third_level_offset = triple_third_level_block as usize * block_size;
+        write_u32(&mut image, triple_third_level_offset, triple_data_block);
+        let triple_payload_offset = (direct_block_count + 2) * block_size;
+        let triple_payload_end = triple_payload_offset + block_size;
+        let triple_data_offset = triple_data_block as usize * block_size;
+        image[triple_data_offset..triple_data_offset + block_size]
+            .copy_from_slice(&payload[triple_payload_offset..triple_payload_end]);
+
+        image
+    }
+
+    fn build_ext_triple_indirect_payload() -> Vec<u8> {
+        let block_size = 4096usize;
+        let block_count = EXT_DIRECT_BLOCK_POINTERS + 3;
+        let mut payload = vec![0u8; block_size * block_count];
+        for block_index in 0..block_count {
+            let fill = (block_index as u8).wrapping_mul(19).wrapping_add(11);
             let start = block_index * block_size;
             let end = start + block_size;
             payload[start..end].fill(fill);

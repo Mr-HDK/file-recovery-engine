@@ -71,7 +71,7 @@
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 - Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction.
 - Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions.
-- Rust FFI integration coverage for ext direct/single/double-indirect recovery success and partial/unsupported fallback status handling.
+- Rust FFI integration coverage for ext direct/single/double/triple-indirect recovery success and partial/unsupported fallback status handling.
 
 ## Benchmarks
 
