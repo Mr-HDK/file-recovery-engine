@@ -43,10 +43,11 @@
 
 5. ext recovery baseline:
 - `fr_recover_ext_candidate_to_file` now supports regular-file recovery from direct, single-indirect, double-indirect, and triple-indirect block pointers.
+- extents-flagged inodes now route through extent-tree traversal for initialized extent runs.
 - recovery marks partial when unresolved pointers/reads prevent full export.
 
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
-- ext recovery/export coverage for extents and directory/symlink semantics.
+- richer sparse/uninitialized extent semantics and directory/symlink export.
 - fixture corpus expansion beyond fixed scaffolding.

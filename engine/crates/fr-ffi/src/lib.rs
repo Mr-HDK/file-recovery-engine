@@ -196,11 +196,17 @@ const EXT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const EXT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
 const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
+const EXT_INODE_FLAGS_OFFSET: usize = 32;
 const EXT_INODE_BLOCK_POINTERS_OFFSET: usize = 40;
 const EXT_DIRECT_BLOCK_POINTERS: usize = 12;
 const EXT_SINGLE_INDIRECT_POINTER_INDEX: usize = 12;
 const EXT_DOUBLE_INDIRECT_POINTER_INDEX: usize = 13;
 const EXT_TRIPLE_INDIRECT_POINTER_INDEX: usize = 14;
+const EXT_INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
+const EXTENT_HEADER_MAGIC: u16 = 0xF30A;
+const EXTENT_HEADER_SIZE: usize = 12;
+const EXTENT_RECORD_SIZE: usize = 12;
+const EXTENT_UNINITIALIZED_LENGTH_FLAG: u16 = 0x8000;
 const FAT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
@@ -2061,6 +2067,13 @@ fn read_fat_next_cluster_from_session(
     Ok(u32::from_le_bytes(entry) & 0x0FFF_FFFF)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExtentRun {
+    logical_block: u64,
+    physical_block: u64,
+    block_count: u64,
+}
+
 fn recover_ext_candidate_data(
     session: &mut fr_winio::ReadSession,
     superblock: &fr_ext::ExtSuperblock,
@@ -2079,6 +2092,17 @@ fn recover_ext_candidate_data(
 
     if inode.len() < EXT_INODE_BLOCK_POINTERS_OFFSET + (15 * 4) {
         return Err(91);
+    }
+
+    let inode_flags = read_u32_le_at(inode, EXT_INODE_FLAGS_OFFSET);
+    if (inode_flags & EXT_INODE_FLAG_EXTENTS) != 0 {
+        return recover_ext_extent_tree_data(
+            session,
+            block_size,
+            &inode[EXT_INODE_BLOCK_POINTERS_OFFSET..EXT_INODE_BLOCK_POINTERS_OFFSET + (15 * 4)],
+            file_size,
+            output_file,
+        );
     }
 
     let mut remaining = file_size;
@@ -2485,6 +2509,199 @@ fn recover_ext_triple_indirect_data(
     }
 
     Ok((written, partial))
+}
+
+fn recover_ext_extent_tree_data(
+    session: &mut fr_winio::ReadSession,
+    block_size: usize,
+    root_node: &[u8],
+    file_size: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if file_size == 0 {
+        return Ok((0, false));
+    }
+
+    let mut runs = Vec::new();
+    let mut partial = false;
+    collect_ext_extent_runs(
+        session,
+        block_size,
+        root_node,
+        None,
+        &mut runs,
+        &mut partial,
+    )?;
+
+    if runs.is_empty() {
+        return Ok((0, true));
+    }
+
+    runs.sort_by_key(|run| run.logical_block);
+
+    let mut remaining = file_size;
+    let mut written = 0u64;
+    let mut expected_logical_block = 0u64;
+    let mut data_block = vec![0u8; block_size];
+
+    'runs: for run in runs {
+        if remaining == 0 {
+            break;
+        }
+
+        if run.logical_block != expected_logical_block {
+            partial = true;
+            break;
+        }
+
+        for block_index in 0..run.block_count {
+            if remaining == 0 {
+                break 'runs;
+            }
+
+            let Some(physical_block) = run.physical_block.checked_add(block_index) else {
+                partial = true;
+                break 'runs;
+            };
+            let Some(block_offset) = physical_block.checked_mul(block_size as u64) else {
+                partial = true;
+                break 'runs;
+            };
+
+            let to_read = remaining.min(block_size as u64) as usize;
+            match read_from_session(session, block_offset, &mut data_block[..to_read]) {
+                Ok(true) => {}
+                Ok(false) => {
+                    partial = true;
+                    break 'runs;
+                }
+                Err(err) => return Err(map_winio_error(err)),
+            }
+
+            if output_file.write_all(&data_block[..to_read]).is_err() {
+                return Err(44);
+            }
+
+            written = written.saturating_add(to_read as u64);
+            remaining = remaining.saturating_sub(to_read as u64);
+            expected_logical_block = expected_logical_block.saturating_add(1);
+        }
+    }
+
+    if remaining > 0 {
+        partial = true;
+    }
+
+    Ok((written, partial))
+}
+
+fn collect_ext_extent_runs(
+    session: &mut fr_winio::ReadSession,
+    block_size: usize,
+    node_bytes: &[u8],
+    expected_depth: Option<u16>,
+    runs: &mut Vec<ExtentRun>,
+    partial: &mut bool,
+) -> Result<(), i32> {
+    let Some((entry_count, depth)) = parse_ext_extent_header(node_bytes) else {
+        return Err(91);
+    };
+
+    if let Some(expected_depth) = expected_depth {
+        if depth != expected_depth {
+            return Err(91);
+        }
+    }
+
+    for entry_index in 0..entry_count as usize {
+        let entry_offset = EXTENT_HEADER_SIZE + (entry_index * EXTENT_RECORD_SIZE);
+        if entry_offset + EXTENT_RECORD_SIZE > node_bytes.len() {
+            return Err(91);
+        }
+
+        if depth == 0 {
+            let logical_block = read_u32_le_at(node_bytes, entry_offset) as u64;
+            let raw_length = read_u16_le_at(node_bytes, entry_offset + 4);
+            let block_count = (raw_length & !EXTENT_UNINITIALIZED_LENGTH_FLAG) as u64;
+            if block_count == 0 {
+                continue;
+            }
+            if (raw_length & EXTENT_UNINITIALIZED_LENGTH_FLAG) != 0 {
+                *partial = true;
+                continue;
+            }
+
+            let start_hi = read_u16_le_at(node_bytes, entry_offset + 6) as u64;
+            let start_lo = read_u32_le_at(node_bytes, entry_offset + 8) as u64;
+            let physical_block = (start_hi << 32) | start_lo;
+            if physical_block == 0 {
+                *partial = true;
+                continue;
+            }
+
+            runs.push(ExtentRun {
+                logical_block,
+                physical_block,
+                block_count,
+            });
+        } else {
+            let leaf_lo = read_u32_le_at(node_bytes, entry_offset + 4) as u64;
+            let leaf_hi = read_u16_le_at(node_bytes, entry_offset + 8) as u64;
+            let child_block = (leaf_hi << 32) | leaf_lo;
+            if child_block == 0 {
+                *partial = true;
+                continue;
+            }
+
+            let Some(child_offset) = child_block.checked_mul(block_size as u64) else {
+                *partial = true;
+                continue;
+            };
+
+            let mut child_node = vec![0u8; block_size];
+            match read_from_session(session, child_offset, &mut child_node) {
+                Ok(true) => {}
+                Ok(false) => {
+                    *partial = true;
+                    continue;
+                }
+                Err(err) => return Err(map_winio_error(err)),
+            }
+
+            collect_ext_extent_runs(
+                session,
+                block_size,
+                &child_node,
+                Some(depth.saturating_sub(1)),
+                runs,
+                partial,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_ext_extent_header(node_bytes: &[u8]) -> Option<(u16, u16)> {
+    if node_bytes.len() < EXTENT_HEADER_SIZE {
+        return None;
+    }
+
+    if read_u16_le_at(node_bytes, 0) != EXTENT_HEADER_MAGIC {
+        return None;
+    }
+
+    let entry_count = read_u16_le_at(node_bytes, 2);
+    let max_entries = read_u16_le_at(node_bytes, 4);
+    if entry_count > max_entries {
+        return None;
+    }
+    let depth = read_u16_le_at(node_bytes, 6);
+    if depth > 5 {
+        return None;
+    }
+
+    Some((entry_count, depth))
 }
 
 fn locate_ext_inode_offset(
@@ -3905,6 +4122,55 @@ mod tests {
         );
         assert_eq!(status, 0);
         assert_eq!(partial, 1);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_extent_leaf_inode() {
+        let payload = build_ext_extent_leaf_payload();
+        let image = build_test_ext4_image_with_extent_leaf_recoverable_inode(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-extent-leaf-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-extent-leaf.img");
+        let output_path = temp_dir.join("ext-extent-leaf-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
         assert_eq!(bytes_written, payload.len() as u64);
         assert_eq!(fs::read(&output_path).unwrap(), payload);
 
@@ -5875,6 +6141,54 @@ mod tests {
         let mut payload = vec![0u8; block_size * block_count];
         for block_index in 0..block_count {
             let fill = (block_index as u8).wrapping_mul(19).wrapping_add(11);
+            let start = block_index * block_size;
+            let end = start + block_size;
+            payload[start..end].fill(fill);
+        }
+        payload
+    }
+
+    fn build_test_ext4_image_with_extent_leaf_recoverable_inode(payload: &[u8]) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(payload.len() as u32);
+
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_FLAGS_OFFSET,
+            EXT_INODE_FLAG_EXTENTS,
+        );
+
+        let extent_header_offset = inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET;
+        write_u16(&mut image, extent_header_offset, EXTENT_HEADER_MAGIC);
+        write_u16(&mut image, extent_header_offset + 2, 1);
+        write_u16(&mut image, extent_header_offset + 4, 4);
+        write_u16(&mut image, extent_header_offset + 6, 0);
+        write_u32(&mut image, extent_header_offset + 8, 0);
+
+        let data_start_block = 30u32;
+        let block_count = payload.len() / 4096;
+        let extent_record_offset = extent_header_offset + EXTENT_HEADER_SIZE;
+        write_u32(&mut image, extent_record_offset, 0);
+        write_u16(&mut image, extent_record_offset + 4, block_count as u16);
+        write_u16(&mut image, extent_record_offset + 6, 0);
+        write_u32(&mut image, extent_record_offset + 8, data_start_block);
+
+        for block_index in 0..block_count {
+            let payload_offset = block_index * 4096;
+            let payload_end = payload_offset + 4096;
+            let data_offset = (data_start_block as usize + block_index) * 4096usize;
+            image[data_offset..data_offset + 4096]
+                .copy_from_slice(&payload[payload_offset..payload_end]);
+        }
+
+        image
+    }
+
+    fn build_ext_extent_leaf_payload() -> Vec<u8> {
+        let block_size = 4096usize;
+        let block_count = 2usize;
+        let mut payload = vec![0u8; block_size * block_count];
+        for block_index in 0..block_count {
+            let fill = (block_index as u8).wrapping_mul(23).wrapping_add(5);
             let start = block_index * block_size;
             let end = start + block_size;
             payload[start..end].fill(fill);
