@@ -21,6 +21,7 @@
 - `ExtSuperblock` parser boundary.
 - ext deleted directory-entry scanner (`inode=0` metadata candidates).
 - ext deleted-inode scanner from first group inode table (`links=0` + `dtime>0`).
+- ext inode-table-backed reconstruction that links deleted directory-entry names to deleted inode metadata when inode references are recoverable.
 - ext inode-candidate hardening: inode-type gating, deletion-time sanity bounds, and 64-bit inode size parsing.
 - parser/scanner unit tests.
 
@@ -52,5 +53,4 @@
 
 ## Deferred in Phase 9
 
-- ext inode-table-backed deleted metadata reconstruction.
 - fixture corpus expansion beyond fixed scaffolding.

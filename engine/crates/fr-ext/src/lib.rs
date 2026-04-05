@@ -59,6 +59,14 @@ pub struct ExtDeletedCandidate {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeletedInodeMetadata {
+    inode_number: u64,
+    inode_offset_bytes: u64,
+    size_bytes: u64,
+    file_type: ExtInodeFileType,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ScanError {
     #[error(transparent)]
@@ -123,8 +131,23 @@ pub fn scan_deleted_candidates_with_superblock(
 
     let mut entries = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
-    scan_deleted_directory_entry_slack(image, max_entries, &mut entries, &mut seen_keys);
-    scan_deleted_inodes(image, superblock, max_entries, &mut entries, &mut seen_keys);
+    let deleted_inodes = collect_deleted_inode_metadata(image, superblock);
+    let mut matched_inodes = std::collections::HashSet::new();
+    scan_deleted_directory_entry_slack(
+        image,
+        max_entries,
+        &deleted_inodes,
+        &mut matched_inodes,
+        &mut entries,
+        &mut seen_keys,
+    );
+    append_deleted_inode_fallback_candidates(
+        max_entries,
+        &deleted_inodes,
+        &matched_inodes,
+        &mut entries,
+        &mut seen_keys,
+    );
 
     entries
 }
@@ -132,6 +155,8 @@ pub fn scan_deleted_candidates_with_superblock(
 fn scan_deleted_directory_entry_slack(
     image: &[u8],
     max_entries: usize,
+    deleted_inodes: &[DeletedInodeMetadata],
+    matched_inodes: &mut std::collections::HashSet<u64>,
     out: &mut Vec<ExtDeletedCandidate>,
     seen_keys: &mut std::collections::HashSet<String>,
 ) {
@@ -142,32 +167,52 @@ fn scan_deleted_directory_entry_slack(
         let name_len = image[offset + 6] as usize;
         let file_type = image[offset + 7];
 
-        if inode == 0
-            && rec_len >= 8
-            && rec_len <= 4096
-            && rec_len % 4 == 0
-            && name_len > 0
-            && file_type <= 7
-        {
+        if rec_len >= 8 && rec_len <= 4096 && rec_len % 4 == 0 && name_len > 0 && file_type <= 7 {
             let end = offset.saturating_add(rec_len);
             let name_end = offset.saturating_add(8 + name_len);
             if end <= image.len() && name_end <= end {
                 let name_bytes = &image[offset + 8..name_end];
                 if let Some(name) = decode_ext_name(name_bytes) {
-                    let key = format!("dir:{}:{}", offset, name.to_ascii_lowercase());
-                    push_candidate(
-                        out,
-                        seen_keys,
-                        key,
-                        ExtDeletedCandidate {
-                            inode_number: inode,
-                            entry_offset_bytes: offset as u64,
-                            size_bytes: 0,
-                            path: format!(r".\{}", name),
-                            name,
-                            is_directory: file_type == 2,
-                        },
-                    );
+                    if inode > 0 {
+                        if let Some(metadata) = deleted_inodes
+                            .iter()
+                            .find(|candidate| candidate.inode_number == inode)
+                        {
+                            if ext_dir_entry_matches_inode_type(file_type, metadata.file_type) {
+                                matched_inodes.insert(inode);
+                                let key = format!("inode-linked:{}", inode);
+                                push_candidate(
+                                    out,
+                                    seen_keys,
+                                    key,
+                                    ExtDeletedCandidate {
+                                        inode_number: inode,
+                                        entry_offset_bytes: offset as u64,
+                                        size_bytes: metadata.size_bytes,
+                                        path: format!(r".\{}", name),
+                                        name,
+                                        is_directory: metadata.file_type
+                                            == ExtInodeFileType::Directory,
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        let key = format!("dir:{}:{}", offset, name.to_ascii_lowercase());
+                        push_candidate(
+                            out,
+                            seen_keys,
+                            key,
+                            ExtDeletedCandidate {
+                                inode_number: inode,
+                                entry_offset_bytes: offset as u64,
+                                size_bytes: 0,
+                                path: format!(r".\{}", name),
+                                name,
+                                is_directory: file_type == 2,
+                            },
+                        );
+                    }
                 }
 
                 offset = end;
@@ -179,43 +224,67 @@ fn scan_deleted_directory_entry_slack(
     }
 }
 
-fn scan_deleted_inodes(
-    image: &[u8],
-    superblock: &ExtSuperblock,
+fn append_deleted_inode_fallback_candidates(
     max_entries: usize,
+    deleted_inodes: &[DeletedInodeMetadata],
+    matched_inodes: &std::collections::HashSet<u64>,
     out: &mut Vec<ExtDeletedCandidate>,
     seen_keys: &mut std::collections::HashSet<String>,
 ) {
-    if out.len() >= max_entries {
-        return;
-    }
+    for metadata in deleted_inodes {
+        if out.len() >= max_entries {
+            break;
+        }
 
+        if matched_inodes.contains(&metadata.inode_number) {
+            continue;
+        }
+
+        let name = format!("inode-{}", metadata.inode_number);
+        let key = format!("inode:{}", metadata.inode_number);
+        push_candidate(
+            out,
+            seen_keys,
+            key,
+            ExtDeletedCandidate {
+                inode_number: metadata.inode_number,
+                entry_offset_bytes: metadata.inode_offset_bytes,
+                size_bytes: metadata.size_bytes,
+                name: name.clone(),
+                path: format!(r".\{}", name),
+                is_directory: metadata.file_type == ExtInodeFileType::Directory,
+            },
+        );
+    }
+}
+
+fn collect_deleted_inode_metadata(
+    image: &[u8],
+    superblock: &ExtSuperblock,
+) -> Vec<DeletedInodeMetadata> {
+    let mut metadata = Vec::new();
     let block_size = superblock.block_size_bytes as usize;
     if block_size < 1024 {
-        return;
+        return metadata;
     }
 
     let inode_size = superblock.inode_size_bytes as usize;
     if inode_size < 128 {
-        return;
+        return metadata;
     }
 
     let group_desc_base = first_group_descriptor_offset(superblock);
     let group_count = compute_group_count(superblock);
     if group_count == 0 {
-        return;
+        return metadata;
     }
 
     let inodes_per_group = superblock.inodes_per_group as usize;
     if inodes_per_group == 0 {
-        return;
+        return metadata;
     }
 
     for group_index in 0..group_count {
-        if out.len() >= max_entries {
-            break;
-        }
-
         let Some(gd_offset) = group_desc_base.checked_add(group_index.saturating_mul(32)) else {
             break;
         };
@@ -242,10 +311,6 @@ fn scan_deleted_inodes(
         }
 
         for index in 0..inodes_in_this_group {
-            if out.len() >= max_entries {
-                break;
-            }
-
             let Some(rel_offset) = index.checked_mul(inode_size) else {
                 break;
             };
@@ -275,7 +340,6 @@ fn scan_deleted_inodes(
             let Some(file_type) = decode_inode_file_type(mode) else {
                 continue;
             };
-            let is_directory = file_type == ExtInodeFileType::Directory;
 
             let size_lo = read_u32_le(image, inode_offset + 4) as u64;
             let size_hi = if inode_size >= EXT_INODE_SIZE_HIGH_OFFSET + 4 {
@@ -284,22 +348,25 @@ fn scan_deleted_inodes(
                 0
             };
             let size_bytes = (size_hi << 32) | size_lo;
-            let name = format!("inode-{}", inode_number);
-            let key = format!("inode:{}", inode_number);
-            push_candidate(
-                out,
-                seen_keys,
-                key,
-                ExtDeletedCandidate {
-                    inode_number,
-                    entry_offset_bytes: inode_offset as u64,
-                    size_bytes,
-                    name: name.clone(),
-                    path: format!(r".\{}", name),
-                    is_directory,
-                },
-            );
+            metadata.push(DeletedInodeMetadata {
+                inode_number,
+                inode_offset_bytes: inode_offset as u64,
+                size_bytes,
+                file_type,
+            });
         }
+    }
+
+    metadata
+}
+
+fn ext_dir_entry_matches_inode_type(dir_file_type: u8, inode_file_type: ExtInodeFileType) -> bool {
+    match dir_file_type {
+        0 => true,
+        1 => inode_file_type == ExtInodeFileType::Regular,
+        2 => inode_file_type == ExtInodeFileType::Directory,
+        7 => inode_file_type == ExtInodeFileType::Symlink,
+        _ => false,
     }
 }
 
@@ -450,6 +517,24 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_offset_bytes, offset as u64);
         assert_eq!(entries[0].name, "deleted.log");
+    }
+
+    #[test]
+    fn links_deleted_directory_entry_to_deleted_inode_metadata() {
+        let mut image = build_test_ext4_image();
+        set_deleted_inode(&mut image, 15, 0x81A4, 8192, 1_704_067_200);
+
+        let offset = 8192usize;
+        let entry = build_directory_entry(16, "invoice.pdf", 1);
+        image[offset..offset + entry.len()].copy_from_slice(&entry);
+
+        let (_, entries) = scan_deleted_candidates(&image, 16).expect("scan ext");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].inode_number, 16);
+        assert_eq!(entries[0].entry_offset_bytes, offset as u64);
+        assert_eq!(entries[0].name, "invoice.pdf");
+        assert_eq!(entries[0].path, r".\invoice.pdf");
+        assert_eq!(entries[0].size_bytes, 8192);
     }
 
     #[test]
