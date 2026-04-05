@@ -3,9 +3,10 @@
 ## Phase status
 
 - Phase: `9`
-- Status: `IN_PROGRESS`
+- Status: `DONE`
 - Owner: `Engineering`
 - Start date: `2026-04-04`
+- Completion date: `2026-04-05`
 
 ## Scope
 
