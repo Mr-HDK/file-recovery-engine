@@ -79,4 +79,5 @@
 - `scripts/new-test-fixture.ps1` generates filesystem fixture trees.
 - `scripts/benchmark-ntfs-corpus.ps1` runs the fixed NTFS corpus benchmark defined in `testdata/raw-images/ntfs-corpus/manifest.json`.
 - `scripts/benchmark-ext-corpus.ps1` runs the fixed ext corpus benchmark defined in `testdata/raw-images/ext-corpus/manifest.json`.
+- `scripts/benchmark-ext-synthetic-corpus.ps1` regenerates and benchmarks the committed synthetic ext mini-corpus defined in `testdata/raw-images/ext-corpus/manifest.synthetic.json`.
 - Benchmark outputs are written to `tools/benchmark-results/` as JSON + Markdown summaries.

@@ -6,6 +6,7 @@ This directory defines the fixed ext corpus used by the ext benchmark harness.
 
 - `manifest.json` is the source of truth for required benchmark cases.
 - All file names are fixed and should not be changed without updating the manifest.
+- `manifest.synthetic.json` defines a committed deterministic mini-corpus for CI/local smoke runs.
 
 ## Required images
 
@@ -26,3 +27,7 @@ This directory defines the fixed ext corpus used by the ext benchmark harness.
 
 - Corpus files are intentionally not committed due size.
 - Keep image generation settings stable to keep benchmark comparisons meaningful.
+- Synthetic mini-corpus images are generated/updated with:
+  - `scripts/generate-ext-synthetic-corpus.ps1`
+- Synthetic benchmark runner:
+  - `scripts/benchmark-ext-synthetic-corpus.ps1`

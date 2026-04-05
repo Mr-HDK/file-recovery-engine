@@ -26,6 +26,7 @@ Commercial-grade local desktop recovery foundation targeting Windows and NTFS fi
 ./scripts/test.ps1
 ./scripts/benchmark-ntfs-corpus.ps1 -AllowMissing
 ./scripts/benchmark-ext-corpus.ps1 -AllowMissing
+./scripts/benchmark-ext-synthetic-corpus.ps1
 ```
 
 Optional elevated host-integration validation (provisions a temporary NTFS VHD and validates compressed/encrypted deleted-file recovery paths):

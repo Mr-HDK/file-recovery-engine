@@ -34,8 +34,11 @@
 
 3. Fixture/benchmark scaffolding:
 - fixed ext corpus manifest and README under `testdata/raw-images/ext-corpus/`.
+- committed synthetic ext mini-corpus manifest/images under `testdata/raw-images/ext-corpus/manifest.synthetic.json` + `synthetic/*.img`.
 - `ExtCorpusBench` benchmark tool for ext probe/candidate throughput baselines.
 - `scripts/benchmark-ext-corpus.ps1` benchmark runner wrapper.
+- `scripts/generate-ext-synthetic-corpus.ps1` deterministic synthetic corpus generator.
+- `scripts/benchmark-ext-synthetic-corpus.ps1` synthetic manifest benchmark wrapper.
 
 4. Host/image validation scaffolding:
 - `scripts/run-host-ext-image-validation.ps1` to archive ext corpus validation artifacts per run.
@@ -53,4 +56,4 @@
 
 ## Deferred in Phase 9
 
-- fixture corpus expansion beyond fixed scaffolding.
+- real-world ext fixture corpus expansion beyond the committed synthetic mini-corpus.

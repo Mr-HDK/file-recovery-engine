@@ -29,3 +29,5 @@ Thumbs.db
 /tools/benchmark-results/
 /testdata/raw-images/**/*.img
 /testdata/raw-images/**/*.dd
+!/testdata/raw-images/ext-corpus/synthetic/
+!/testdata/raw-images/ext-corpus/synthetic/*.img

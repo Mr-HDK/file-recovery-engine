@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Deterministic synthetic ext image corpus committed in-repo for CI/local smoke benchmarking.",
+  "cases": [
+    {
+      "id": "ext4-recent-delete-synth",
+      "relativePath": "synthetic/ext4-recent-delete-synth.img",
+      "maxEntries": 2048,
+      "iterations": 3,
+      "candidateCapacity": 1024
+    },
+    {
+      "id": "ext4-deleted-tree-synth",
+      "relativePath": "synthetic/ext4-deleted-tree-synth.img",
+      "maxEntries": 4096,
+      "iterations": 3,
+      "candidateCapacity": 2048
+    },
+    {
+      "id": "ext4-inode-fallback-synth",
+      "relativePath": "synthetic/ext4-inode-fallback-synth.img",
+      "maxEntries": 2048,
+      "iterations": 3,
+      "candidateCapacity": 1024
+    },
+    {
+      "id": "ext4-partial-overwrite-synth",
+      "relativePath": "synthetic/ext4-partial-overwrite-synth.img",
+      "maxEntries": 2048,
+      "iterations": 3,
+      "candidateCapacity": 1024
+    },
+    {
+      "id": "ext4-symlink-synth",
+      "relativePath": "synthetic/ext4-symlink-synth.img",
+      "maxEntries": 2048,
+      "iterations": 3,
+      "candidateCapacity": 1024
+    },
+    {
+      "id": "ext4-slack-only-synth",
+      "relativePath": "synthetic/ext4-slack-only-synth.img",
+      "maxEntries": 2048,
+      "iterations": 3,
+      "candidateCapacity": 1024
+    }
+  ]
+}
