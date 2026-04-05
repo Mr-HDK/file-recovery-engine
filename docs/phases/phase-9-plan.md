@@ -46,10 +46,11 @@
 - extents-flagged inodes now route through extent-tree traversal for initialized extent runs.
 - sparse gaps and uninitialized extent runs now zero-fill during export.
 - inline (fast) symlink inodes now export the stored target bytes.
+- non-inline symlink inodes now export through data-block recovery paths.
 - recovery marks partial when unresolved pointers/reads prevent full export.
 
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
-- directory export semantics and non-inline symlink edge cases.
+- directory export semantics.
 - fixture corpus expansion beyond fixed scaffolding.

@@ -4361,6 +4361,56 @@ mod tests {
     }
 
     #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_non_inline_symlink_target() {
+        let symlink_target =
+            "this/is/a/very/long/symlink/target/path/that/exceeds/the/inline/inode/storage/window";
+        let image = build_test_ext4_image_with_non_inline_symlink_inode(symlink_target);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-non-inline-symlink-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-non-inline-symlink.img");
+        let output_path = temp_dir.join("ext-non-inline-symlink-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, symlink_target.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), symlink_target.as_bytes());
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_get_refs_deleted_candidates_returns_success_with_no_candidates() {
         let image = build_test_refs_image();
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6431,6 +6481,24 @@ mod tests {
         write_u16(&mut image, inode_offset + 0, 0xA1FF);
         let inline_offset = inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET;
         image[inline_offset..inline_offset + target_bytes.len()].copy_from_slice(target_bytes);
+
+        image
+    }
+
+    fn build_test_ext4_image_with_non_inline_symlink_inode(target: &str) -> Vec<u8> {
+        let target_bytes = target.as_bytes();
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(target_bytes.len() as u32);
+
+        write_u16(&mut image, inode_offset + 0, 0xA1FF);
+        let data_block = 30u32;
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET,
+            data_block,
+        );
+
+        let data_offset = data_block as usize * 4096usize;
+        image[data_offset..data_offset + target_bytes.len()].copy_from_slice(target_bytes);
 
         image
     }
