@@ -67,6 +67,7 @@
 - `scripts/run-host-vss-validation.ps1` plus `HostVssSnapshotRecoveryTests` for elevated host VSS enumeration and snapshot-source quick-scan/recovery validation.
 - `scripts/run-host-validation-profile.ps1` + `scripts/compare-host-validation-profiles.ps1` for repeatable multi-host profile execution and drift review across real machine/storage layouts.
 - `scripts/run-host-ext-image-validation.ps1` for host/image ext corpus validation artifacts, plus profile-matrix integration under `scripts/run-host-validation-profile.ps1`.
+- `scripts/run-host-ext-image-validation.ps1 -UseSyntheticCorpus` and `scripts/run-host-validation-profile.ps1 -UseSyntheticExtCorpus` for deterministic in-repo ext validation lanes when large external corpora are unavailable.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
 - Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction.

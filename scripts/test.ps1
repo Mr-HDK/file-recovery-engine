@@ -3,7 +3,8 @@ param(
   [switch]$IncludeHostVssIntegration,
   [switch]$IncludeExtImageValidation,
   [switch]$AllowNoSnapshots,
-  [switch]$AllowMissingExtImages
+  [switch]$AllowMissingExtImages,
+  [switch]$UseSyntheticExtCorpus
 )
 
 $ErrorActionPreference = 'Stop'
@@ -145,6 +146,9 @@ if ($IncludeExtImageValidation) {
     }
     if ($AllowMissingExtImages) {
       $extArgs.AllowMissingImages = $true
+    }
+    if ($UseSyntheticExtCorpus) {
+      $extArgs.UseSyntheticCorpus = $true
     }
 
     & "$PSScriptRoot\run-host-ext-image-validation.ps1" @extArgs

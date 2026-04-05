@@ -2,7 +2,8 @@ param(
   [switch]$NoBuild,
   [switch]$NoArchive,
   [string]$ArtifactRoot,
-  [string]$ManifestPath = ".\testdata\raw-images\ext-corpus\manifest.json",
+  [string]$ManifestPath = "",
+  [switch]$UseSyntheticCorpus,
   [switch]$AllowMissingImages,
   [int]$Iterations = 0,
   [uint32]$MaxEntries = 0,
@@ -31,7 +32,20 @@ try {
   Push-Location "$PSScriptRoot\.."
   try {
     $repoRoot = (Get-Location).Path
-    $resolvedManifestPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ManifestPath))
+    if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+      $ManifestPath = if ($UseSyntheticCorpus) {
+        ".\testdata\raw-images\ext-corpus\manifest.synthetic.json"
+      } else {
+        ".\testdata\raw-images\ext-corpus\manifest.json"
+      }
+    }
+
+    $manifestInputPath = if ([System.IO.Path]::IsPathRooted($ManifestPath)) {
+      $ManifestPath
+    } else {
+      Join-Path $repoRoot $ManifestPath
+    }
+    $resolvedManifestPath = [System.IO.Path]::GetFullPath($manifestInputPath)
     if (-not (Test-Path $resolvedManifestPath)) {
       throw "ext corpus manifest not found: $resolvedManifestPath"
     }
@@ -95,6 +109,7 @@ try {
         benchmark_json_path = if (Test-Path $benchmarkJsonPath) { [System.IO.Path]::GetFullPath($benchmarkJsonPath) } else { $null }
         benchmark_markdown_path = if (Test-Path $benchmarkMarkdownPath) { [System.IO.Path]::GetFullPath($benchmarkMarkdownPath) } else { $null }
         manifest_path = if (-not [string]::IsNullOrWhiteSpace($resolvedManifestPath)) { $resolvedManifestPath } else { $null }
+        use_synthetic_corpus = [bool]$UseSyntheticCorpus
         allow_missing_images = [bool]$AllowMissingImages
         no_warmup = [bool]$NoWarmup
         iterations = if ($Iterations -gt 0) { $Iterations } else { $null }

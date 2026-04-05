@@ -44,6 +44,7 @@
 - `scripts/run-host-ext-image-validation.ps1` to archive ext corpus validation artifacts per run.
 - `scripts/run-host-validation-profile.ps1` now orchestrates `ext` validation lane alongside `ntfs`/`vss`.
 - `scripts/compare-host-validation-profiles.ps1` now includes `ext` drift summaries per profile.
+- host ext validation/profile scripts now support synthetic-corpus mode (`-UseSyntheticCorpus` / `-UseSyntheticExtCorpus`) for deterministic in-repo runs.
 
 5. ext recovery baseline:
 - `fr_recover_ext_candidate_to_file` now supports regular-file recovery from direct, single-indirect, double-indirect, and triple-indirect block pointers.

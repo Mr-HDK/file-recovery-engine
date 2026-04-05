@@ -67,6 +67,10 @@ Optional ext image host validation (runs ext corpus probe/candidate benchmark an
 ./scripts/run-host-ext-image-validation.ps1 -AllowMissingImages
 # or:
 ./scripts/test.ps1 -IncludeExtImageValidation -AllowMissingExtImages
+
+# use committed synthetic mini-corpus instead of external large images:
+./scripts/run-host-ext-image-validation.ps1 -UseSyntheticCorpus
+./scripts/test.ps1 -IncludeExtImageValidation -UseSyntheticExtCorpus
 ```
 
 Profile-based host validation orchestration (run on multiple real host machines/layouts and persist profile manifests):
@@ -74,6 +78,7 @@ Profile-based host validation orchestration (run on multiple real host machines/
 ```powershell
 ./scripts/run-host-validation-profile.ps1 -ProfileName office-laptop -AllowMissingExtImages
 ./scripts/run-host-validation-profile.ps1 -ProfileName lab-desktop -AllowNoSnapshots -AllowMissingExtImages
+./scripts/run-host-validation-profile.ps1 -ProfileName ci-smoke -SkipNtfs -SkipVss -UseSyntheticExtCorpus
 ```
 
 Compare profile artifacts after collecting runs:

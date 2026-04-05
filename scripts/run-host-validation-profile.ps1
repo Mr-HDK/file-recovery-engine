@@ -8,7 +8,8 @@ param(
   [switch]$SkipVss,
   [switch]$SkipExt,
   [switch]$AllowNoSnapshots,
-  [switch]$AllowMissingExtImages
+  [switch]$AllowMissingExtImages,
+  [switch]$UseSyntheticExtCorpus
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,6 +124,9 @@ if (-not $SkipExt) {
   if ($AllowMissingExtImages) {
     $extArgs.AllowMissingImages = $true
   }
+  if ($UseSyntheticExtCorpus) {
+    $extArgs.UseSyntheticCorpus = $true
+  }
 
   Invoke-HostValidationScript `
     -ScriptPath (Join-Path $PSScriptRoot "run-host-ext-image-validation.ps1") `
@@ -161,6 +165,7 @@ $manifest = [ordered]@{
   ext = [ordered]@{
     enabled = -not $SkipExt
     allow_missing_images = [bool]$AllowMissingExtImages
+    use_synthetic_corpus = [bool]$UseSyntheticExtCorpus
     artifact_root = if ($NoArchive) { $null } else { [System.IO.Path]::GetFullPath($extRoot) }
     latest_run = if ($NoArchive) { $null } else { Get-LatestRunName -Root $extRoot }
   }
