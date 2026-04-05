@@ -147,6 +147,7 @@ public partial class MainWindow : Window
     private readonly IDeviceEnumerationService _deviceEnumerationService;
     private readonly SourceDestinationSafetyValidator _safetyValidator;
     private readonly IPrivilegeService _privilegeService;
+    private readonly IImageAcquisitionService _imageAcquisitionService;
     private readonly SqliteSessionStore _sessionStore;
     private readonly SessionLogWriter _sessionLogWriter;
     private readonly ReadPreviewScanner _previewScanner;
@@ -198,6 +199,7 @@ public partial class MainWindow : Window
         _deviceEnumerationService = new WindowsDeviceEnumerationService(topology);
         _safetyValidator = new SourceDestinationSafetyValidator(topology);
         _privilegeService = new WindowsPrivilegeService();
+        _imageAcquisitionService = new FileImageAcquisitionService();
         _sessionStore = new SqliteSessionStore();
         _sessionLogWriter = new SessionLogWriter();
         _previewScanner = new ReadPreviewScanner();
@@ -368,6 +370,22 @@ public partial class MainWindow : Window
         return installTimeUtc;
     }
 
+    private static string BuildImageAcquisitionDefaultName(SourceCandidate source)
+    {
+        var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        var imageBaseName = !string.IsNullOrWhiteSpace(source.SourcePath)
+            ? Path.GetFileNameWithoutExtension(source.SourcePath)
+            : "clone";
+        return source.Kind switch
+        {
+            RecoverySourceKind.PhysicalDisk => $"disk-{source.DiskIndex ?? 0}-{timestamp}.img",
+            RecoverySourceKind.Partition => $"partition-{source.DiskIndex ?? 0}-{timestamp}.img",
+            RecoverySourceKind.Volume => $"volume-{timestamp}.img",
+            RecoverySourceKind.ImageFile => $"{imageBaseName}-{timestamp}.img",
+            _ => $"acquired-{timestamp}.img",
+        };
+    }
+
     private void SourcesDataGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         _selectedSource = SourcesDataGrid.SelectedItem as SourceCandidate;
@@ -399,6 +417,96 @@ public partial class MainWindow : Window
         {
             StatusTextBlock.Text = "Image import failed";
             AppendSessionMessage($"Image import error: {ex.Message}");
+        }
+    }
+
+    private async void AcquireImageButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSource is null)
+        {
+            StatusTextBlock.Text = "Image acquisition blocked: source not selected";
+            AppendSessionMessage("Image acquisition blocked: source not selected.");
+            return;
+        }
+
+        var sourcePath = ResolveProbePath(_selectedSource);
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            StatusTextBlock.Text = "Image acquisition blocked: source path unavailable";
+            AppendSessionMessage("Image acquisition blocked: selected source path is unavailable.");
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "Raw Image (*.img)|*.img|DD Image (*.dd)|*.dd|Raw Dump (*.raw)|*.raw|All Files (*.*)|*.*",
+            FileName = BuildImageAcquisitionDefaultName(_selectedSource),
+            OverwritePrompt = true,
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var destinationPath = dialog.FileName;
+        if (string.Equals(sourcePath, destinationPath, StringComparison.OrdinalIgnoreCase))
+        {
+            StatusTextBlock.Text = "Image acquisition blocked: destination matches source";
+            AppendSessionMessage("Image acquisition blocked: destination image path must be different from source.");
+            return;
+        }
+
+        var operationScope = StartNewOperationScope();
+        var operationToken = operationScope.Token;
+        var progressReporter = new Progress<ImageAcquisitionProgress>(state =>
+        {
+            OperationProgressBar.Value = state.PercentComplete;
+            var throughputMiB = state.ThroughputBytesPerSecond / (1024.0 * 1024.0);
+            ThroughputStatusTextBlock.Text = $"Throughput: {throughputMiB:0.00} MiB/s";
+            StatusTextBlock.Text =
+                $"Imaging source... {state.PercentComplete:0.0}% ({state.BytesWritten:N0}/{state.TotalBytes:N0} bytes)";
+        });
+
+        try
+        {
+            OperationProgressBar.Value = 0;
+            ThroughputStatusTextBlock.Text = "Throughput: 0.00 MiB/s";
+            AppendSessionMessage($"Image acquisition started: {sourcePath} -> {destinationPath}");
+
+            var result = await _imageAcquisitionService.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 4 * 1024 * 1024,
+                    AllowResume: true),
+                progressReporter,
+                operationToken);
+
+            var image = await _deviceEnumerationService.BuildImageSourceAsync(result.DestinationImagePath, operationToken);
+            _sources.Insert(0, image);
+            SourcesDataGrid.SelectedIndex = 0;
+
+            OperationProgressBar.Value = 100;
+            StatusTextBlock.Text = "Image acquisition completed";
+            AppendSessionMessage(
+                $"Image acquisition completed ({result.BytesWritten:N0} bytes, SHA256 {result.SourceSha256Hex[..16]}..., resumed={result.Resumed}).");
+            AppendSessionMessage($"Image acquisition state log: {result.StateLogPath}");
+        }
+        catch (OperationCanceledException)
+        {
+            StatusTextBlock.Text = "Image acquisition canceled";
+            ThroughputStatusTextBlock.Text = "Throughput: canceled";
+            AppendSessionMessage("Image acquisition canceled.");
+        }
+        catch (Exception ex)
+        {
+            StatusTextBlock.Text = "Image acquisition failed";
+            ThroughputStatusTextBlock.Text = "Throughput: failed";
+            AppendSessionMessage($"Image acquisition failed: {ex.Message}");
+        }
+        finally
+        {
+            CompleteOperationScope(operationScope);
         }
     }
 

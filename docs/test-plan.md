@@ -70,6 +70,7 @@
 - `scripts/run-host-ext-image-validation.ps1 -UseSyntheticCorpus` and `scripts/run-host-validation-profile.ps1 -UseSyntheticExtCorpus` for deterministic in-repo ext validation lanes when large external corpora are unavailable.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
+- Image-acquisition service tests for clone-first copy flow, resume from checkpoint, and hash/prefix mismatch handling.
 - Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and full-tree deleted-entry extraction (including nested/deleted-directory traversal).
 - Rust unit coverage in `fr-ext` for superblock parsing, deleted inode-table extraction, and deleted directory-entry to inode-metadata reconstruction.
 - Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions (including nested directory paths).
