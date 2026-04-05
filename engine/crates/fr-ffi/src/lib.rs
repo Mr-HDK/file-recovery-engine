@@ -2072,6 +2072,7 @@ struct ExtentRun {
     logical_block: u64,
     physical_block: u64,
     block_count: u64,
+    is_uninitialized: bool,
 }
 
 fn recover_ext_candidate_data(
@@ -2543,14 +2544,32 @@ fn recover_ext_extent_tree_data(
     let mut written = 0u64;
     let mut expected_logical_block = 0u64;
     let mut data_block = vec![0u8; block_size];
+    let zero_block = vec![0u8; block_size];
+    let mut stopped_early = false;
 
     'runs: for run in runs {
         if remaining == 0 {
             break;
         }
 
-        if run.logical_block != expected_logical_block {
+        if run.logical_block < expected_logical_block {
             partial = true;
+            stopped_early = true;
+            break;
+        }
+
+        while expected_logical_block < run.logical_block && remaining > 0 {
+            let to_write = remaining.min(block_size as u64) as usize;
+            if output_file.write_all(&zero_block[..to_write]).is_err() {
+                return Err(44);
+            }
+
+            written = written.saturating_add(to_write as u64);
+            remaining = remaining.saturating_sub(to_write as u64);
+            expected_logical_block = expected_logical_block.saturating_add(1);
+        }
+
+        if remaining == 0 {
             break;
         }
 
@@ -2559,32 +2578,52 @@ fn recover_ext_extent_tree_data(
                 break 'runs;
             }
 
-            let Some(physical_block) = run.physical_block.checked_add(block_index) else {
-                partial = true;
-                break 'runs;
-            };
-            let Some(block_offset) = physical_block.checked_mul(block_size as u64) else {
-                partial = true;
-                break 'runs;
-            };
-
             let to_read = remaining.min(block_size as u64) as usize;
-            match read_from_session(session, block_offset, &mut data_block[..to_read]) {
-                Ok(true) => {}
-                Ok(false) => {
-                    partial = true;
-                    break 'runs;
+            if run.is_uninitialized {
+                if output_file.write_all(&zero_block[..to_read]).is_err() {
+                    return Err(44);
                 }
-                Err(err) => return Err(map_winio_error(err)),
-            }
+            } else {
+                let Some(physical_block) = run.physical_block.checked_add(block_index) else {
+                    partial = true;
+                    stopped_early = true;
+                    break 'runs;
+                };
+                let Some(block_offset) = physical_block.checked_mul(block_size as u64) else {
+                    partial = true;
+                    stopped_early = true;
+                    break 'runs;
+                };
+                match read_from_session(session, block_offset, &mut data_block[..to_read]) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        partial = true;
+                        stopped_early = true;
+                        break 'runs;
+                    }
+                    Err(err) => return Err(map_winio_error(err)),
+                }
 
-            if output_file.write_all(&data_block[..to_read]).is_err() {
-                return Err(44);
+                if output_file.write_all(&data_block[..to_read]).is_err() {
+                    return Err(44);
+                }
             }
 
             written = written.saturating_add(to_read as u64);
             remaining = remaining.saturating_sub(to_read as u64);
             expected_logical_block = expected_logical_block.saturating_add(1);
+        }
+    }
+
+    if !stopped_early {
+        while remaining > 0 {
+            let to_write = remaining.min(block_size as u64) as usize;
+            if output_file.write_all(&zero_block[..to_write]).is_err() {
+                return Err(44);
+            }
+
+            written = written.saturating_add(to_write as u64);
+            remaining = remaining.saturating_sub(to_write as u64);
         }
     }
 
@@ -2626,15 +2665,12 @@ fn collect_ext_extent_runs(
             if block_count == 0 {
                 continue;
             }
-            if (raw_length & EXTENT_UNINITIALIZED_LENGTH_FLAG) != 0 {
-                *partial = true;
-                continue;
-            }
+            let is_uninitialized = (raw_length & EXTENT_UNINITIALIZED_LENGTH_FLAG) != 0;
 
             let start_hi = read_u16_le_at(node_bytes, entry_offset + 6) as u64;
             let start_lo = read_u32_le_at(node_bytes, entry_offset + 8) as u64;
             let physical_block = (start_hi << 32) | start_lo;
-            if physical_block == 0 {
+            if physical_block == 0 && !is_uninitialized {
                 *partial = true;
                 continue;
             }
@@ -2643,6 +2679,7 @@ fn collect_ext_extent_runs(
                 logical_block,
                 physical_block,
                 block_count,
+                is_uninitialized,
             });
         } else {
             let leaf_lo = read_u32_le_at(node_bytes, entry_offset + 4) as u64;
@@ -4173,6 +4210,60 @@ mod tests {
         assert_eq!(partial, 0);
         assert_eq!(bytes_written, payload.len() as u64);
         assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ext_candidate_to_file_zero_fills_uninitialized_extent_blocks() {
+        let payload = build_ext_extent_uninitialized_payload();
+        let image =
+            build_test_ext4_image_with_uninitialized_extent_leaf_recoverable_inode(&payload);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-extent-uninitialized-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-extent-uninitialized.img");
+        let output_path = temp_dir.join("ext-extent-uninitialized-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, (2 * 4096) as u64);
+
+        let recovered = fs::read(&output_path).unwrap();
+        assert_eq!(recovered.len(), 2 * 4096);
+        assert_eq!(&recovered[..4096], payload.as_slice());
+        assert!(recovered[4096..].iter().all(|byte| *byte == 0));
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -6193,6 +6284,53 @@ mod tests {
             let end = start + block_size;
             payload[start..end].fill(fill);
         }
+        payload
+    }
+
+    fn build_test_ext4_image_with_uninitialized_extent_leaf_recoverable_inode(
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (mut image, inode_offset) = initialize_ext4_recovery_image((2 * 4096) as u32);
+
+        write_u32(
+            &mut image,
+            inode_offset + EXT_INODE_FLAGS_OFFSET,
+            EXT_INODE_FLAG_EXTENTS,
+        );
+
+        let extent_header_offset = inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET;
+        write_u16(&mut image, extent_header_offset, EXTENT_HEADER_MAGIC);
+        write_u16(&mut image, extent_header_offset + 2, 2);
+        write_u16(&mut image, extent_header_offset + 4, 4);
+        write_u16(&mut image, extent_header_offset + 6, 0);
+        write_u32(&mut image, extent_header_offset + 8, 0);
+
+        let first_data_block = 30u32;
+        let first_extent_offset = extent_header_offset + EXTENT_HEADER_SIZE;
+        write_u32(&mut image, first_extent_offset, 0);
+        write_u16(&mut image, first_extent_offset + 4, 1);
+        write_u16(&mut image, first_extent_offset + 6, 0);
+        write_u32(&mut image, first_extent_offset + 8, first_data_block);
+
+        let second_extent_offset = first_extent_offset + EXTENT_RECORD_SIZE;
+        write_u32(&mut image, second_extent_offset, 1);
+        write_u16(
+            &mut image,
+            second_extent_offset + 4,
+            EXTENT_UNINITIALIZED_LENGTH_FLAG | 1,
+        );
+        write_u16(&mut image, second_extent_offset + 6, 0);
+        write_u32(&mut image, second_extent_offset + 8, 0);
+
+        let first_data_offset = first_data_block as usize * 4096usize;
+        image[first_data_offset..first_data_offset + 4096].copy_from_slice(payload);
+
+        image
+    }
+
+    fn build_ext_extent_uninitialized_payload() -> Vec<u8> {
+        let mut payload = vec![0u8; 4096];
+        payload.fill(0x5A);
         payload
     }
 

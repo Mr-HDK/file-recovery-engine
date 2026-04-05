@@ -58,7 +58,7 @@
 - Decompress non-resident NTFS compressed streams during export (with explicit partial/unsupported diagnostics when decode fails).
 - Export encrypted streams as raw bytes with explicit "not decrypted" diagnostics and partial recovery signaling.
 - Surface ADS-only edge cases explicitly instead of silent fallback.
-- ext recovery baseline supports regular-file direct/single/double/triple-indirect export plus initialized extents-tree export, and returns explicit unsupported status for candidates requiring unimplemented inode/block semantics.
+- ext recovery baseline supports regular-file direct/single/double/triple-indirect export plus extents-tree export, with sparse/uninitialized extents emitted as zero-filled ranges, and returns explicit unsupported status for candidates requiring unimplemented inode/block semantics.
 
 10. Reporting
 - Generate session report with recovered count, failures, partials, and evidence breakdown.
