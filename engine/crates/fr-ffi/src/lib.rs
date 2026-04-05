@@ -1468,7 +1468,10 @@ pub extern "C" fn fr_recover_ext_candidate_to_file(
     }
 
     let mode = read_u16_le_at(&inode, 0);
-    if (mode & 0xF000) != 0x8000 {
+    let inode_type = mode & 0xF000;
+    let is_regular_file = inode_type == 0x8000;
+    let is_symlink = inode_type == 0xA000;
+    if !is_regular_file && !is_symlink {
         return 91;
     }
 
@@ -1491,12 +1494,19 @@ pub extern "C" fn fr_recover_ext_candidate_to_file(
         return 44;
     };
 
-    let (written, partial) =
+    let (written, partial) = if is_symlink && file_size <= (15 * 4) as u64 {
+        let written = match recover_ext_inline_symlink_data(&inode, file_size, &mut output_file) {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        (written, false)
+    } else {
         match recover_ext_candidate_data(session, &superblock, &inode, file_size, &mut output_file)
         {
             Ok(result) => result,
             Err(status) => return status,
-        };
+        }
+    };
 
     if !out_bytes_written.is_null() {
         unsafe {
@@ -2073,6 +2083,37 @@ struct ExtentRun {
     physical_block: u64,
     block_count: u64,
     is_uninitialized: bool,
+}
+
+fn recover_ext_inline_symlink_data(
+    inode: &[u8],
+    file_size: u64,
+    output_file: &mut File,
+) -> Result<u64, i32> {
+    if file_size == 0 {
+        return Ok(0);
+    }
+
+    let inline_capacity = 15 * 4;
+    if inode.len() < EXT_INODE_BLOCK_POINTERS_OFFSET + inline_capacity {
+        return Err(91);
+    }
+
+    let inline_len = file_size as usize;
+    if inline_len > inline_capacity {
+        return Err(91);
+    }
+
+    let inline_start = EXT_INODE_BLOCK_POINTERS_OFFSET;
+    let inline_end = inline_start + inline_len;
+    if output_file
+        .write_all(&inode[inline_start..inline_end])
+        .is_err()
+    {
+        return Err(44);
+    }
+
+    Ok(file_size)
 }
 
 fn recover_ext_candidate_data(
@@ -4271,6 +4312,55 @@ mod tests {
     }
 
     #[test]
+    fn ffi_recover_ext_candidate_to_file_recovers_inline_symlink_target() {
+        let symlink_target = "logs/2026/latest-report.txt";
+        let image = build_test_ext4_image_with_inline_symlink_inode(symlink_target);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ext-recover-inline-symlink-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ext4-inline-symlink.img");
+        let output_path = temp_dir.join("ext-inline-symlink-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ext_candidate_to_file(
+            session_id,
+            16,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, symlink_target.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), symlink_target.as_bytes());
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_get_refs_deleted_candidates_returns_success_with_no_candidates() {
         let image = build_test_refs_image();
         let temp_dir = std::env::temp_dir().join(format!(
@@ -6332,6 +6422,17 @@ mod tests {
         let mut payload = vec![0u8; 4096];
         payload.fill(0x5A);
         payload
+    }
+
+    fn build_test_ext4_image_with_inline_symlink_inode(target: &str) -> Vec<u8> {
+        let target_bytes = target.as_bytes();
+        let (mut image, inode_offset) = initialize_ext4_recovery_image(target_bytes.len() as u32);
+
+        write_u16(&mut image, inode_offset + 0, 0xA1FF);
+        let inline_offset = inode_offset + EXT_INODE_BLOCK_POINTERS_OFFSET;
+        image[inline_offset..inline_offset + target_bytes.len()].copy_from_slice(target_bytes);
+
+        image
     }
 
     fn initialize_ext4_recovery_image(file_size_bytes: u32) -> (Vec<u8>, usize) {

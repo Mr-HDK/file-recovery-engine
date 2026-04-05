@@ -45,10 +45,11 @@
 - `fr_recover_ext_candidate_to_file` now supports regular-file recovery from direct, single-indirect, double-indirect, and triple-indirect block pointers.
 - extents-flagged inodes now route through extent-tree traversal for initialized extent runs.
 - sparse gaps and uninitialized extent runs now zero-fill during export.
+- inline (fast) symlink inodes now export the stored target bytes.
 - recovery marks partial when unresolved pointers/reads prevent full export.
 
 ## Deferred in Phase 9
 
 - ext inode-table-backed deleted metadata reconstruction.
-- directory/symlink export semantics.
+- directory export semantics and non-inline symlink edge cases.
 - fixture corpus expansion beyond fixed scaffolding.
