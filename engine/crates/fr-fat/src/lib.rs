@@ -1,5 +1,5 @@
 use fr_types::RecoverySourceKind;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
 pub const EXFAT_OEM_ID: &[u8; 8] = b"EXFAT   ";
@@ -138,11 +138,11 @@ pub fn quick_scan_deleted_root_entries(
     max_entries: usize,
 ) -> Result<(FatBootSector, Vec<FatDeletedEntry>), ScanError> {
     let boot = parse_boot_sector(image)?;
-    let entries = scan_deleted_root_entries_with_boot(image, &boot, max_entries, 256)?;
+    let entries = scan_deleted_entries_with_boot(image, &boot, max_entries, 256)?;
     Ok((boot, entries))
 }
 
-pub fn scan_deleted_root_entries_with_boot(
+pub fn scan_deleted_entries_with_boot(
     image: &[u8],
     boot: &FatBootSector,
     max_entries: usize,
@@ -154,12 +154,21 @@ pub fn scan_deleted_root_entries_with_boot(
 
     match boot.filesystem {
         FatFilesystemKind::Fat32 => {
-            scan_fat32_deleted_root_entries(image, boot, max_entries, max_directory_clusters)
+            scan_fat32_deleted_entries(image, boot, max_entries, max_directory_clusters)
         }
         FatFilesystemKind::ExFat => {
-            scan_exfat_deleted_root_entries(image, boot, max_entries, max_directory_clusters)
+            scan_exfat_deleted_entries(image, boot, max_entries, max_directory_clusters)
         }
     }
+}
+
+pub fn scan_deleted_root_entries_with_boot(
+    image: &[u8],
+    boot: &FatBootSector,
+    max_entries: usize,
+    max_directory_clusters: usize,
+) -> Result<Vec<FatDeletedEntry>, ScanError> {
+    scan_deleted_entries_with_boot(image, boot, max_entries, max_directory_clusters)
 }
 
 fn parse_fat32_boot_sector(bytes: &[u8]) -> Result<FatBootSector, BootSectorParseError> {
@@ -300,185 +309,226 @@ fn parse_exfat_boot_sector(bytes: &[u8]) -> Result<FatBootSector, BootSectorPars
     })
 }
 
-fn scan_fat32_deleted_root_entries(
+fn scan_fat32_deleted_entries(
     image: &[u8],
     boot: &FatBootSector,
     max_entries: usize,
     max_directory_clusters: usize,
 ) -> Result<Vec<FatDeletedEntry>, ScanError> {
-    let chain = collect_cluster_chain(
-        image,
-        boot,
-        boot.root_dir_first_cluster,
-        max_directory_clusters,
-    )?;
     let mut entries = Vec::new();
-    let mut long_name_parts = Vec::new();
-    let mut stop = false;
+    let mut directories = VecDeque::new();
+    let mut visited_directories = HashSet::new();
+    directories.push_back((boot.root_dir_first_cluster, ".".to_string()));
 
-    for cluster in chain {
-        let cluster_bytes = read_cluster(image, boot, cluster)?;
-        for entry in cluster_bytes.chunks_exact(32) {
-            let first = entry[0];
-            if first == 0x00 {
-                stop = true;
-                break;
-            }
-
-            let attributes = entry[11];
-            if attributes == 0x0F {
-                let part = decode_lfn_part(entry);
-                if !part.is_empty() {
-                    long_name_parts.insert(0, part);
-                }
-                continue;
-            }
-
-            let deleted = first == 0xE5;
-            let is_directory = (attributes & 0x10) != 0;
-            let is_volume_label = (attributes & 0x08) != 0;
-            let mut name = if !long_name_parts.is_empty() {
-                let joined = long_name_parts.join("");
-                long_name_parts.clear();
-                joined
-            } else {
-                decode_short_name(entry)
-            };
-            name = sanitize_name(name);
-
-            if !deleted || is_volume_label || name.is_empty() {
-                long_name_parts.clear();
-                continue;
-            }
-
-            let first_cluster_high = read_u16_le(entry, 20) as u32;
-            let first_cluster_low = read_u16_le(entry, 26) as u32;
-            let start_cluster = (first_cluster_high << 16) | first_cluster_low;
-            let size_bytes = read_u32_le(entry, 28) as u64;
-            entries.push(FatDeletedEntry {
-                filesystem: FatFilesystemKind::Fat32,
-                name: name.clone(),
-                path: format!(r".\{}", name),
-                is_directory,
-                start_cluster,
-                size_bytes,
-            });
-
-            if entries.len() >= max_entries {
-                break;
-            }
+    while let Some((directory_cluster, directory_path)) = directories.pop_front() {
+        if !visited_directories.insert(directory_cluster) {
+            continue;
         }
 
-        if stop || entries.len() >= max_entries {
-            break;
+        let chain = collect_cluster_chain(image, boot, directory_cluster, max_directory_clusters)?;
+        let mut long_name_parts = Vec::new();
+        let mut stop = false;
+        for cluster in chain {
+            let cluster_bytes = read_cluster(image, boot, cluster)?;
+            for entry in cluster_bytes.chunks_exact(32) {
+                let first = entry[0];
+                if first == 0x00 {
+                    stop = true;
+                    break;
+                }
+
+                let attributes = entry[11];
+                if attributes == 0x0F {
+                    let part = decode_lfn_part(entry);
+                    if !part.is_empty() {
+                        long_name_parts.insert(0, part);
+                    }
+                    continue;
+                }
+
+                let deleted = first == 0xE5;
+                let is_directory = (attributes & 0x10) != 0;
+                let is_volume_label = (attributes & 0x08) != 0;
+                let mut name = if !long_name_parts.is_empty() {
+                    let joined = long_name_parts.join("");
+                    long_name_parts.clear();
+                    joined
+                } else {
+                    decode_short_name(entry)
+                };
+                name = sanitize_name(name);
+                if is_volume_label || name.is_empty() {
+                    continue;
+                }
+
+                let first_cluster_high = read_u16_le(entry, 20) as u32;
+                let first_cluster_low = read_u16_le(entry, 26) as u32;
+                let start_cluster = (first_cluster_high << 16) | first_cluster_low;
+                let path = join_candidate_path(&directory_path, &name);
+
+                if is_directory && start_cluster >= 2 && !is_dot_entry(&name) {
+                    directories.push_back((start_cluster, path.clone()));
+                }
+
+                if !deleted {
+                    continue;
+                }
+
+                let size_bytes = read_u32_le(entry, 28) as u64;
+                entries.push(FatDeletedEntry {
+                    filesystem: FatFilesystemKind::Fat32,
+                    name,
+                    path,
+                    is_directory,
+                    start_cluster,
+                    size_bytes,
+                });
+                if entries.len() >= max_entries {
+                    return Ok(entries);
+                }
+            }
+
+            if stop {
+                break;
+            }
         }
     }
 
     Ok(entries)
 }
 
-fn scan_exfat_deleted_root_entries(
+fn scan_exfat_deleted_entries(
     image: &[u8],
     boot: &FatBootSector,
     max_entries: usize,
     max_directory_clusters: usize,
 ) -> Result<Vec<FatDeletedEntry>, ScanError> {
-    let chain = collect_cluster_chain(
-        image,
-        boot,
-        boot.root_dir_first_cluster,
-        max_directory_clusters,
-    )?;
+    let mut entries = Vec::new();
+    let mut directories = VecDeque::new();
+    let mut visited_directories = HashSet::new();
+    directories.push_back((boot.root_dir_first_cluster, ".".to_string()));
+
+    while let Some((directory_cluster, directory_path)) = directories.pop_front() {
+        if !visited_directories.insert(directory_cluster) {
+            continue;
+        }
+
+        let directory_bytes =
+            read_directory_bytes(image, boot, directory_cluster, max_directory_clusters)?;
+
+        let mut offset = 0usize;
+        while offset + 32 <= directory_bytes.len() {
+            let entry = &directory_bytes[offset..offset + 32];
+            let entry_type = entry[0];
+            if entry_type == 0x00 {
+                break;
+            }
+
+            if entry_type != 0x05 && entry_type != 0x85 {
+                offset = offset
+                    .checked_add(32)
+                    .ok_or(ScanError::ArithmeticOverflow("exfat entry step"))?;
+                continue;
+            }
+
+            let deleted = entry_type == 0x05;
+            let secondary_count = entry[1] as usize;
+            let attributes = read_u16_le(entry, 4);
+            let mut stream_entry_seen = false;
+            let mut name_length = 0usize;
+            let mut start_cluster = 0u32;
+            let mut data_length = 0u64;
+            let mut name_units = Vec::new();
+
+            for index in 0..secondary_count {
+                let secondary_offset =
+                    offset
+                        .checked_add((index + 1) * 32)
+                        .ok_or(ScanError::ArithmeticOverflow(
+                            "exfat secondary entry offset",
+                        ))?;
+                if secondary_offset + 32 > directory_bytes.len() {
+                    return Err(ScanError::DirectoryEntryTruncated);
+                }
+
+                let secondary = &directory_bytes[secondary_offset..secondary_offset + 32];
+                match secondary[0] {
+                    0x40 | 0xC0 => {
+                        stream_entry_seen = true;
+                        name_length = secondary[3] as usize;
+                        start_cluster = read_u32_le(secondary, 20);
+                        data_length = read_u64_le(secondary, 24);
+                    }
+                    0x41 | 0xC1 => {
+                        for char_index in 0..15usize {
+                            let code = read_u16_le(secondary, 2 + char_index * 2);
+                            if code == 0x0000 {
+                                break;
+                            }
+                            if code != 0xFFFF {
+                                name_units.push(code);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            offset = offset
+                .checked_add((secondary_count + 1) * 32)
+                .ok_or(ScanError::ArithmeticOverflow("exfat entry advance"))?;
+            if !stream_entry_seen {
+                continue;
+            }
+
+            if name_length > 0 && name_units.len() > name_length {
+                name_units.truncate(name_length);
+            }
+
+            let name = sanitize_name(String::from_utf16_lossy(&name_units));
+            if name.is_empty() {
+                continue;
+            }
+
+            let is_directory = (attributes & 0x10) != 0;
+            let path = join_candidate_path(&directory_path, &name);
+            if is_directory && start_cluster >= 2 {
+                directories.push_back((start_cluster, path.clone()));
+            }
+
+            if !deleted {
+                continue;
+            }
+
+            entries.push(FatDeletedEntry {
+                filesystem: FatFilesystemKind::ExFat,
+                name,
+                path,
+                is_directory,
+                start_cluster,
+                size_bytes: data_length,
+            });
+            if entries.len() >= max_entries {
+                return Ok(entries);
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+fn read_directory_bytes(
+    image: &[u8],
+    boot: &FatBootSector,
+    directory_cluster: u32,
+    max_directory_clusters: usize,
+) -> Result<Vec<u8>, ScanError> {
+    let chain = collect_cluster_chain(image, boot, directory_cluster, max_directory_clusters)?;
     let mut directory_bytes = Vec::new();
     for cluster in chain {
         directory_bytes.extend_from_slice(read_cluster(image, boot, cluster)?);
     }
-
-    let mut entries = Vec::new();
-    let mut offset = 0usize;
-    while offset + 32 <= directory_bytes.len() && entries.len() < max_entries {
-        let entry = &directory_bytes[offset..offset + 32];
-        let entry_type = entry[0];
-        if entry_type == 0x00 {
-            break;
-        }
-
-        if entry_type != 0x05 && entry_type != 0x85 {
-            offset = offset.saturating_add(32);
-            continue;
-        }
-
-        let deleted = entry_type == 0x05;
-        let secondary_count = entry[1] as usize;
-        let attributes = read_u16_le(entry, 4);
-        let mut stream_entry_seen = false;
-        let mut name_length = 0usize;
-        let mut start_cluster = 0u32;
-        let mut data_length = 0u64;
-        let mut name_units = Vec::new();
-
-        for index in 0..secondary_count {
-            let secondary_offset =
-                offset
-                    .checked_add((index + 1) * 32)
-                    .ok_or(ScanError::ArithmeticOverflow(
-                        "exfat secondary entry offset",
-                    ))?;
-            if secondary_offset + 32 > directory_bytes.len() {
-                return Err(ScanError::DirectoryEntryTruncated);
-            }
-
-            let secondary = &directory_bytes[secondary_offset..secondary_offset + 32];
-            match secondary[0] {
-                0x40 | 0xC0 => {
-                    stream_entry_seen = true;
-                    name_length = secondary[3] as usize;
-                    start_cluster = read_u32_le(secondary, 20);
-                    data_length = read_u64_le(secondary, 24);
-                }
-                0x41 | 0xC1 => {
-                    for char_index in 0..15usize {
-                        let code = read_u16_le(secondary, 2 + char_index * 2);
-                        if code == 0x0000 {
-                            break;
-                        }
-                        if code != 0xFFFF {
-                            name_units.push(code);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        offset = offset
-            .checked_add((secondary_count + 1) * 32)
-            .ok_or(ScanError::ArithmeticOverflow("exfat entry advance"))?;
-
-        if !deleted || !stream_entry_seen {
-            continue;
-        }
-
-        if name_length > 0 && name_units.len() > name_length {
-            name_units.truncate(name_length);
-        }
-
-        let name = sanitize_name(String::from_utf16_lossy(&name_units));
-        if name.is_empty() {
-            continue;
-        }
-
-        entries.push(FatDeletedEntry {
-            filesystem: FatFilesystemKind::ExFat,
-            name: name.clone(),
-            path: format!(r".\{}", name),
-            is_directory: (attributes & 0x10) != 0,
-            start_cluster,
-            size_bytes: data_length,
-        });
-    }
-
-    Ok(entries)
+    Ok(directory_bytes)
 }
 
 fn collect_cluster_chain(
@@ -585,7 +635,7 @@ fn append_lfn_range(entry: &[u8], start: usize, end: usize, out: &mut Vec<u16>) 
 fn decode_short_name(entry: &[u8]) -> String {
     let mut base = String::new();
     for (index, value) in entry[0..8].iter().enumerate() {
-        if *value == b' ' {
+        if *value == b' ' || *value == 0x00 {
             break;
         }
 
@@ -598,7 +648,7 @@ fn decode_short_name(entry: &[u8]) -> String {
 
     let mut extension = String::new();
     for value in &entry[8..11] {
-        if *value == b' ' {
+        if *value == b' ' || *value == 0x00 {
             break;
         }
         extension.push(decode_ascii_component(*value));
@@ -621,6 +671,18 @@ fn decode_ascii_component(byte: u8) -> char {
 
 fn sanitize_name(name: String) -> String {
     name.trim_matches(char::from(0)).trim().to_string()
+}
+
+fn join_candidate_path(parent_path: &str, name: &str) -> String {
+    if parent_path == "." {
+        format!(r".\{}", name)
+    } else {
+        format!(r"{}\{}", parent_path, name)
+    }
+}
+
+fn is_dot_entry(name: &str) -> bool {
+    name == "." || name == ".."
 }
 
 fn is_valid_sector_size(value: u16) -> bool {
@@ -658,6 +720,7 @@ fn read_u32_le_at_zero(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn parses_valid_fat32_boot_sector() {
@@ -711,6 +774,26 @@ mod tests {
         assert_eq!(entry.size_bytes, 42);
     }
 
+    #[test]
+    fn scans_deleted_fat32_nested_entries() {
+        let image = build_fat32_nested_test_image();
+        let (_, entries) = quick_scan_deleted_root_entries(&image, 32).expect("scan nested fat32");
+        let paths: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+        assert!(paths.contains(r".\_EST.TXT"));
+        assert!(paths.contains(r".\_ELDIR"));
+        assert!(paths.contains(r".\SUBDIR\_HILD.TXT"));
+        assert!(paths.contains(r".\_ELDIR\_NNER.BIN"));
+    }
+
+    #[test]
+    fn scans_deleted_exfat_nested_entries() {
+        let image = build_exfat_nested_test_image();
+        let (_, entries) = quick_scan_deleted_root_entries(&image, 32).expect("scan nested exfat");
+        let paths: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+        assert!(paths.contains(r".\lost.doc"));
+        assert!(paths.contains(r".\docs\notes.txt"));
+    }
+
     fn build_fat32_test_image() -> Vec<u8> {
         let mut image = vec![0u8; 512 * 128];
         write_u16(&mut image, 0x0B, 512);
@@ -737,6 +820,50 @@ mod tests {
         write_u16(&mut image, root_sector_offset + 26, 5);
         write_u32(&mut image, root_sector_offset + 28, 1234);
         image[root_sector_offset + 32] = 0x00;
+        image
+    }
+
+    fn build_fat32_nested_test_image() -> Vec<u8> {
+        let mut image = build_fat32_test_image();
+
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (6 * 4), 0x0FFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + (7 * 4), 0x0FFF_FFFF);
+
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset + 32] = b'S';
+        image[root_sector_offset + 33..root_sector_offset + 40].copy_from_slice(b"UBDIR  ");
+        image[root_sector_offset + 32 + 11] = 0x10;
+        write_u16(&mut image, root_sector_offset + 32 + 26, 6);
+        write_u32(&mut image, root_sector_offset + 32 + 28, 0);
+
+        image[root_sector_offset + 64] = 0xE5;
+        image[root_sector_offset + 65..root_sector_offset + 72].copy_from_slice(b"ELDIR  ");
+        image[root_sector_offset + 64 + 11] = 0x10;
+        write_u16(&mut image, root_sector_offset + 64 + 26, 7);
+        write_u32(&mut image, root_sector_offset + 64 + 28, 0);
+        image[root_sector_offset + 96] = 0x00;
+
+        let subdir_sector_offset = 37 * 512;
+        image[subdir_sector_offset] = 0xE5;
+        image[subdir_sector_offset + 1..subdir_sector_offset + 8].copy_from_slice(b"HILD   ");
+        image[subdir_sector_offset + 8..subdir_sector_offset + 11].copy_from_slice(b"TXT");
+        image[subdir_sector_offset + 11] = 0x20;
+        write_u16(&mut image, subdir_sector_offset + 26, 9);
+        write_u32(&mut image, subdir_sector_offset + 28, 55);
+        image[subdir_sector_offset + 32] = 0x00;
+
+        let deleted_subdir_sector_offset = 38 * 512;
+        image[deleted_subdir_sector_offset] = 0xE5;
+        image[deleted_subdir_sector_offset + 1..deleted_subdir_sector_offset + 8]
+            .copy_from_slice(b"NNER   ");
+        image[deleted_subdir_sector_offset + 8..deleted_subdir_sector_offset + 11]
+            .copy_from_slice(b"BIN");
+        image[deleted_subdir_sector_offset + 11] = 0x20;
+        write_u16(&mut image, deleted_subdir_sector_offset + 26, 10);
+        write_u32(&mut image, deleted_subdir_sector_offset + 28, 66);
+        image[deleted_subdir_sector_offset + 32] = 0x00;
+
         image
     }
 
@@ -776,6 +903,78 @@ mod tests {
             "lost.doc",
         );
         image[root_sector_offset + 96] = 0x00;
+        image
+    }
+
+    fn build_exfat_nested_test_image() -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 160];
+        image[0x03..0x0B].copy_from_slice(EXFAT_OEM_ID);
+        write_u64(&mut image, 0x48, 160);
+        write_u32(&mut image, 0x50, 24);
+        write_u32(&mut image, 0x54, 1);
+        write_u32(&mut image, 0x58, 40);
+        write_u32(&mut image, 0x5C, 32);
+        write_u32(&mut image, 0x60, 2);
+        write_u32(&mut image, 0x64, 0x4433_2211);
+        image[0x6C] = 9;
+        image[0x6D] = 0;
+        image[0x6E] = 1;
+        write_u16(&mut image, 0x1FE, 0xAA55);
+
+        let fat_sector_offset = 24 * 512;
+        write_u32(&mut image, fat_sector_offset, 0xFFFF_FFF8);
+        write_u32(&mut image, fat_sector_offset + 4, 0xFFFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + 8, 0xFFFF_FFFF);
+        write_u32(&mut image, fat_sector_offset + (5 * 4), 0xFFFF_FFFF);
+
+        let root_sector_offset = 40 * 512;
+        image[root_sector_offset] = 0x85;
+        image[root_sector_offset + 1] = 2;
+        write_u16(&mut image, root_sector_offset + 4, 0x10);
+
+        image[root_sector_offset + 32] = 0xC0;
+        image[root_sector_offset + 32 + 3] = 4;
+        write_u32(&mut image, root_sector_offset + 32 + 20, 5);
+
+        image[root_sector_offset + 64] = 0xC1;
+        write_utf16_entry(
+            &mut image[root_sector_offset + 64 + 2..root_sector_offset + 64 + 32],
+            "docs",
+        );
+
+        image[root_sector_offset + 96] = 0x05;
+        image[root_sector_offset + 96 + 1] = 2;
+        write_u16(&mut image, root_sector_offset + 96 + 4, 0x20);
+
+        image[root_sector_offset + 128] = 0x40;
+        image[root_sector_offset + 128 + 3] = 8;
+        write_u32(&mut image, root_sector_offset + 128 + 20, 7);
+        write_u64(&mut image, root_sector_offset + 128 + 24, 42);
+
+        image[root_sector_offset + 160] = 0x41;
+        write_utf16_entry(
+            &mut image[root_sector_offset + 160 + 2..root_sector_offset + 160 + 32],
+            "lost.doc",
+        );
+        image[root_sector_offset + 192] = 0x00;
+
+        let docs_sector_offset = 43 * 512;
+        image[docs_sector_offset] = 0x05;
+        image[docs_sector_offset + 1] = 2;
+        write_u16(&mut image, docs_sector_offset + 4, 0x20);
+
+        image[docs_sector_offset + 32] = 0x40;
+        image[docs_sector_offset + 32 + 3] = 9;
+        write_u32(&mut image, docs_sector_offset + 32 + 20, 8);
+        write_u64(&mut image, docs_sector_offset + 32 + 24, 21);
+
+        image[docs_sector_offset + 64] = 0x41;
+        write_utf16_entry(
+            &mut image[docs_sector_offset + 64 + 2..docs_sector_offset + 64 + 32],
+            "notes.txt",
+        );
+        image[docs_sector_offset + 96] = 0x00;
+
         image
     }
 

@@ -48,7 +48,7 @@
 40. Added `HostVssSnapshotRecoveryTests` (`Category=HostVssIntegration`) to validate host-level VSS snapshot enumeration plus snapshot-source quick scan/recovery probe flow through the .NET engine boundary.
 41. Added `scripts/run-host-vss-validation.ps1` to run elevated host VSS validation with artifact archiving and optional `-AllowNoSnapshots` mode.
 42. Added `scripts/compare-host-validation-artifacts.ps1` and documentation wiring to compare archived host-validation manifests/TRX counters/outcomes for drift across host/profile runs.
-43. Replaced `fr-fat` scaffold with concrete FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction (cluster-chain walk + FAT lookup + entry decoding).
+43. Replaced `fr-fat` scaffold with concrete FAT32/exFAT boot parsing and full directory-tree deleted-entry extraction (cluster-chain walk + FAT lookup + nested path reconstruction).
 44. Added FAT/exFAT engine ABI surface (`fr_probe_fat_boot_from_session`, `fr_get_fat_deleted_candidates_from_session`) and .NET `NativeEngineProbe` wrappers/tests.
 45. Added profile-level host validation orchestration (`scripts/run-host-validation-profile.ps1`) and cross-profile comparison tooling (`scripts/compare-host-validation-profiles.ps1`) for real-machine/storage-layout validation campaigns.
 

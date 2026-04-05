@@ -16,7 +16,7 @@
 2. Parser tests (engine)
 - NTFS boot sector and MFT golden parsing.
 - USN record parsing golden tests.
-- FAT/exFAT parser scaffolding tests.
+- FAT/exFAT parser and full-tree deleted traversal tests.
 
 3. Integration tests
 - Enumerate sources and enforce separation.
@@ -70,9 +70,9 @@
 - `scripts/run-host-ext-image-validation.ps1 -UseSyntheticCorpus` and `scripts/run-host-validation-profile.ps1 -UseSyntheticExtCorpus` for deterministic in-repo ext validation lanes when large external corpora are unavailable.
 - Engine/UI diagnostics mapping now includes named-stream sidecar export vs skipped-stream reporting.
 - Session log writer tests for JSON/text log creation and recovery report artifact emission.
-- Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and deleted-root-entry quick-scan extraction.
+- Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and full-tree deleted-entry extraction (including nested/deleted-directory traversal).
 - Rust unit coverage in `fr-ext` for superblock parsing, deleted inode-table extraction, and deleted directory-entry to inode-metadata reconstruction.
-- Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions.
+- Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions (including nested directory paths).
 - Rust FFI integration coverage for ext direct/single/double/triple-indirect recovery, extent-leaf recovery, sparse/uninitialized extent zero-fill semantics, inline/non-inline symlink export, and directory inode export plus partial/unsupported fallback status handling.
 
 ## Benchmarks

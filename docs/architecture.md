@@ -24,7 +24,7 @@
 - `fr-ntfs`: NTFS parsing boundary.
 - `fr-ext`: ext superblock/deleted-entry parsing boundary (Phase 9 baseline).
 - `fr-refs`: ReFS boot metadata parsing boundary (Phase 8 baseline).
-- `fr-fat`: FAT/exFAT parser scaffolding.
+- `fr-fat`: FAT/exFAT boot parsing + deleted-candidate full directory-tree traversal.
 - `fr-mft`: MFT record processing.
 - `fr-path-recon`: path and directory reconstruction.
 - `fr-usn`: USN journal parsing and merge helpers.

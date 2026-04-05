@@ -1,8 +1,7 @@
 use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
-    parse_boot_sector as parse_fat_boot_sector, scan_deleted_root_entries_with_boot,
-    FatFilesystemKind,
+    parse_boot_sector as parse_fat_boot_sector, scan_deleted_entries_with_boot, FatFilesystemKind,
 };
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
@@ -788,7 +787,7 @@ pub extern "C" fn fr_get_fat_deleted_candidates_from_session(
     } else {
         max_entries as usize
     };
-    let candidates = match scan_deleted_root_entries_with_boot(&image, &boot, max_entries, 256) {
+    let candidates = match scan_deleted_entries_with_boot(&image, &boot, max_entries, 256) {
         Ok(entries) => entries,
         Err(err) => return map_fat_scan_error(err),
     };
@@ -4611,6 +4610,59 @@ mod tests {
     }
 
     #[test]
+    fn ffi_get_fat_deleted_candidates_from_session_returns_nested_deleted_entry() {
+        let image = build_test_fat32_image_with_nested_deleted_entry();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-scan-nested-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32-nested.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_fat_deleted_candidate(); 32];
+        let mut written = 0u32;
+        let status = fr_get_fat_deleted_candidates_from_session(
+            session_id,
+            64,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert!(written >= 2);
+
+        let recovered_paths: Vec<String> = candidates
+            .iter()
+            .take(written as usize)
+            .map(|candidate| c_string_bytes_to_string(&candidate.reconstructed_path))
+            .collect();
+        assert!(recovered_paths
+            .iter()
+            .any(|path| path == r".\SUBDIR\_HILD.TXT"));
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_recover_fat_candidate_to_file_writes_expected_bytes() {
         let payload = b"fat-recovery-ok";
         let image = build_test_fat32_image_with_recoverable_file(payload);
@@ -6650,6 +6702,34 @@ mod tests {
         write_u16(&mut image, root_sector_offset + 26, 5);
         write_u32(&mut image, root_sector_offset + 28, 1234);
         image[root_sector_offset + 32] = 0x00;
+        image
+    }
+
+    fn build_test_fat32_image_with_nested_deleted_entry() -> Vec<u8> {
+        let mut image = build_test_fat32_image_with_deleted_entry();
+
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (6 * 4), 0x0FFF_FFFF);
+
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset + 32] = b'S';
+        image[root_sector_offset + 33..root_sector_offset + 40].copy_from_slice(b"UBDIR  ");
+        image[root_sector_offset + 32 + 11] = 0x10;
+        write_u16(&mut image, root_sector_offset + 32 + 26, 6);
+        write_u32(&mut image, root_sector_offset + 32 + 28, 0);
+        image[root_sector_offset + 64] = 0x00;
+
+        let nested_directory_sector_offset = 37 * 512;
+        image[nested_directory_sector_offset] = 0xE5;
+        image[nested_directory_sector_offset + 1..nested_directory_sector_offset + 8]
+            .copy_from_slice(b"HILD   ");
+        image[nested_directory_sector_offset + 8..nested_directory_sector_offset + 11]
+            .copy_from_slice(b"TXT");
+        image[nested_directory_sector_offset + 11] = 0x20;
+        write_u16(&mut image, nested_directory_sector_offset + 26, 9);
+        write_u32(&mut image, nested_directory_sector_offset + 28, 55);
+        image[nested_directory_sector_offset + 32] = 0x00;
+
         image
     }
 
