@@ -118,6 +118,73 @@ public sealed record EngineExtDeletedCandidatesResult(
     int StatusCode
 );
 
+public sealed record EngineApfsContainerMetadata(
+    uint BlockSizeBytes,
+    ulong BlockCount,
+    ulong Features,
+    ulong IncompatFeatures,
+    ulong ContainerObjectId
+);
+
+public sealed record EngineApfsContainerProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineApfsContainerMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineApfsDeletedCandidate(
+    bool Deleted,
+    bool IsDirectory,
+    ulong Cnid,
+    ulong SizeBytes,
+    string? Name,
+    string? ReconstructedPath
+);
+
+public sealed record EngineApfsDeletedCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineApfsDeletedCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineHfsVolumeMetadata(
+    ushort Signature,
+    ushort Version,
+    uint BlockSizeBytes,
+    uint TotalBlocks,
+    uint FileCount,
+    uint FolderCount
+);
+
+public sealed record EngineHfsVolumeProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineHfsVolumeMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineHfsDeletedCandidate(
+    bool Deleted,
+    bool IsDirectory,
+    uint Cnid,
+    ulong SizeBytes,
+    string? Name,
+    string? ReconstructedPath
+);
+
+public sealed record EngineHfsDeletedCandidatesResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineHfsDeletedCandidate> Candidates,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineFatBootMetadata(
     string Filesystem,
     ushort BytesPerSector,
@@ -706,6 +773,255 @@ public static class NativeEngineProbe
                 false,
                 false,
                 Array.Empty<EngineExtDeletedCandidate>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineApfsContainerProbeResult ProbeApfsContainerFromSession(ulong sessionId)
+    {
+        try
+        {
+            var status = fr_probe_apfs_container_from_session(sessionId, out var nativeMetadata);
+            if (status == 0)
+            {
+                var metadata = new EngineApfsContainerMetadata(
+                    nativeMetadata.BlockSizeBytes,
+                    nativeMetadata.BlockCount,
+                    nativeMetadata.Features,
+                    nativeMetadata.IncompatFeatures,
+                    nativeMetadata.ContainerObjectId);
+
+                return new EngineApfsContainerProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "APFS container superblock parsed.",
+                    status);
+            }
+
+            return new EngineApfsContainerProbeResult(
+                true,
+                false,
+                null,
+                MapApfsStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineApfsContainerProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineApfsContainerProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineApfsDeletedCandidatesResult GetApfsDeletedCandidatesFromSession(
+        ulong sessionId,
+        uint maxEntries = 512,
+        int candidateCapacity = 128)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeApfsDeletedCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeApfsDeletedCandidate>();
+            }
+            else
+            {
+                buffer = new NativeApfsDeletedCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Name = new byte[128];
+                    buffer[i].ReconstructedPath = new byte[256];
+                }
+            }
+
+            var status = fr_get_apfs_deleted_candidates_from_session(
+                sessionId,
+                maxEntries,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineApfsDeletedCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineApfsDeletedCandidate>(),
+                    MapApfsStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var candidates = new List<EngineApfsDeletedCandidate>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                candidates.Add(new EngineApfsDeletedCandidate(
+                    Deleted: (candidate.Flags & ApfsDeletedCandidateFlagDeleted) != 0,
+                    IsDirectory: (candidate.Flags & ApfsDeletedCandidateFlagDirectory) != 0,
+                    Cnid: candidate.Cnid,
+                    SizeBytes: candidate.SizeBytes,
+                    Name: DecodeUtf8(candidate.Name),
+                    ReconstructedPath: DecodeUtf8(candidate.ReconstructedPath)));
+            }
+
+            return new EngineApfsDeletedCandidatesResult(
+                true,
+                true,
+                candidates,
+                "APFS deleted-candidate scan completed.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineApfsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineApfsDeletedCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineApfsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineApfsDeletedCandidate>(),
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineHfsVolumeProbeResult ProbeHfsVolumeHeaderFromSession(ulong sessionId)
+    {
+        try
+        {
+            var status = fr_probe_hfs_volume_header_from_session(sessionId, out var nativeMetadata);
+            if (status == 0)
+            {
+                var metadata = new EngineHfsVolumeMetadata(
+                    nativeMetadata.Signature,
+                    nativeMetadata.Version,
+                    nativeMetadata.BlockSizeBytes,
+                    nativeMetadata.TotalBlocks,
+                    nativeMetadata.FileCount,
+                    nativeMetadata.FolderCount);
+
+                return new EngineHfsVolumeProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "HFS+ volume header parsed.",
+                    status);
+            }
+
+            return new EngineHfsVolumeProbeResult(
+                true,
+                false,
+                null,
+                MapHfsStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineHfsVolumeProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineHfsVolumeProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineHfsDeletedCandidatesResult GetHfsDeletedCandidatesFromSession(
+        ulong sessionId,
+        uint maxEntries = 512,
+        int candidateCapacity = 128)
+    {
+        if (candidateCapacity < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCapacity));
+        }
+
+        try
+        {
+            NativeHfsDeletedCandidate[] buffer;
+            if (candidateCapacity == 0)
+            {
+                buffer = Array.Empty<NativeHfsDeletedCandidate>();
+            }
+            else
+            {
+                buffer = new NativeHfsDeletedCandidate[candidateCapacity];
+                for (var i = 0; i < buffer.Length; i++)
+                {
+                    buffer[i].Name = new byte[128];
+                    buffer[i].ReconstructedPath = new byte[256];
+                }
+            }
+
+            var status = fr_get_hfs_deleted_candidates_from_session(
+                sessionId,
+                maxEntries,
+                buffer,
+                (uint)buffer.Length,
+                out var written);
+
+            if (status != 0)
+            {
+                return new EngineHfsDeletedCandidatesResult(
+                    true,
+                    false,
+                    Array.Empty<EngineHfsDeletedCandidate>(),
+                    MapHfsStatusMessage(status),
+                    status);
+            }
+
+            var count = (int)Math.Min(written, (uint)buffer.Length);
+            var candidates = new List<EngineHfsDeletedCandidate>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = buffer[i];
+                candidates.Add(new EngineHfsDeletedCandidate(
+                    Deleted: (candidate.Flags & HfsDeletedCandidateFlagDeleted) != 0,
+                    IsDirectory: (candidate.Flags & HfsDeletedCandidateFlagDirectory) != 0,
+                    Cnid: candidate.Cnid,
+                    SizeBytes: candidate.SizeBytes,
+                    Name: DecodeUtf8(candidate.Name),
+                    ReconstructedPath: DecodeUtf8(candidate.ReconstructedPath)));
+            }
+
+            return new EngineHfsDeletedCandidatesResult(
+                true,
+                true,
+                candidates,
+                "HFS+ deleted-candidate scan completed.",
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineHfsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineHfsDeletedCandidate>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineHfsDeletedCandidatesResult(
+                false,
+                false,
+                Array.Empty<EngineHfsDeletedCandidate>(),
                 "Engine ABI mismatch",
                 -101);
         }
@@ -1543,6 +1859,42 @@ public static class NativeEngineProbe
         };
     }
 
+    private static string MapApfsStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required metadata could be loaded.",
+            100 => "Source does not contain a valid APFS container superblock.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapHfsStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required metadata could be loaded.",
+            110 => "Source does not contain a valid HFS+ volume header.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
     private static string MapFatStatusMessage(int statusCode)
     {
         return statusCode switch
@@ -1810,6 +2162,10 @@ public static class NativeEngineProbe
     private const uint RefsDeletedCandidateFlagDeleted = 0x0001;
     private const uint ExtDeletedCandidateFlagDeleted = 0x0001;
     private const uint ExtDeletedCandidateFlagDirectory = 0x0002;
+    private const uint ApfsDeletedCandidateFlagDeleted = 0x0001;
+    private const uint ApfsDeletedCandidateFlagDirectory = 0x0002;
+    private const uint HfsDeletedCandidateFlagDeleted = 0x0001;
+    private const uint HfsDeletedCandidateFlagDirectory = 0x0002;
     private const uint FatDeletedCandidateFlagDeleted = 0x0001;
     private const uint FatDeletedCandidateFlagDirectory = 0x0002;
     private const uint FatFilesystemKindFat32 = 1;
@@ -1884,6 +2240,57 @@ public static class NativeEngineProbe
         public uint Flags;
         public ulong InodeNumber;
         public ulong EntryOffsetBytes;
+        public ulong SizeBytes;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] Name;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ReconstructedPath;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeApfsContainerMetadata
+    {
+        public uint BlockSizeBytes;
+        public uint Reserved0;
+        public ulong BlockCount;
+        public ulong Features;
+        public ulong IncompatFeatures;
+        public ulong ContainerObjectId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeApfsDeletedCandidate
+    {
+        public uint Flags;
+        public uint Reserved0;
+        public ulong Cnid;
+        public ulong SizeBytes;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+        public byte[] Name;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] ReconstructedPath;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeHfsVolumeMetadata
+    {
+        public ushort Signature;
+        public ushort Version;
+        public uint BlockSizeBytes;
+        public uint TotalBlocks;
+        public uint FileCount;
+        public uint FolderCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeHfsDeletedCandidate
+    {
+        public uint Flags;
+        public uint Cnid;
         public ulong SizeBytes;
 
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
@@ -2063,6 +2470,32 @@ public static class NativeEngineProbe
         ulong sessionId,
         uint maxEntries,
         [Out] NativeExtDeletedCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_apfs_container_from_session(
+        ulong sessionId,
+        out NativeApfsContainerMetadata metadata);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_apfs_deleted_candidates_from_session(
+        ulong sessionId,
+        uint maxEntries,
+        [Out] NativeApfsDeletedCandidate[] candidates,
+        uint candidateCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_hfs_volume_header_from_session(
+        ulong sessionId,
+        out NativeHfsVolumeMetadata metadata);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_get_hfs_deleted_candidates_from_session(
+        ulong sessionId,
+        uint maxEntries,
+        [Out] NativeHfsDeletedCandidate[] candidates,
         uint candidateCapacity,
         out uint written);
 

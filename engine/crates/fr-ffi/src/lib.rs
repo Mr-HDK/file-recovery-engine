@@ -1,7 +1,15 @@
 use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
+use fr_apfs::{
+    parse_container_superblock as parse_apfs_container_superblock,
+    scan_deleted_candidates_with_container as scan_apfs_deleted_candidates_with_container,
+};
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
     parse_boot_sector as parse_fat_boot_sector, scan_deleted_entries_with_boot, FatFilesystemKind,
+};
+use fr_hfs::{
+    parse_volume_header as parse_hfs_volume_header,
+    scan_deleted_candidates_with_header as scan_hfs_deleted_candidates_with_header,
 };
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
@@ -106,6 +114,49 @@ pub struct FrExtDeletedCandidate {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
+pub struct FrApfsContainerMetadata {
+    pub block_size_bytes: u32,
+    pub _reserved0: u32,
+    pub block_count: u64,
+    pub features: u64,
+    pub incompat_features: u64,
+    pub container_object_id: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrApfsDeletedCandidate {
+    pub flags: u32,
+    pub _reserved0: u32,
+    pub cnid: u64,
+    pub size_bytes: u64,
+    pub name: [u8; 128],
+    pub reconstructed_path: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrHfsVolumeMetadata {
+    pub signature: u16,
+    pub version: u16,
+    pub block_size_bytes: u32,
+    pub total_blocks: u32,
+    pub file_count: u32,
+    pub folder_count: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrHfsDeletedCandidate {
+    pub flags: u32,
+    pub cnid: u32,
+    pub size_bytes: u64,
+    pub name: [u8; 128],
+    pub reconstructed_path: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct FrNtfsQuickScanSummary {
     pub parsed_records: u32,
     pub parse_failures: u32,
@@ -193,6 +244,10 @@ const CARVE_CANDIDATE_FLAG_PARTIAL: u32 = 0x0001;
 const REFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const EXT_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
 const EXT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
+const APFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const APFS_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
+const HFS_DELETED_CANDIDATE_FLAG_DELETED: u32 = 0x0001;
+const HFS_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
 const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
 const EXT_INODE_FLAGS_OFFSET: usize = 32;
@@ -682,6 +737,216 @@ pub extern "C" fn fr_get_ext_deleted_candidates_from_session(
     for (index, candidate) in candidates.iter().take(write_count).enumerate() {
         unsafe {
             *out_candidates.add(index) = encode_ext_deleted_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_apfs_container_from_session(
+    session_id: u64,
+    out_container: *mut FrApfsContainerMetadata,
+) -> i32 {
+    if out_container.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut header = [0u8; 4096];
+    match read_from_session(session, 0, &mut header) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(container) = parse_apfs_container_superblock(&header) else {
+        return 100;
+    };
+
+    unsafe {
+        *out_container = FrApfsContainerMetadata {
+            block_size_bytes: container.block_size_bytes,
+            _reserved0: 0,
+            block_count: container.block_count,
+            features: container.features,
+            incompat_features: container.incompat_features,
+            container_object_id: container.container_object_id,
+        };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_apfs_deleted_candidates_from_session(
+    session_id: u64,
+    max_entries: u32,
+    out_candidates: *mut FrApfsDeletedCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_apfs_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if image.len() < 4096 {
+        return 31;
+    }
+
+    let Ok(container) = parse_apfs_container_superblock(&image) else {
+        return 100;
+    };
+
+    let max_entries = if max_entries == 0 {
+        512usize
+    } else {
+        max_entries as usize
+    };
+    let candidates = scan_apfs_deleted_candidates_with_container(&image, &container, max_entries);
+
+    let total = usize_to_u32_saturating(candidates.len());
+    let write_count = candidates.len().min(candidate_capacity as usize);
+    for (index, candidate) in candidates.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_candidates.add(index) = encode_apfs_deleted_candidate(candidate);
+        }
+    }
+
+    unsafe {
+        *out_written = total;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_hfs_volume_header_from_session(
+    session_id: u64,
+    out_volume: *mut FrHfsVolumeMetadata,
+) -> i32 {
+    if out_volume.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let mut header = [0u8; 2048];
+    match read_from_session(session, 0, &mut header) {
+        Ok(true) => {}
+        Ok(false) => return 31,
+        Err(err) => return map_winio_error(err),
+    }
+
+    let Ok(volume) = parse_hfs_volume_header(&header) else {
+        return 110;
+    };
+
+    unsafe {
+        *out_volume = FrHfsVolumeMetadata {
+            signature: volume.signature,
+            version: volume.version,
+            block_size_bytes: volume.block_size_bytes,
+            total_blocks: volume.total_blocks,
+            file_count: volume.file_count,
+            folder_count: volume.folder_count,
+        };
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_hfs_deleted_candidates_from_session(
+    session_id: u64,
+    max_entries: u32,
+    out_candidates: *mut FrHfsDeletedCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
+    if out_written.is_null() {
+        return -1;
+    }
+
+    if candidate_capacity > 0 && out_candidates.is_null() {
+        return -2;
+    }
+
+    unsafe {
+        *out_written = 0;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_hfs_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+
+    if image.len() < 2048 {
+        return 31;
+    }
+
+    let Ok(header) = parse_hfs_volume_header(&image) else {
+        return 110;
+    };
+
+    let max_entries = if max_entries == 0 {
+        512usize
+    } else {
+        max_entries as usize
+    };
+    let candidates = scan_hfs_deleted_candidates_with_header(&image, &header, max_entries);
+
+    let total = usize_to_u32_saturating(candidates.len());
+    let write_count = candidates.len().min(candidate_capacity as usize);
+    for (index, candidate) in candidates.iter().take(write_count).enumerate() {
+        unsafe {
+            *out_candidates.add(index) = encode_hfs_deleted_candidate(candidate);
         }
     }
 
@@ -1859,6 +2124,45 @@ fn encode_ext_deleted_candidate(candidate: &fr_ext::ExtDeletedCandidate) -> FrEx
         flags,
         inode_number: candidate.inode_number,
         entry_offset_bytes: candidate.entry_offset_bytes,
+        size_bytes: candidate.size_bytes,
+        name: [0u8; 128],
+        reconstructed_path: [0u8; 256],
+    };
+    write_utf8(&candidate.name, &mut out.name);
+    write_utf8(&candidate.path, &mut out.reconstructed_path);
+    out
+}
+
+fn encode_apfs_deleted_candidate(
+    candidate: &fr_apfs::ApfsDeletedCandidate,
+) -> FrApfsDeletedCandidate {
+    let mut flags = APFS_DELETED_CANDIDATE_FLAG_DELETED;
+    if candidate.is_directory {
+        flags |= APFS_DELETED_CANDIDATE_FLAG_DIRECTORY;
+    }
+
+    let mut out = FrApfsDeletedCandidate {
+        flags,
+        _reserved0: 0,
+        cnid: candidate.cnid,
+        size_bytes: candidate.size_bytes,
+        name: [0u8; 128],
+        reconstructed_path: [0u8; 256],
+    };
+    write_utf8(&candidate.name, &mut out.name);
+    write_utf8(&candidate.path, &mut out.reconstructed_path);
+    out
+}
+
+fn encode_hfs_deleted_candidate(candidate: &fr_hfs::HfsDeletedCandidate) -> FrHfsDeletedCandidate {
+    let mut flags = HFS_DELETED_CANDIDATE_FLAG_DELETED;
+    if candidate.is_directory {
+        flags |= HFS_DELETED_CANDIDATE_FLAG_DIRECTORY;
+    }
+
+    let mut out = FrHfsDeletedCandidate {
+        flags,
+        cnid: candidate.cnid,
         size_bytes: candidate.size_bytes,
         name: [0u8; 128],
         reconstructed_path: [0u8; 256],
@@ -3627,6 +3931,46 @@ fn read_prefix_for_ext_scan(
     }
 }
 
+fn read_prefix_for_apfs_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn read_prefix_for_hfs_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn read_prefix_for_fat_scan(
     session: &mut fr_winio::ReadSession,
 ) -> Result<Vec<u8>, fr_winio::WinIoError> {
@@ -3909,6 +4253,194 @@ mod tests {
             EXT_DELETED_CANDIDATE_FLAG_DELETED
         );
         assert_eq!(c_string_bytes_to_string(&first.name), "deleted-ext.txt");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_probe_apfs_container_from_session_parses_container() {
+        let image = build_test_apfs_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-apfs-probe-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("apfs.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut container = FrApfsContainerMetadata::default();
+        assert_eq!(
+            fr_probe_apfs_container_from_session(session_id, &mut container),
+            0
+        );
+        assert_eq!(container.block_size_bytes, 4096);
+        assert_eq!(container.block_count, 32_768);
+        assert_eq!(container.container_object_id, 99);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_apfs_deleted_candidates_extracts_deleted_entry() {
+        let image = build_test_apfs_image_with_deleted_tombstone();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-apfs-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("apfs-deleted.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_apfs_deleted_candidate(); 8];
+        let mut written = 0u32;
+        assert_eq!(
+            fr_get_apfs_deleted_candidates_from_session(
+                session_id,
+                64,
+                candidates.as_mut_ptr(),
+                candidates.len() as u32,
+                &mut written
+            ),
+            0
+        );
+        assert!(written >= 1);
+        let first = candidates[0];
+        assert_eq!(
+            first.flags & APFS_DELETED_CANDIDATE_FLAG_DELETED,
+            APFS_DELETED_CANDIDATE_FLAG_DELETED
+        );
+        assert_eq!(first.cnid, 2048);
+        assert_eq!(c_string_bytes_to_string(&first.name), "presentation.key");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_probe_hfs_volume_header_from_session_parses_volume_header() {
+        let image = build_test_hfs_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-hfs-probe-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("hfs.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut volume = FrHfsVolumeMetadata::default();
+        assert_eq!(
+            fr_probe_hfs_volume_header_from_session(session_id, &mut volume),
+            0
+        );
+        assert_eq!(volume.signature, 0x482B);
+        assert_eq!(volume.version, 4);
+        assert_eq!(volume.block_size_bytes, 4096);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_hfs_deleted_candidates_extracts_deleted_entry() {
+        let image = build_test_hfs_image_with_deleted_tombstone();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-hfs-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("hfs-deleted.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_hfs_deleted_candidate(); 8];
+        let mut written = 0u32;
+        assert_eq!(
+            fr_get_hfs_deleted_candidates_from_session(
+                session_id,
+                64,
+                candidates.as_mut_ptr(),
+                candidates.len() as u32,
+                &mut written
+            ),
+            0
+        );
+        assert!(written >= 1);
+        let first = candidates[0];
+        assert_eq!(
+            first.flags & HFS_DELETED_CANDIDATE_FLAG_DELETED,
+            HFS_DELETED_CANDIDATE_FLAG_DELETED
+        );
+        assert_eq!(first.cnid, 77);
+        assert_eq!(c_string_bytes_to_string(&first.name), "invoice.pages");
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -6135,6 +6667,27 @@ mod tests {
         }
     }
 
+    fn empty_apfs_deleted_candidate() -> FrApfsDeletedCandidate {
+        FrApfsDeletedCandidate {
+            flags: 0,
+            _reserved0: 0,
+            cnid: 0,
+            size_bytes: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+        }
+    }
+
+    fn empty_hfs_deleted_candidate() -> FrHfsDeletedCandidate {
+        FrHfsDeletedCandidate {
+            flags: 0,
+            cnid: 0,
+            size_bytes: 0,
+            name: [0u8; 128],
+            reconstructed_path: [0u8; 256],
+        }
+    }
+
     fn empty_fat_deleted_candidate() -> FrFatDeletedCandidate {
         FrFatDeletedCandidate {
             flags: 0,
@@ -6143,6 +6696,94 @@ mod tests {
             name: [0u8; 128],
             reconstructed_path: [0u8; 256],
         }
+    }
+
+    fn build_test_apfs_image() -> Vec<u8> {
+        let mut image = vec![0u8; 1024 * 64];
+        write_u64(&mut image, 0x08, 99);
+        write_u32(&mut image, 0x20, 0x4253_584E);
+        write_u32(&mut image, 0x24, 4096);
+        write_u64(&mut image, 0x28, 32_768);
+        write_u64(&mut image, 0x30, 0x10);
+        write_u64(&mut image, 0x40, 0x20);
+        image
+    }
+
+    fn build_test_apfs_image_with_deleted_tombstone() -> Vec<u8> {
+        let mut image = build_test_apfs_image();
+        let record = build_apfs_tombstone_record(
+            2048,
+            16_384,
+            true,
+            "presentation.key",
+            r"projects\presentation.key",
+        );
+        let offset = 8192usize;
+        image[offset..offset + record.len()].copy_from_slice(&record);
+        image
+    }
+
+    fn build_apfs_tombstone_record(
+        cnid: u64,
+        size_bytes: u64,
+        is_directory: bool,
+        name: &str,
+        path: &str,
+    ) -> Vec<u8> {
+        let mut record = vec![0u8; 316];
+        record[..8].copy_from_slice(b"APFSDEL\0");
+        write_u64(&mut record, 8, cnid);
+        write_u64(&mut record, 16, size_bytes);
+        record[24] = if is_directory { 1 } else { 0 };
+        record[25] = name.len() as u8;
+        record[26] = path.len() as u8;
+        record[28..28 + name.len()].copy_from_slice(name.as_bytes());
+        record[124..124 + path.len()].copy_from_slice(path.as_bytes());
+        record
+    }
+
+    fn build_test_hfs_image() -> Vec<u8> {
+        let mut image = vec![0u8; 1024 * 64];
+        write_u16_be(&mut image, 1024, 0x482B);
+        write_u16_be(&mut image, 1026, 4);
+        write_u32_be(&mut image, 1056, 200);
+        write_u32_be(&mut image, 1060, 80);
+        write_u32_be(&mut image, 1064, 4096);
+        write_u32_be(&mut image, 1068, 65_536);
+        image
+    }
+
+    fn build_test_hfs_image_with_deleted_tombstone() -> Vec<u8> {
+        let mut image = build_test_hfs_image();
+        let record = build_hfs_tombstone_record(
+            77,
+            12_288,
+            false,
+            "invoice.pages",
+            r"archive\invoice.pages",
+        );
+        let offset = 4096usize;
+        image[offset..offset + record.len()].copy_from_slice(&record);
+        image
+    }
+
+    fn build_hfs_tombstone_record(
+        cnid: u32,
+        size_bytes: u64,
+        is_directory: bool,
+        name: &str,
+        path: &str,
+    ) -> Vec<u8> {
+        let mut record = vec![0u8; 312];
+        record[..8].copy_from_slice(b"HFSDEL\0\0");
+        write_u32(&mut record, 8, cnid);
+        write_u64(&mut record, 12, size_bytes);
+        record[20] = if is_directory { 1 } else { 0 };
+        record[21] = name.len() as u8;
+        record[22] = path.len() as u8;
+        record[24..24 + name.len()].copy_from_slice(name.as_bytes());
+        record[120..120 + path.len()].copy_from_slice(path.as_bytes());
+        record
     }
 
     fn build_test_refs_image() -> Vec<u8> {
@@ -6774,6 +7415,14 @@ mod tests {
 
     fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
     }
 
     fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {

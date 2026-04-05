@@ -12,6 +12,8 @@ fr-types = { path = "../fr-types" }
 fr-winio = { path = "../fr-winio" }
 fr-ntfs = { path = "../fr-ntfs" }
 fr-ext = { path = "../fr-ext" }
+fr-apfs = { path = "../fr-apfs" }
+fr-hfs = { path = "../fr-hfs" }
 fr-refs = { path = "../fr-refs" }
 fr-fat = { path = "../fr-fat" }
 fr-mft = { path = "../fr-mft" }

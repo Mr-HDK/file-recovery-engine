@@ -66,6 +66,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fr-apfs"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "thiserror",
+]
+
+[[package]]
 name = "fr-carving"
 version = "0.1.0"
 dependencies = [
@@ -101,9 +109,11 @@ dependencies = [
 name = "fr-ffi"
 version = "0.1.0"
 dependencies = [
+ "fr-apfs",
  "fr-carving",
  "fr-ext",
  "fr-fat",
+ "fr-hfs",
  "fr-mft",
  "fr-ntfs",
  "fr-refs",
@@ -113,6 +123,14 @@ dependencies = [
  "fr-usn",
  "fr-vss",
  "fr-winio",
+]
+
+[[package]]
+name = "fr-hfs"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "thiserror",
 ]
 
 [[package]]

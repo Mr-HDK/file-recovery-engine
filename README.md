@@ -113,6 +113,20 @@ Engine ABI now includes FAT/exFAT boot probing and deleted-root-entry quick scan
 - `ProbeFatBootFromSession`
 - `GetFatDeletedCandidatesFromSession`
 
+## APFS/HFS+ engine probes
+
+Engine ABI now includes APFS container and HFS+ volume metadata probing plus deleted metadata candidate scans:
+- `fr_probe_apfs_container_from_session`
+- `fr_get_apfs_deleted_candidates_from_session`
+- `fr_probe_hfs_volume_header_from_session`
+- `fr_get_hfs_deleted_candidates_from_session`
+
+.NET wrappers are available via `NativeEngineProbe`:
+- `ProbeApfsContainerFromSession`
+- `GetApfsDeletedCandidatesFromSession`
+- `ProbeHfsVolumeHeaderFromSession`
+- `GetHfsDeletedCandidatesFromSession`
+
 ## UI run/release helpers
 
 Prefer the helper scripts below to avoid stale locked binaries:

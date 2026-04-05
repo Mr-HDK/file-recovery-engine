@@ -175,6 +175,82 @@ public sealed class NativeEngineProbeTests
     }
 
     [Fact]
+    public void ProbeApfsContainerFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeApfsContainerFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 100, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void ApfsDeletedCandidatesFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.GetApfsDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Empty(result.Candidates);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 100, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void ProbeHfsVolumeHeaderFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeHfsVolumeHeaderFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 110, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void HfsDeletedCandidatesFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.GetHfsDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Empty(result.Candidates);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 110, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
     public void FatDeletedCandidatesFromSessionReturnsDeterministicStatus()
     {
         var result = NativeEngineProbe.GetFatDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);

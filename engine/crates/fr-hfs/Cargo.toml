@@ -1,0 +1,9 @@
+[package]
+name = "fr-hfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fr-types = { path = "../fr-types" }
+thiserror.workspace = true
