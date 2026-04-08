@@ -136,7 +136,9 @@ pub fn scan_deleted_candidates_with_superblock(
 
     while offset + XFS_TOMBSTONE_RECORD_SIZE <= image.len() && out.len() < max_entries {
         if image[offset..offset + XFS_TOMBSTONE_MARKER.len()] == *XFS_TOMBSTONE_MARKER {
-            if let Some(candidate) = parse_tombstone_record(&image[offset..offset + XFS_TOMBSTONE_RECORD_SIZE]) {
+            if let Some(candidate) =
+                parse_tombstone_record(&image[offset..offset + XFS_TOMBSTONE_RECORD_SIZE])
+            {
                 let key = (candidate.inode_number, candidate.path.to_ascii_lowercase());
                 if seen.insert(key) {
                     out.push(candidate);
@@ -167,7 +169,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<XfsDeletedCandidate> {
     let flags = record[24];
     let name_len = record[25] as usize;
     let path_len = record[26] as usize;
-    if name_len == 0 || name_len > XFS_TOMBSTONE_NAME_CAPACITY || path_len > XFS_TOMBSTONE_PATH_CAPACITY {
+    if name_len == 0
+        || name_len > XFS_TOMBSTONE_NAME_CAPACITY
+        || path_len > XFS_TOMBSTONE_PATH_CAPACITY
+    {
         return None;
     }
 
@@ -178,7 +183,9 @@ fn parse_tombstone_record(record: &[u8]) -> Option<XfsDeletedCandidate> {
     let path = if path_len == 0 {
         format!(r".\{}", name)
     } else {
-        normalize_candidate_path(&decode_metadata_text(&record[path_start..path_start + path_len])?)
+        normalize_candidate_path(&decode_metadata_text(
+            &record[path_start..path_start + path_len],
+        )?)
     };
 
     Some(XfsDeletedCandidate {
@@ -191,7 +198,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<XfsDeletedCandidate> {
 }
 
 fn decode_metadata_text(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_matches(char::from(0)).trim();
+    let text = std::str::from_utf8(bytes)
+        .ok()?
+        .trim_matches(char::from(0))
+        .trim();
     if text.is_empty() {
         return None;
     }

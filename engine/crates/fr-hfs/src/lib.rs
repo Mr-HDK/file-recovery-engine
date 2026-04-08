@@ -138,7 +138,9 @@ pub fn scan_deleted_candidates_with_header(
 
     while offset + HFS_TOMBSTONE_RECORD_SIZE <= image.len() && out.len() < max_entries {
         if image[offset..offset + HFS_TOMBSTONE_MARKER.len()] == *HFS_TOMBSTONE_MARKER {
-            if let Some(candidate) = parse_tombstone_record(&image[offset..offset + HFS_TOMBSTONE_RECORD_SIZE]) {
+            if let Some(candidate) =
+                parse_tombstone_record(&image[offset..offset + HFS_TOMBSTONE_RECORD_SIZE])
+            {
                 let dedupe_key = (candidate.cnid, candidate.path.to_ascii_lowercase());
                 if seen.insert(dedupe_key) {
                     out.push(candidate);
@@ -169,7 +171,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<HfsDeletedCandidate> {
     let flags = record[20];
     let name_len = record[21] as usize;
     let path_len = record[22] as usize;
-    if name_len == 0 || name_len > HFS_TOMBSTONE_NAME_CAPACITY || path_len > HFS_TOMBSTONE_PATH_CAPACITY {
+    if name_len == 0
+        || name_len > HFS_TOMBSTONE_NAME_CAPACITY
+        || path_len > HFS_TOMBSTONE_PATH_CAPACITY
+    {
         return None;
     }
 
@@ -180,7 +185,9 @@ fn parse_tombstone_record(record: &[u8]) -> Option<HfsDeletedCandidate> {
     let path = if path_len == 0 {
         format!(r".\{}", name)
     } else {
-        normalize_candidate_path(&decode_metadata_text(&record[path_start..path_start + path_len])?)
+        normalize_candidate_path(&decode_metadata_text(
+            &record[path_start..path_start + path_len],
+        )?)
     };
 
     Some(HfsDeletedCandidate {
@@ -206,7 +213,10 @@ fn normalize_candidate_path(path: &str) -> String {
 }
 
 fn decode_metadata_text(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_matches(char::from(0)).trim();
+    let text = std::str::from_utf8(bytes)
+        .ok()?
+        .trim_matches(char::from(0))
+        .trim();
     if text.is_empty() {
         return None;
     }
@@ -265,7 +275,10 @@ mod tests {
         write_u16_be(&mut image, HFS_SIGNATURE_OFFSET, 0x4A4A);
 
         let error = parse_volume_header(&image).unwrap_err();
-        assert!(matches!(error, VolumeHeaderParseError::InvalidSignature(0x4A4A)));
+        assert!(matches!(
+            error,
+            VolumeHeaderParseError::InvalidSignature(0x4A4A)
+        ));
     }
 
     #[test]
@@ -274,13 +287,17 @@ mod tests {
         write_u32_be(&mut image, HFS_BLOCK_SIZE_OFFSET, 1234);
 
         let error = parse_volume_header(&image).unwrap_err();
-        assert!(matches!(error, VolumeHeaderParseError::InvalidBlockSize(1234)));
+        assert!(matches!(
+            error,
+            VolumeHeaderParseError::InvalidBlockSize(1234)
+        ));
     }
 
     #[test]
     fn extracts_deleted_hfs_tombstone_candidate() {
         let mut image = build_test_hfs_image();
-        let record = build_tombstone_record(77, 12_288, false, "invoice.pages", r"archive\invoice.pages");
+        let record =
+            build_tombstone_record(77, 12_288, false, "invoice.pages", r"archive\invoice.pages");
         image[4096..4096 + record.len()].copy_from_slice(&record);
 
         let (_, candidates) = scan_deleted_candidates(&image, 16).expect("scan hfs");
@@ -313,7 +330,13 @@ mod tests {
         image
     }
 
-    fn build_tombstone_record(cnid: u32, size: u64, is_directory: bool, name: &str, path: &str) -> Vec<u8> {
+    fn build_tombstone_record(
+        cnid: u32,
+        size: u64,
+        is_directory: bool,
+        name: &str,
+        path: &str,
+    ) -> Vec<u8> {
         let mut record = vec![0u8; HFS_TOMBSTONE_RECORD_SIZE];
         record[..8].copy_from_slice(HFS_TOMBSTONE_MARKER);
         write_u32_le(&mut record, 8, cnid);

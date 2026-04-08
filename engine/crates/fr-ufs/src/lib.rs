@@ -92,7 +92,9 @@ pub fn parse_superblock(image: &[u8]) -> Result<UfsSuperblock, SuperblockParseEr
 
     let fragment_size_bytes = read_u32_le(image, UFS_FRAGMENT_SIZE_OFFSET);
     if fragment_size_bytes == 0 || fragment_size_bytes > block_size_bytes {
-        return Err(SuperblockParseError::InvalidFragmentSize(fragment_size_bytes));
+        return Err(SuperblockParseError::InvalidFragmentSize(
+            fragment_size_bytes,
+        ));
     }
 
     let total_blocks = read_u64_le(image, UFS_TOTAL_BLOCKS_OFFSET);
@@ -132,7 +134,9 @@ pub fn scan_deleted_candidates_with_superblock(
 
     while offset + UFS_TOMBSTONE_RECORD_SIZE <= image.len() && out.len() < max_entries {
         if image[offset..offset + UFS_TOMBSTONE_MARKER.len()] == *UFS_TOMBSTONE_MARKER {
-            if let Some(candidate) = parse_tombstone_record(&image[offset..offset + UFS_TOMBSTONE_RECORD_SIZE]) {
+            if let Some(candidate) =
+                parse_tombstone_record(&image[offset..offset + UFS_TOMBSTONE_RECORD_SIZE])
+            {
                 let key = (candidate.inode_number, candidate.path.to_ascii_lowercase());
                 if seen.insert(key) {
                     out.push(candidate);
@@ -163,7 +167,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<UfsDeletedCandidate> {
     let flags = record[20];
     let name_len = record[21] as usize;
     let path_len = record[22] as usize;
-    if name_len == 0 || name_len > UFS_TOMBSTONE_NAME_CAPACITY || path_len > UFS_TOMBSTONE_PATH_CAPACITY {
+    if name_len == 0
+        || name_len > UFS_TOMBSTONE_NAME_CAPACITY
+        || path_len > UFS_TOMBSTONE_PATH_CAPACITY
+    {
         return None;
     }
 
@@ -174,7 +181,9 @@ fn parse_tombstone_record(record: &[u8]) -> Option<UfsDeletedCandidate> {
     let path = if path_len == 0 {
         format!(r".\{}", name)
     } else {
-        normalize_candidate_path(&decode_metadata_text(&record[path_start..path_start + path_len])?)
+        normalize_candidate_path(&decode_metadata_text(
+            &record[path_start..path_start + path_len],
+        )?)
     };
 
     Some(UfsDeletedCandidate {
@@ -187,7 +196,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<UfsDeletedCandidate> {
 }
 
 fn decode_metadata_text(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_matches(char::from(0)).trim();
+    let text = std::str::from_utf8(bytes)
+        .ok()?
+        .trim_matches(char::from(0))
+        .trim();
     if text.is_empty() {
         return None;
     }
@@ -244,7 +256,10 @@ mod tests {
         write_u32_le(&mut image, UFS_MAGIC_OFFSET, 0xDEAD_BEEF);
 
         let err = parse_superblock(&image).unwrap_err();
-        assert!(matches!(err, SuperblockParseError::InvalidMagic(0xDEAD_BEEF)));
+        assert!(matches!(
+            err,
+            SuperblockParseError::InvalidMagic(0xDEAD_BEEF)
+        ));
     }
 
     #[test]
@@ -253,7 +268,10 @@ mod tests {
         write_u32_le(&mut image, UFS_FRAGMENT_SIZE_OFFSET, 8192);
 
         let err = parse_superblock(&image).unwrap_err();
-        assert!(matches!(err, SuperblockParseError::InvalidFragmentSize(8192)));
+        assert!(matches!(
+            err,
+            SuperblockParseError::InvalidFragmentSize(8192)
+        ));
     }
 
     #[test]

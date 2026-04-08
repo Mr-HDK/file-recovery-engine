@@ -833,8 +833,8 @@ mod tests {
     #[test]
     fn returns_invalid_cluster_error_for_bad_cluster_marker() {
         let image = build_fat32_bad_cluster_chain_test_image();
-        let err =
-            quick_scan_deleted_root_entries(&image, 16).expect_err("expected invalid cluster chain");
+        let err = quick_scan_deleted_root_entries(&image, 16)
+            .expect_err("expected invalid cluster chain");
         assert!(matches!(err, ScanError::InvalidCluster(0x0FFF_FFF7)));
     }
 

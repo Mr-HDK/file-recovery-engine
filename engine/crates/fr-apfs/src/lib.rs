@@ -69,7 +69,9 @@ pub enum ScanError {
     Container(#[from] ContainerParseError),
 }
 
-pub fn parse_container_superblock(image: &[u8]) -> Result<ApfsContainerSuperblock, ContainerParseError> {
+pub fn parse_container_superblock(
+    image: &[u8],
+) -> Result<ApfsContainerSuperblock, ContainerParseError> {
     if image.len() < APFS_SUPERBLOCK_SIZE {
         return Err(ContainerParseError::BufferTooSmall {
             expected: APFS_SUPERBLOCK_SIZE,
@@ -125,7 +127,9 @@ pub fn scan_deleted_candidates_with_container(
 
     while offset + APFS_TOMBSTONE_RECORD_SIZE <= image.len() && out.len() < max_entries {
         if image[offset..offset + APFS_TOMBSTONE_MARKER.len()] == *APFS_TOMBSTONE_MARKER {
-            if let Some(candidate) = parse_tombstone_record(&image[offset..offset + APFS_TOMBSTONE_RECORD_SIZE]) {
+            if let Some(candidate) =
+                parse_tombstone_record(&image[offset..offset + APFS_TOMBSTONE_RECORD_SIZE])
+            {
                 let dedupe_key = (candidate.cnid, candidate.path.to_ascii_lowercase());
                 if seen.insert(dedupe_key) {
                     out.push(candidate);
@@ -156,7 +160,10 @@ fn parse_tombstone_record(record: &[u8]) -> Option<ApfsDeletedCandidate> {
     let flags = record[24];
     let name_len = record[25] as usize;
     let path_len = record[26] as usize;
-    if name_len == 0 || name_len > APFS_TOMBSTONE_NAME_CAPACITY || path_len > APFS_TOMBSTONE_PATH_CAPACITY {
+    if name_len == 0
+        || name_len > APFS_TOMBSTONE_NAME_CAPACITY
+        || path_len > APFS_TOMBSTONE_PATH_CAPACITY
+    {
         return None;
     }
 
@@ -167,7 +174,9 @@ fn parse_tombstone_record(record: &[u8]) -> Option<ApfsDeletedCandidate> {
     let path = if path_len == 0 {
         format!(r".\{}", name)
     } else {
-        normalize_candidate_path(&decode_metadata_text(&record[path_start..path_start + path_len])?)
+        normalize_candidate_path(&decode_metadata_text(
+            &record[path_start..path_start + path_len],
+        )?)
     };
 
     Some(ApfsDeletedCandidate {
@@ -193,7 +202,10 @@ fn normalize_candidate_path(path: &str) -> String {
 }
 
 fn decode_metadata_text(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_matches(char::from(0)).trim();
+    let text = std::str::from_utf8(bytes)
+        .ok()?
+        .trim_matches(char::from(0))
+        .trim();
     if text.is_empty() {
         return None;
     }
@@ -239,7 +251,10 @@ mod tests {
         write_u32(&mut image, APFS_MAGIC_OFFSET, 0x1234_5678);
 
         let error = parse_container_superblock(&image).unwrap_err();
-        assert!(matches!(error, ContainerParseError::InvalidMagic(0x1234_5678)));
+        assert!(matches!(
+            error,
+            ContainerParseError::InvalidMagic(0x1234_5678)
+        ));
     }
 
     #[test]
@@ -254,7 +269,13 @@ mod tests {
     #[test]
     fn extracts_deleted_tombstone_candidate() {
         let mut image = build_test_apfs_image();
-        let record = build_tombstone_record(2048, 16_384, true, "presentation.key", r"projects\presentation.key");
+        let record = build_tombstone_record(
+            2048,
+            16_384,
+            true,
+            "presentation.key",
+            r"projects\presentation.key",
+        );
         image[8192..8192 + record.len()].copy_from_slice(&record);
 
         let (_, candidates) = scan_deleted_candidates(&image, 16).expect("scan apfs");
@@ -287,7 +308,13 @@ mod tests {
         image
     }
 
-    fn build_tombstone_record(cnid: u64, size: u64, is_directory: bool, name: &str, path: &str) -> Vec<u8> {
+    fn build_tombstone_record(
+        cnid: u64,
+        size: u64,
+        is_directory: bool,
+        name: &str,
+        path: &str,
+    ) -> Vec<u8> {
         let mut record = vec![0u8; APFS_TOMBSTONE_RECORD_SIZE];
         record[..8].copy_from_slice(APFS_TOMBSTONE_MARKER);
         write_u64(&mut record, 8, cnid);

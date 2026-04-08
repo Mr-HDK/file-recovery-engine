@@ -1,8 +1,8 @@
-use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
 use fr_apfs::{
     parse_container_superblock as parse_apfs_container_superblock,
     scan_deleted_candidates_with_container as scan_apfs_deleted_candidates_with_container,
 };
+use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
     parse_boot_sector as parse_fat_boot_sector, scan_deleted_entries_with_boot, FatFilesystemKind,
@@ -10,10 +10,6 @@ use fr_fat::{
 use fr_hfs::{
     parse_volume_header as parse_hfs_volume_header,
     scan_deleted_candidates_with_header as scan_hfs_deleted_candidates_with_header,
-};
-use fr_ufs::{
-    parse_superblock as parse_ufs_superblock,
-    scan_deleted_candidates_with_superblock as scan_ufs_deleted_candidates_with_superblock,
 };
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
@@ -24,6 +20,10 @@ use fr_session::{
     QuickScanError,
 };
 use fr_types::{ConfidenceTier, EvidenceSource, RecoveryCandidate, RecoverySourceKind};
+use fr_ufs::{
+    parse_superblock as parse_ufs_superblock,
+    scan_deleted_candidates_with_superblock as scan_ufs_deleted_candidates_with_superblock,
+};
 use fr_xfs::{
     parse_superblock as parse_xfs_superblock,
     scan_deleted_candidates_with_superblock as scan_xfs_deleted_candidates_with_superblock,
@@ -7499,8 +7499,7 @@ mod tests {
 
     fn build_test_xfs_image_with_deleted_tombstone() -> Vec<u8> {
         let mut image = build_test_xfs_image();
-        let record =
-            build_xfs_tombstone_record(88, 10_240, false, "audit.log", r"logs\audit.log");
+        let record = build_xfs_tombstone_record(88, 10_240, false, "audit.log", r"logs\audit.log");
         let offset = 8192usize;
         image[offset..offset + record.len()].copy_from_slice(&record);
         image
@@ -7536,8 +7535,7 @@ mod tests {
 
     fn build_test_ufs_image_with_deleted_tombstone() -> Vec<u8> {
         let mut image = build_test_ufs_image();
-        let record =
-            build_ufs_tombstone_record(120, 2048, false, "passwd.old", r"etc\passwd.old");
+        let record = build_ufs_tombstone_record(120, 2048, false, "passwd.old", r"etc\passwd.old");
         let offset = 16 * 1024;
         image[offset..offset + record.len()].copy_from_slice(&record);
         image
