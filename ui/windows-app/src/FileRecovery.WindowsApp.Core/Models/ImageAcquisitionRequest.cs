@@ -5,5 +5,7 @@ public sealed record ImageAcquisitionRequest(
     string DestinationImagePath,
     string? StateLogPath = null,
     int ChunkSizeBytes = 4 * 1024 * 1024,
-    bool AllowResume = true
+    bool AllowResume = true,
+    ImageReadErrorPolicy ReadErrorPolicy = ImageReadErrorPolicy.ContinueWithZeroFill,
+    int MaxReadErrorChunks = 1024
 );

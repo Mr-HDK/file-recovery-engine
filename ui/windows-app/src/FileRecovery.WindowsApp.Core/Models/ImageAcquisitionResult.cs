@@ -7,5 +7,8 @@ public sealed record ImageAcquisitionResult(
     long BytesWritten,
     string SourceSha256Hex,
     string DestinationSha256Hex,
-    bool Resumed
+    bool Resumed,
+    ImageReadErrorPolicy ReadErrorPolicy,
+    int ReadErrorChunks,
+    long ZeroFilledBytes
 );

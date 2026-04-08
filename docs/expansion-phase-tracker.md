@@ -16,7 +16,7 @@
 | 10 | `APFS/HFS+` foundation | DONE | APFS/HFS+ image-first candidate extraction + tests + UI mapping |
 | 11 | `ext2/ext3`, `XFS`, `UFS` compatibility | DONE | probe/candidate seams + compatibility matrix + tests |
 | 12 | FAT/exFAT full tree traversal | DONE | nested path reconstruction + deleted dir traversal + tests |
-| 13 | Disk imaging/clone-first workflow | PENDING | image acquisition, hash verification, resume, UI-first flow |
+| 13 | Disk imaging/clone-first workflow | DONE | image acquisition, hash verification, resume, UI-first flow |
 | 14 | RAID virtual assembly + auto-detection | PENDING | virtual RAID build + auto-params + manual override + tests |
 | 15 | NAS/network workflows | PENDING | remote source support + resumable operations + audit logs |
 | 16 | Bootable `WinPE` mode | PENDING | bootable build, offline scan/recovery flow, docs/scripts |

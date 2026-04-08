@@ -478,7 +478,9 @@ public partial class MainWindow : Window
                     SourcePath: sourcePath,
                     DestinationImagePath: destinationPath,
                     ChunkSizeBytes: 4 * 1024 * 1024,
-                    AllowResume: true),
+                    AllowResume: true,
+                    ReadErrorPolicy: ImageReadErrorPolicy.ContinueWithZeroFill,
+                    MaxReadErrorChunks: 1024),
                 progressReporter,
                 operationToken);
 
@@ -489,8 +491,13 @@ public partial class MainWindow : Window
             OperationProgressBar.Value = 100;
             StatusTextBlock.Text = "Image acquisition completed";
             AppendSessionMessage(
-                $"Image acquisition completed ({result.BytesWritten:N0} bytes, SHA256 {result.SourceSha256Hex[..16]}..., resumed={result.Resumed}).");
+                $"Image acquisition completed ({result.BytesWritten:N0} bytes, SHA256 {result.SourceSha256Hex[..16]}..., resumed={result.Resumed}, read-errors={result.ReadErrorChunks}, zero-filled={result.ZeroFilledBytes:N0} bytes, policy={result.ReadErrorPolicy}).");
             AppendSessionMessage($"Image acquisition state log: {result.StateLogPath}");
+            if (result.ReadErrorChunks > 0)
+            {
+                AppendSessionMessage(
+                    "Image acquisition used zero-fill continuation for unreadable ranges. Treat recovered content as partial in affected spans.");
+            }
         }
         catch (OperationCanceledException)
         {

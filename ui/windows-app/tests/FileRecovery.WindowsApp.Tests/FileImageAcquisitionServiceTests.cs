@@ -28,6 +28,9 @@ public sealed class FileImageAcquisitionServiceTests
             CancellationToken.None);
 
         Assert.False(result.Resumed);
+        Assert.Equal(ImageReadErrorPolicy.ContinueWithZeroFill, result.ReadErrorPolicy);
+        Assert.Equal(0, result.ReadErrorChunks);
+        Assert.Equal(0, result.ZeroFilledBytes);
         Assert.Equal(sourcePath, result.SourcePath);
         Assert.Equal(destinationPath, result.DestinationImagePath);
         Assert.Equal(sourceBytes.Length, result.BytesWritten);
@@ -41,6 +44,9 @@ public sealed class FileImageAcquisitionServiceTests
         var state = await ReadJsonAsync(result.StateLogPath);
         Assert.Equal("completed", state.RootElement.GetProperty("status").GetString());
         Assert.Equal(sourceBytes.Length, state.RootElement.GetProperty("bytesWritten").GetInt64());
+        Assert.Equal((int)ImageReadErrorPolicy.ContinueWithZeroFill, state.RootElement.GetProperty("readErrorPolicy").GetInt32());
+        Assert.Equal(0, state.RootElement.GetProperty("readErrorChunks").GetInt32());
+        Assert.Equal(0, state.RootElement.GetProperty("zeroFilledBytes").GetInt64());
     }
 
     [Fact]
@@ -84,6 +90,8 @@ public sealed class FileImageAcquisitionServiceTests
             CancellationToken.None);
 
         Assert.True(result.Resumed);
+        Assert.Equal(0, result.ReadErrorChunks);
+        Assert.Equal(0, result.ZeroFilledBytes);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(destinationPath));
 
         var state = await ReadJsonAsync(statePath);
@@ -135,6 +143,53 @@ public sealed class FileImageAcquisitionServiceTests
 
         var state = await ReadJsonAsync(statePath);
         Assert.Equal("failed", state.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncDoesNotResumeWhenCheckpointContainsReadErrors()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source.bin");
+        var destinationPath = Path.Combine(tempRoot, "checkpoint-errors.img");
+        var statePath = destinationPath + ".acquisition.json";
+
+        var sourceBytes = BuildBytes(180_000);
+        await File.WriteAllBytesAsync(sourcePath, sourceBytes);
+        await File.WriteAllBytesAsync(destinationPath, sourceBytes[..64_000]);
+
+        await WriteStateAsync(
+            statePath,
+            new
+            {
+                sourcePath = Path.GetFullPath(sourcePath),
+                destinationImagePath = Path.GetFullPath(destinationPath),
+                sourceSizeBytes = sourceBytes.Length,
+                chunkSizeBytes = 64 * 1024,
+                bytesWritten = 64_000,
+                startedUtc = "2026-04-09T10:00:00+00:00",
+                updatedUtc = "2026-04-09T10:01:00+00:00",
+                status = "in_progress",
+                readErrorPolicy = 1,
+                readErrorChunks = 2,
+                zeroFilledBytes = 131072,
+            });
+
+        var service = new FileImageAcquisitionService();
+        var result = await service.AcquireImageAsync(
+            new ImageAcquisitionRequest(
+                SourcePath: sourcePath,
+                DestinationImagePath: destinationPath,
+                StateLogPath: statePath,
+                ChunkSizeBytes: 64 * 1024,
+                AllowResume: true,
+                ReadErrorPolicy: ImageReadErrorPolicy.ContinueWithZeroFill),
+            progress: null,
+            CancellationToken.None);
+
+        Assert.False(result.Resumed);
+        Assert.Equal(0, result.ReadErrorChunks);
+        Assert.Equal(0, result.ZeroFilledBytes);
+        Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(destinationPath));
     }
 
     private static byte[] BuildBytes(int length)

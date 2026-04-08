@@ -5,5 +5,7 @@ public sealed record ImageAcquisitionProgress(
     long TotalBytes,
     double PercentComplete,
     double ThroughputBytesPerSecond,
-    bool Resumed
+    bool Resumed,
+    int ReadErrorChunks,
+    long ZeroFilledBytes
 );

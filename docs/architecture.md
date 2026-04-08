@@ -50,7 +50,7 @@
 - Session state persisted in SQLite (created under `%LocalAppData%\\FileRecovery`).
 - Session retention maintenance applies a 30-day window plus maximum recent-session cap and supports explicit compaction (`VACUUM`) from the diagnostics actions.
 - Structured session logs written as JSONL plus readable text logs.
-- Image acquisition service now supports clone-first capture to raw image files with resume-safe checkpoint logs and SHA-256 verification.
+- Image acquisition service now supports clone-first capture to raw image files with resume-safe checkpoint logs, SHA-256 verification, and explicit read-error policy controls (`FailFast` or `ContinueWithZeroFill`).
 - Session and recovery actions now gate live-media operations behind an explicit image-first recommendation confirmation.
 
 ## Interop boundary

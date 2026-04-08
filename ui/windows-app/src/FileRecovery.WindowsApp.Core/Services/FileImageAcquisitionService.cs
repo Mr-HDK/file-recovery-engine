@@ -26,6 +26,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 nameof(request),
                 $"Chunk size must be at least {MinChunkSizeBytes} bytes.");
         }
+        if (request.MaxReadErrorChunks < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Max read error chunks must be non-negative.");
+        }
 
         var sourcePath = Path.GetFullPath(request.SourcePath);
         var destinationPath = Path.GetFullPath(request.DestinationImagePath);
@@ -70,6 +74,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         var resumed = false;
         var sourceHashHex = string.Empty;
         var destinationHashHex = string.Empty;
+        var readErrorChunks = 0;
+        var zeroFilledBytes = 0L;
 
         if (sourceSizeBytes < 0)
         {
@@ -80,7 +86,12 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         var canResume = request.AllowResume
             && checkpoint is not null
             && File.Exists(destinationPath)
-            && IsCompatibleResume(checkpoint, sourcePath, destinationPath, sourceSizeBytes, request.ChunkSizeBytes);
+            && IsCompatibleResume(
+                checkpoint,
+                sourcePath,
+                destinationPath,
+                sourceSizeBytes,
+                request.ChunkSizeBytes);
 
         if (canResume)
         {
@@ -88,6 +99,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             var destinationLength = new FileInfo(destinationPath).Length;
             bytesWritten = Math.Min(Math.Min(destinationLength, checkpoint.BytesWritten), sourceSizeBytes);
             resumed = bytesWritten > 0;
+            readErrorChunks = checkpoint.ReadErrorChunks;
+            zeroFilledBytes = checkpoint.ZeroFilledBytes;
         }
 
         await WriteStateAsync(
@@ -100,6 +113,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 bytesWritten,
                 startedUtc,
                 status: "in_progress",
+                readErrorPolicy: request.ReadErrorPolicy,
+                readErrorChunks: readErrorChunks,
+                zeroFilledBytes: zeroFilledBytes,
                 sourceSha256Hex: null,
                 destinationSha256Hex: null,
                 error: null),
@@ -141,15 +157,25 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     TotalBytes: sourceSizeBytes,
                     PercentComplete: Percent(bytesWritten, sourceSizeBytes),
                     ThroughputBytesPerSecond: 0,
-                    Resumed: resumed));
+                    Resumed: resumed,
+                    ReadErrorChunks: readErrorChunks,
+                    ZeroFilledBytes: zeroFilledBytes));
 
                 var buffer = new byte[request.ChunkSizeBytes];
-                while (true)
+                while (bytesWritten < sourceSizeBytes)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    var read = await sourceStream.ReadAsync(buffer.AsMemory(), cancellationToken);
-                    if (read == 0)
+                    var remaining = sourceSizeBytes - bytesWritten;
+                    var requested = (int)Math.Min(buffer.Length, remaining);
+                    var (read, zeroFilled) = await ReadSourceChunkWithPolicyAsync(
+                        sourceStream,
+                        buffer,
+                        requested,
+                        request,
+                        readErrorChunks,
+                        cancellationToken);
+                    if (read == 0 && !zeroFilled)
                     {
                         break;
                     }
@@ -157,6 +183,11 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     await destinationStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                     sourceHash.AppendData(buffer, 0, read);
                     bytesWritten += read;
+                    if (zeroFilled)
+                    {
+                        readErrorChunks++;
+                        zeroFilledBytes += read;
+                    }
 
                     var elapsed = stopwatch.Elapsed;
                     var elapsedDelta = elapsed - lastSampleElapsed;
@@ -169,7 +200,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                         TotalBytes: sourceSizeBytes,
                         PercentComplete: Percent(bytesWritten, sourceSizeBytes),
                         ThroughputBytesPerSecond: throughput,
-                        Resumed: resumed));
+                        Resumed: resumed,
+                        ReadErrorChunks: readErrorChunks,
+                        ZeroFilledBytes: zeroFilledBytes));
 
                     if (elapsed - lastCheckpointWrite >= TimeSpan.FromSeconds(1))
                     {
@@ -183,6 +216,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                                 bytesWritten,
                                 startedUtc,
                                 status: "in_progress",
+                                readErrorPolicy: request.ReadErrorPolicy,
+                                readErrorChunks: readErrorChunks,
+                                zeroFilledBytes: zeroFilledBytes,
                                 sourceSha256Hex: null,
                                 destinationSha256Hex: null,
                                 error: null),
@@ -212,6 +248,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 bytesWritten,
                 startedUtc,
                 status: "completed",
+                readErrorPolicy: request.ReadErrorPolicy,
+                readErrorChunks: readErrorChunks,
+                zeroFilledBytes: zeroFilledBytes,
                 sourceSha256Hex: sourceHashHex,
                 destinationSha256Hex: destinationHashHex,
                 error: null);
@@ -224,7 +263,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 BytesWritten: bytesWritten,
                 SourceSha256Hex: sourceHashHex,
                 DestinationSha256Hex: destinationHashHex,
-                Resumed: resumed);
+                Resumed: resumed,
+                ReadErrorPolicy: request.ReadErrorPolicy,
+                ReadErrorChunks: readErrorChunks,
+                ZeroFilledBytes: zeroFilledBytes);
         }
         catch (OperationCanceledException)
         {
@@ -238,6 +280,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     bytesWritten,
                     startedUtc,
                     status: "canceled",
+                    readErrorPolicy: request.ReadErrorPolicy,
+                    readErrorChunks: readErrorChunks,
+                    zeroFilledBytes: zeroFilledBytes,
                     sourceSha256Hex: sourceHashHex,
                     destinationSha256Hex: destinationHashHex,
                     error: "Acquisition canceled."),
@@ -256,6 +301,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     bytesWritten,
                     startedUtc,
                     status: "failed",
+                    readErrorPolicy: request.ReadErrorPolicy,
+                    readErrorChunks: readErrorChunks,
+                    zeroFilledBytes: zeroFilledBytes,
                     sourceSha256Hex: sourceHashHex,
                     destinationSha256Hex: destinationHashHex,
                     error: ex.Message),
@@ -275,7 +323,41 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             && string.Equals(state.DestinationImagePath, destinationPath, StringComparison.OrdinalIgnoreCase)
             && state.SourceSizeBytes == sourceSizeBytes
             && state.ChunkSizeBytes == chunkSizeBytes
+            && state.ReadErrorChunks == 0
+            && state.ZeroFilledBytes == 0
             && state.BytesWritten >= 0;
+    }
+
+    private static async Task<(int bytesRead, bool zeroFilled)> ReadSourceChunkWithPolicyAsync(
+        FileStream sourceStream,
+        byte[] buffer,
+        int requestedBytes,
+        ImageAcquisitionRequest request,
+        int currentReadErrorChunks,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var read = await sourceStream.ReadAsync(buffer.AsMemory(0, requestedBytes), cancellationToken);
+            return (read, false);
+        }
+        catch (IOException) when (request.ReadErrorPolicy == ImageReadErrorPolicy.ContinueWithZeroFill)
+        {
+            if (request.MaxReadErrorChunks > 0 && currentReadErrorChunks >= request.MaxReadErrorChunks)
+            {
+                throw new IOException(
+                    $"Read-error chunk threshold reached ({request.MaxReadErrorChunks}).");
+            }
+
+            if (!sourceStream.CanSeek)
+            {
+                throw new IOException("Source stream does not support seek for zero-fill continuation.");
+            }
+
+            Array.Clear(buffer, 0, requestedBytes);
+            sourceStream.Seek(requestedBytes, SeekOrigin.Current);
+            return (requestedBytes, true);
+        }
     }
 
     private static async Task VerifyAndHashResumePrefixAsync(
@@ -406,6 +488,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         long bytesWritten,
         DateTimeOffset startedUtc,
         string status,
+        ImageReadErrorPolicy readErrorPolicy,
+        int readErrorChunks,
+        long zeroFilledBytes,
         string? sourceSha256Hex,
         string? destinationSha256Hex,
         string? error)
@@ -420,6 +505,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             StartedUtc = startedUtc,
             UpdatedUtc = DateTimeOffset.UtcNow,
             Status = status,
+            ReadErrorPolicy = readErrorPolicy,
+            ReadErrorChunks = readErrorChunks,
+            ZeroFilledBytes = zeroFilledBytes,
             SourceSha256Hex = sourceSha256Hex,
             DestinationSha256Hex = destinationSha256Hex,
             Error = error,
@@ -447,6 +535,9 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         public DateTimeOffset StartedUtc { get; init; }
         public DateTimeOffset UpdatedUtc { get; init; }
         public string Status { get; init; } = string.Empty;
+        public ImageReadErrorPolicy ReadErrorPolicy { get; init; } = ImageReadErrorPolicy.FailFast;
+        public int ReadErrorChunks { get; init; }
+        public long ZeroFilledBytes { get; init; }
         public string? SourceSha256Hex { get; init; }
         public string? DestinationSha256Hex { get; init; }
         public string? Error { get; init; }
