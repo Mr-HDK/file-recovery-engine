@@ -120,9 +120,11 @@ dependencies = [
  "fr-scoring",
  "fr-session",
  "fr-types",
+ "fr-ufs",
  "fr-usn",
  "fr-vss",
  "fr-winio",
+ "fr-xfs",
 ]
 
 [[package]]
@@ -201,6 +203,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-ufs"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "thiserror",
+]
+
+[[package]]
 name = "fr-usn"
 version = "0.1.0"
 dependencies = [
@@ -239,6 +249,14 @@ dependencies = [
  "fr-types",
  "thiserror",
  "windows-sys",
+]
+
+[[package]]
+name = "fr-xfs"
+version = "0.1.0"
+dependencies = [
+ "fr-types",
+ "thiserror",
 ]
 
 [[package]]

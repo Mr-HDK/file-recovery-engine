@@ -175,6 +175,82 @@ public sealed class NativeEngineProbeTests
     }
 
     [Fact]
+    public void ProbeXfsSuperblockFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeXfsSuperblockFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 120, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void XfsDeletedCandidatesFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.GetXfsDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Empty(result.Candidates);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 120, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void ProbeUfsSuperblockFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeUfsSuperblockFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 130, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void UfsDeletedCandidatesFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.GetUfsDeletedCandidatesFromSession(987654321, maxEntries: 64, candidateCapacity: 32);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Empty(result.Candidates);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 130, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
     public void ProbeApfsContainerFromSessionReturnsDeterministicStatus()
     {
         var result = NativeEngineProbe.ProbeApfsContainerFromSession(987654321);

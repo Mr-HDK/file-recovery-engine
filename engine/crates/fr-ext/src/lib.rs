@@ -6,10 +6,14 @@ const EXT_SUPERBLOCK_OFFSET: usize = 1024;
 const EXT_SUPERBLOCK_SIZE: usize = 1024;
 const EXT_SUPERBLOCK_MAGIC_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x38;
 const EXT_SUPERBLOCK_INODE_SIZE_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x58;
+const EXT_SUPERBLOCK_FEATURE_COMPAT_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x5C;
+const EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET: usize = EXT_SUPERBLOCK_OFFSET + 0x60;
 const EXT_GROUP_DESCRIPTOR_INODE_TABLE_OFFSET: usize = 0x08;
 const EXT_INODE_SIZE_HIGH_OFFSET: usize = 0x6C;
 const EXT_MIN_DELETION_UNIX: u32 = 315_532_800; // 1980-01-01
 const EXT_MAX_DELETION_UNIX: u32 = 4_102_444_800; // 2100-01-01
+const EXT_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
+const EXT_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleDescriptor {
@@ -28,6 +32,7 @@ pub fn descriptor() -> ModuleDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtSuperblock {
+    pub filesystem_kind: ExtFilesystemKind,
     pub inodes_count: u32,
     pub blocks_count: u64,
     pub first_data_block: u32,
@@ -35,6 +40,31 @@ pub struct ExtSuperblock {
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub inode_size_bytes: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtFilesystemKind {
+    Ext2,
+    Ext3,
+    Ext4,
+}
+
+impl ExtFilesystemKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExtFilesystemKind::Ext2 => "ext2",
+            ExtFilesystemKind::Ext3 => "ext3",
+            ExtFilesystemKind::Ext4 => "ext4",
+        }
+    }
+
+    pub fn as_code(&self) -> u32 {
+        match self {
+            ExtFilesystemKind::Ext2 => 1,
+            ExtFilesystemKind::Ext3 => 2,
+            ExtFilesystemKind::Ext4 => 3,
+        }
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -100,7 +130,12 @@ pub fn parse_superblock(image: &[u8]) -> Result<ExtSuperblock, SuperblockParseEr
         return Err(SuperblockParseError::InvalidInodeSize(inode_size_bytes));
     }
 
+    let features_compat = read_u32_le(image, EXT_SUPERBLOCK_FEATURE_COMPAT_OFFSET);
+    let features_incompat = read_u32_le(image, EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET);
+    let filesystem_kind = classify_ext_filesystem(features_compat, features_incompat);
+
     Ok(ExtSuperblock {
+        filesystem_kind,
         inodes_count: read_u32_le(image, EXT_SUPERBLOCK_OFFSET + 0x00),
         blocks_count: read_u32_le(image, EXT_SUPERBLOCK_OFFSET + 0x04) as u64,
         first_data_block: read_u32_le(image, EXT_SUPERBLOCK_OFFSET + 0x14),
@@ -109,6 +144,16 @@ pub fn parse_superblock(image: &[u8]) -> Result<ExtSuperblock, SuperblockParseEr
         inodes_per_group: read_u32_le(image, EXT_SUPERBLOCK_OFFSET + 0x28),
         inode_size_bytes,
     })
+}
+
+fn classify_ext_filesystem(features_compat: u32, features_incompat: u32) -> ExtFilesystemKind {
+    if (features_incompat & EXT_FEATURE_INCOMPAT_EXTENTS) != 0 {
+        ExtFilesystemKind::Ext4
+    } else if (features_compat & EXT_FEATURE_COMPAT_HAS_JOURNAL) != 0 {
+        ExtFilesystemKind::Ext3
+    } else {
+        ExtFilesystemKind::Ext2
+    }
 }
 
 pub fn scan_deleted_candidates(
@@ -489,12 +534,37 @@ mod tests {
     fn parses_valid_ext_superblock() {
         let image = build_test_ext4_image();
         let sb = parse_superblock(&image).expect("parse ext superblock");
+        assert_eq!(sb.filesystem_kind, ExtFilesystemKind::Ext4);
         assert_eq!(sb.block_size_bytes, 4096);
         assert_eq!(sb.inodes_count, 1024);
         assert_eq!(sb.blocks_count, 8192);
         assert_eq!(sb.first_data_block, 0);
         assert_eq!(sb.inodes_per_group, 256);
         assert_eq!(sb.inode_size_bytes, 256);
+    }
+
+    #[test]
+    fn classifies_ext3_when_journal_feature_present_without_extents() {
+        let mut image = build_test_ext4_image();
+        write_u32(&mut image, EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET, 0);
+        write_u32(
+            &mut image,
+            EXT_SUPERBLOCK_FEATURE_COMPAT_OFFSET,
+            EXT_FEATURE_COMPAT_HAS_JOURNAL,
+        );
+
+        let sb = parse_superblock(&image).expect("parse ext3-like superblock");
+        assert_eq!(sb.filesystem_kind, ExtFilesystemKind::Ext3);
+    }
+
+    #[test]
+    fn classifies_ext2_when_no_journal_or_extents_features_present() {
+        let mut image = build_test_ext4_image();
+        write_u32(&mut image, EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET, 0);
+        write_u32(&mut image, EXT_SUPERBLOCK_FEATURE_COMPAT_OFFSET, 0);
+
+        let sb = parse_superblock(&image).expect("parse ext2-like superblock");
+        assert_eq!(sb.filesystem_kind, ExtFilesystemKind::Ext2);
     }
 
     #[test]
@@ -626,6 +696,11 @@ mod tests {
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x18, 2);
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x20, 32768);
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x28, 256);
+        write_u32(
+            &mut image,
+            EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET,
+            EXT_FEATURE_INCOMPAT_EXTENTS,
+        );
         write_u16(&mut image, EXT_SUPERBLOCK_MAGIC_OFFSET, 0xEF53);
         write_u16(&mut image, EXT_SUPERBLOCK_INODE_SIZE_OFFSET, 256);
         write_u32(
@@ -643,6 +718,11 @@ mod tests {
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x18, 2);
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x20, 32_768);
         write_u32(&mut image, EXT_SUPERBLOCK_OFFSET + 0x28, 256);
+        write_u32(
+            &mut image,
+            EXT_SUPERBLOCK_FEATURE_INCOMPAT_OFFSET,
+            EXT_FEATURE_INCOMPAT_EXTENTS,
+        );
         write_u16(&mut image, EXT_SUPERBLOCK_MAGIC_OFFSET, 0xEF53);
         write_u16(&mut image, EXT_SUPERBLOCK_INODE_SIZE_OFFSET, 256);
         write_u32(

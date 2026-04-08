@@ -667,7 +667,7 @@ public partial class MainWindow : Window
                                 {
                                     var metadata = extSuperblock.Metadata;
                                     AppendSessionMessage(
-                                        $"ext superblock details: block={metadata.BlockSizeBytes}, inode-size={metadata.InodeSizeBytes}, inodes/group={metadata.InodesPerGroup}, total-inodes={metadata.TotalInodes}, total-blocks={metadata.TotalBlocks}.");
+                                        $"{metadata.Filesystem} superblock details: block={metadata.BlockSizeBytes}, inode-size={metadata.InodeSizeBytes}, inodes/group={metadata.InodesPerGroup}, total-inodes={metadata.TotalInodes}, total-blocks={metadata.TotalBlocks}.");
 
                                     operationToken.ThrowIfCancellationRequested();
                                     var extCandidates = NativeEngineProbe.GetExtDeletedCandidatesFromSession(
@@ -676,71 +676,115 @@ public partial class MainWindow : Window
                                         candidateCapacity: candidateCapacity);
                                     AppendSessionMessage(
                                         $"ext quick scan candidates: {extCandidates.Message} (status {extCandidates.StatusCode}, count={extCandidates.Candidates.Count}).");
-                                    RenderQuickScanCandidates(extCandidates, "ext4");
+                                    RenderQuickScanCandidates(extCandidates, metadata.Filesystem);
                                     quickScanLoaded = extCandidates.Success;
                                 }
                                 else
                                 {
                                     operationToken.ThrowIfCancellationRequested();
-                                    var apfsContainer = NativeEngineProbe.ProbeApfsContainerFromSession(open.SessionId);
-                                    AppendSessionMessage($"APFS container probe: {apfsContainer.Message} (status {apfsContainer.StatusCode}).");
-                                    if (apfsContainer.Success && apfsContainer.Metadata is not null)
+                                    var xfsSuperblock = NativeEngineProbe.ProbeXfsSuperblockFromSession(open.SessionId);
+                                    AppendSessionMessage($"XFS superblock probe: {xfsSuperblock.Message} (status {xfsSuperblock.StatusCode}).");
+                                    if (xfsSuperblock.Success && xfsSuperblock.Metadata is not null)
                                     {
-                                        var metadata = apfsContainer.Metadata;
+                                        var metadata = xfsSuperblock.Metadata;
                                         AppendSessionMessage(
-                                            $"APFS container details: block={metadata.BlockSizeBytes}, blocks={metadata.BlockCount}, features=0x{metadata.Features:X}, incompat=0x{metadata.IncompatFeatures:X}, oid={metadata.ContainerObjectId}.");
+                                            $"XFS superblock details: block={metadata.BlockSizeBytes}, inode-size={metadata.InodeSizeBytes}, ag-count={metadata.AllocationGroupCount}, data-blocks={metadata.DataBlocks}.");
 
                                         operationToken.ThrowIfCancellationRequested();
-                                        var apfsCandidates = NativeEngineProbe.GetApfsDeletedCandidatesFromSession(
+                                        var xfsCandidates = NativeEngineProbe.GetXfsDeletedCandidatesFromSession(
                                             open.SessionId,
                                             maxEntries: checked((uint)quickScanMaxRecords),
                                             candidateCapacity: candidateCapacity);
                                         AppendSessionMessage(
-                                            $"APFS quick scan candidates: {apfsCandidates.Message} (status {apfsCandidates.StatusCode}, count={apfsCandidates.Candidates.Count}).");
-                                        RenderQuickScanCandidates(apfsCandidates, "APFS");
-                                        quickScanLoaded = apfsCandidates.Success;
+                                            $"XFS quick scan candidates: {xfsCandidates.Message} (status {xfsCandidates.StatusCode}, count={xfsCandidates.Candidates.Count}).");
+                                        RenderQuickScanCandidates(xfsCandidates, "XFS");
+                                        quickScanLoaded = xfsCandidates.Success;
                                     }
                                     else
                                     {
                                         operationToken.ThrowIfCancellationRequested();
-                                        var hfsVolume = NativeEngineProbe.ProbeHfsVolumeHeaderFromSession(open.SessionId);
-                                        AppendSessionMessage($"HFS+ volume probe: {hfsVolume.Message} (status {hfsVolume.StatusCode}).");
-                                        if (hfsVolume.Success && hfsVolume.Metadata is not null)
+                                        var ufsSuperblock = NativeEngineProbe.ProbeUfsSuperblockFromSession(open.SessionId);
+                                        AppendSessionMessage($"UFS superblock probe: {ufsSuperblock.Message} (status {ufsSuperblock.StatusCode}).");
+                                        if (ufsSuperblock.Success && ufsSuperblock.Metadata is not null)
                                         {
-                                            var metadata = hfsVolume.Metadata;
+                                            var metadata = ufsSuperblock.Metadata;
                                             AppendSessionMessage(
-                                                $"HFS+ volume details: signature=0x{metadata.Signature:X4}, version={metadata.Version}, block={metadata.BlockSizeBytes}, total-blocks={metadata.TotalBlocks}, files={metadata.FileCount}, folders={metadata.FolderCount}.");
+                                                $"UFS superblock details: magic=0x{metadata.Magic:X8}, block={metadata.BlockSizeBytes}, fragment={metadata.FragmentSizeBytes}, total-blocks={metadata.TotalBlocks}.");
 
                                             operationToken.ThrowIfCancellationRequested();
-                                            var hfsCandidates = NativeEngineProbe.GetHfsDeletedCandidatesFromSession(
+                                            var ufsCandidates = NativeEngineProbe.GetUfsDeletedCandidatesFromSession(
                                                 open.SessionId,
                                                 maxEntries: checked((uint)quickScanMaxRecords),
                                                 candidateCapacity: candidateCapacity);
                                             AppendSessionMessage(
-                                                $"HFS+ quick scan candidates: {hfsCandidates.Message} (status {hfsCandidates.StatusCode}, count={hfsCandidates.Candidates.Count}).");
-                                            RenderQuickScanCandidates(hfsCandidates, "HFS+");
-                                            quickScanLoaded = hfsCandidates.Success;
+                                                $"UFS quick scan candidates: {ufsCandidates.Message} (status {ufsCandidates.StatusCode}, count={ufsCandidates.Candidates.Count}).");
+                                            RenderQuickScanCandidates(ufsCandidates, "UFS");
+                                            quickScanLoaded = ufsCandidates.Success;
                                         }
                                         else
                                         {
                                             operationToken.ThrowIfCancellationRequested();
-                                            var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(open.SessionId);
-                                            AppendSessionMessage($"FAT boot probe: {fatBoot.Message} (status {fatBoot.StatusCode}).");
-                                            if (fatBoot.Success && fatBoot.Metadata is not null)
+                                            var apfsContainer = NativeEngineProbe.ProbeApfsContainerFromSession(open.SessionId);
+                                            AppendSessionMessage($"APFS container probe: {apfsContainer.Message} (status {apfsContainer.StatusCode}).");
+                                            if (apfsContainer.Success && apfsContainer.Metadata is not null)
                                             {
-                                                var metadata = fatBoot.Metadata;
+                                                var metadata = apfsContainer.Metadata;
                                                 AppendSessionMessage(
-                                                    $"FAT boot details: fs={metadata.Filesystem}, sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, FAT offset={metadata.FatOffsetBytes}, data offset={metadata.DataRegionOffsetBytes}, root cluster={metadata.RootDirectoryFirstCluster}.");
+                                                    $"APFS container details: block={metadata.BlockSizeBytes}, blocks={metadata.BlockCount}, features=0x{metadata.Features:X}, incompat=0x{metadata.IncompatFeatures:X}, oid={metadata.ContainerObjectId}.");
 
                                                 operationToken.ThrowIfCancellationRequested();
-                                                var fatCandidates = NativeEngineProbe.GetFatDeletedCandidatesFromSession(
+                                                var apfsCandidates = NativeEngineProbe.GetApfsDeletedCandidatesFromSession(
                                                     open.SessionId,
                                                     maxEntries: checked((uint)quickScanMaxRecords),
                                                     candidateCapacity: candidateCapacity);
                                                 AppendSessionMessage(
-                                                    $"FAT quick scan candidates: {fatCandidates.Message} (status {fatCandidates.StatusCode}, count={fatCandidates.Candidates.Count}).");
-                                                RenderQuickScanCandidates(fatCandidates, metadata.Filesystem);
-                                                quickScanLoaded = fatCandidates.Success;
+                                                    $"APFS quick scan candidates: {apfsCandidates.Message} (status {apfsCandidates.StatusCode}, count={apfsCandidates.Candidates.Count}).");
+                                                RenderQuickScanCandidates(apfsCandidates, "APFS");
+                                                quickScanLoaded = apfsCandidates.Success;
+                                            }
+                                            else
+                                            {
+                                                operationToken.ThrowIfCancellationRequested();
+                                                var hfsVolume = NativeEngineProbe.ProbeHfsVolumeHeaderFromSession(open.SessionId);
+                                                AppendSessionMessage($"HFS+ volume probe: {hfsVolume.Message} (status {hfsVolume.StatusCode}).");
+                                                if (hfsVolume.Success && hfsVolume.Metadata is not null)
+                                                {
+                                                    var metadata = hfsVolume.Metadata;
+                                                    AppendSessionMessage(
+                                                        $"HFS+ volume details: signature=0x{metadata.Signature:X4}, version={metadata.Version}, block={metadata.BlockSizeBytes}, total-blocks={metadata.TotalBlocks}, files={metadata.FileCount}, folders={metadata.FolderCount}.");
+
+                                                    operationToken.ThrowIfCancellationRequested();
+                                                    var hfsCandidates = NativeEngineProbe.GetHfsDeletedCandidatesFromSession(
+                                                        open.SessionId,
+                                                        maxEntries: checked((uint)quickScanMaxRecords),
+                                                        candidateCapacity: candidateCapacity);
+                                                    AppendSessionMessage(
+                                                        $"HFS+ quick scan candidates: {hfsCandidates.Message} (status {hfsCandidates.StatusCode}, count={hfsCandidates.Candidates.Count}).");
+                                                    RenderQuickScanCandidates(hfsCandidates, "HFS+");
+                                                    quickScanLoaded = hfsCandidates.Success;
+                                                }
+                                                else
+                                                {
+                                                    operationToken.ThrowIfCancellationRequested();
+                                                    var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(open.SessionId);
+                                                    AppendSessionMessage($"FAT boot probe: {fatBoot.Message} (status {fatBoot.StatusCode}).");
+                                                    if (fatBoot.Success && fatBoot.Metadata is not null)
+                                                    {
+                                                        var metadata = fatBoot.Metadata;
+                                                        AppendSessionMessage(
+                                                            $"FAT boot details: fs={metadata.Filesystem}, sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, FAT offset={metadata.FatOffsetBytes}, data offset={metadata.DataRegionOffsetBytes}, root cluster={metadata.RootDirectoryFirstCluster}.");
+
+                                                        operationToken.ThrowIfCancellationRequested();
+                                                        var fatCandidates = NativeEngineProbe.GetFatDeletedCandidatesFromSession(
+                                                            open.SessionId,
+                                                            maxEntries: checked((uint)quickScanMaxRecords),
+                                                            candidateCapacity: candidateCapacity);
+                                                        AppendSessionMessage(
+                                                            $"FAT quick scan candidates: {fatCandidates.Message} (status {fatCandidates.StatusCode}, count={fatCandidates.Candidates.Count}).");
+                                                        RenderQuickScanCandidates(fatCandidates, metadata.Filesystem);
+                                                        quickScanLoaded = fatCandidates.Success;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1094,6 +1138,116 @@ public partial class MainWindow : Window
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildExtSyntheticRecordNumber(candidate.EntryOffsetBytes, index),
+                    Deleted: candidate.Deleted,
+                    IsGhostRecord: false,
+                    Directory: candidate.IsDirectory,
+                    NonResidentData: false,
+                    HasNamedDataStreams: false,
+                    IsCompressed: false,
+                    IsSparse: false,
+                    IsEncrypted: false,
+                    Name: name,
+                    OriginalPath: path,
+                    ParentRecordNumber: candidate.InodeNumber > 0 ? candidate.InodeNumber : null,
+                    DataSizeBytes: candidate.SizeBytes > 0 ? candidate.SizeBytes : null,
+                    AllocatedSizeBytes: null,
+                    FileAttributes: null,
+                    CreatedFileTimeUtc: null,
+                    ModifiedFileTimeUtc: null,
+                    MftModifiedFileTimeUtc: null,
+                    AccessedFileTimeUtc: null,
+                    EvidenceSources: evidenceSources,
+                    ConfidenceTier: "Low",
+                    ConfidenceReason: confidenceReason,
+                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+            })
+            .ToArray();
+
+        RenderQuickScanCandidates(mapped);
+    }
+
+    private void RenderQuickScanCandidates(EngineXfsDeletedCandidatesResult result, string filesystem)
+    {
+        if (!result.Success)
+        {
+            _quickScanCandidates.Clear();
+            _candidateClusterCount = 0;
+            _candidateDedupedCount = 0;
+            RefreshCandidateView();
+            AppendCandidateActivity("XFS candidate load failed: engine result was not successful.");
+            return;
+        }
+
+        var evidenceSources = string.IsNullOrWhiteSpace(filesystem) ? "XFS" : filesystem.Trim();
+        var mapped = result.Candidates
+            .Select((candidate, index) =>
+            {
+                var name = string.IsNullOrWhiteSpace(candidate.Name)
+                    ? $"xfs-inode-{candidate.InodeNumber}"
+                    : candidate.Name;
+                var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
+                    ? $".\\{name}"
+                    : candidate.ReconstructedPath;
+                var confidenceReason =
+                    $"{evidenceSources} deleted inode candidate from metadata scan (recovery path not implemented yet).";
+                return new QuickScanCandidateRecord(
+                    Ordinal: index,
+                    RecordNumber: BuildXfsSyntheticRecordNumber(candidate.InodeNumber, index),
+                    Deleted: candidate.Deleted,
+                    IsGhostRecord: false,
+                    Directory: candidate.IsDirectory,
+                    NonResidentData: false,
+                    HasNamedDataStreams: false,
+                    IsCompressed: false,
+                    IsSparse: false,
+                    IsEncrypted: false,
+                    Name: name,
+                    OriginalPath: path,
+                    ParentRecordNumber: candidate.InodeNumber > 0 ? candidate.InodeNumber : null,
+                    DataSizeBytes: candidate.SizeBytes > 0 ? candidate.SizeBytes : null,
+                    AllocatedSizeBytes: null,
+                    FileAttributes: null,
+                    CreatedFileTimeUtc: null,
+                    ModifiedFileTimeUtc: null,
+                    MftModifiedFileTimeUtc: null,
+                    AccessedFileTimeUtc: null,
+                    EvidenceSources: evidenceSources,
+                    ConfidenceTier: "Low",
+                    ConfidenceReason: confidenceReason,
+                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+            })
+            .ToArray();
+
+        RenderQuickScanCandidates(mapped);
+    }
+
+    private void RenderQuickScanCandidates(EngineUfsDeletedCandidatesResult result, string filesystem)
+    {
+        if (!result.Success)
+        {
+            _quickScanCandidates.Clear();
+            _candidateClusterCount = 0;
+            _candidateDedupedCount = 0;
+            RefreshCandidateView();
+            AppendCandidateActivity("UFS candidate load failed: engine result was not successful.");
+            return;
+        }
+
+        var evidenceSources = string.IsNullOrWhiteSpace(filesystem) ? "UFS" : filesystem.Trim();
+        var mapped = result.Candidates
+            .Select((candidate, index) =>
+            {
+                var name = string.IsNullOrWhiteSpace(candidate.Name)
+                    ? $"ufs-inode-{candidate.InodeNumber}"
+                    : candidate.Name;
+                var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
+                    ? $".\\{name}"
+                    : candidate.ReconstructedPath;
+                var confidenceReason =
+                    $"{evidenceSources} deleted inode candidate from metadata scan (recovery path not implemented yet).";
+                return new QuickScanCandidateRecord(
+                    Ordinal: index,
+                    RecordNumber: BuildUfsSyntheticRecordNumber(candidate.InodeNumber, index),
                     Deleted: candidate.Deleted,
                     IsGhostRecord: false,
                     Directory: candidate.IsDirectory,
@@ -3904,6 +4058,19 @@ public partial class MainWindow : Window
         var folded = (uint)(entryOffsetBytes ^ (entryOffsetBytes >> 32));
         var mixed = unchecked(folded ^ ((uint)ordinal * 3266489917u));
         return unchecked(0xD000_0000u | (mixed & 0x1FFF_FFFFu));
+    }
+
+    private static uint BuildXfsSyntheticRecordNumber(ulong inodeNumber, int ordinal)
+    {
+        var folded = (uint)(inodeNumber ^ (inodeNumber >> 32));
+        var mixed = unchecked(folded ^ ((uint)ordinal * 2246822519u));
+        return unchecked(0x9000_0000u | (mixed & 0x1FFF_FFFFu));
+    }
+
+    private static uint BuildUfsSyntheticRecordNumber(uint inodeNumber, int ordinal)
+    {
+        var mixed = unchecked(inodeNumber ^ ((uint)ordinal * 3266489917u));
+        return unchecked(0x8000_0000u | (mixed & 0x1FFF_FFFFu));
     }
 
     private static uint BuildApfsSyntheticRecordNumber(ulong cnid, int ordinal)
