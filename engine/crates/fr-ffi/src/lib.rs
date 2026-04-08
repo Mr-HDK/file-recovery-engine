@@ -5735,6 +5735,146 @@ mod tests {
     }
 
     #[test]
+    fn ffi_get_fat_deleted_candidates_from_session_recovers_deleted_lfn_name() {
+        let image = build_test_fat32_image_with_deleted_lfn_entry();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-scan-lfn-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32-lfn.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_fat_deleted_candidate(); 16];
+        let mut written = 0u32;
+        let status = fr_get_fat_deleted_candidates_from_session(
+            session_id,
+            32,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 0);
+        assert!(written >= 1);
+        assert_eq!(
+            c_string_bytes_to_string(&candidates[0].name),
+            "QuarterlyReport.txt".to_string()
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&candidates[0].reconstructed_path),
+            r".\QuarterlyReport.txt".to_string()
+        );
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_fat_deleted_candidates_from_session_reports_cluster_loop_status() {
+        let image = build_test_fat32_image_with_cluster_loop();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-scan-loop-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32-loop.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_fat_deleted_candidate(); 16];
+        let mut written = 0u32;
+        let status = fr_get_fat_deleted_candidates_from_session(
+            session_id,
+            32,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 73);
+        assert_eq!(written, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_get_fat_deleted_candidates_from_session_reports_invalid_cluster_status() {
+        let image = build_test_fat32_image_with_bad_cluster_chain();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-fat-scan-badcluster-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("fat32-badcluster.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut candidates = vec![empty_fat_deleted_candidate(); 16];
+        let mut written = 0u32;
+        let status = fr_get_fat_deleted_candidates_from_session(
+            session_id,
+            32,
+            candidates.as_mut_ptr(),
+            candidates.len() as u32,
+            &mut written,
+        );
+        assert_eq!(status, 71);
+        assert_eq!(written, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
     fn ffi_recover_fat_candidate_to_file_writes_expected_bytes() {
         let payload = b"fat-recovery-ok";
         let image = build_test_fat32_image_with_recoverable_file(payload);
@@ -8012,6 +8152,40 @@ mod tests {
         image
     }
 
+    fn build_test_fat32_image_with_deleted_lfn_entry() -> Vec<u8> {
+        let mut image = build_test_fat32_image_with_deleted_entry();
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset..root_sector_offset + 512].fill(0);
+
+        write_fat32_lfn_entry(&mut image, root_sector_offset, 0x42, "rt.txt");
+        write_fat32_lfn_entry(&mut image, root_sector_offset + 32, 0x01, "QuarterlyRepo");
+
+        image[root_sector_offset + 64] = 0xE5;
+        image[root_sector_offset + 65..root_sector_offset + 72].copy_from_slice(b"EPORT~1");
+        image[root_sector_offset + 72..root_sector_offset + 75].copy_from_slice(b"TXT");
+        image[root_sector_offset + 64 + 11] = 0x20;
+        write_u16(&mut image, root_sector_offset + 64 + 26, 5);
+        write_u32(&mut image, root_sector_offset + 64 + 28, 4321);
+        image[root_sector_offset + 96] = 0x00;
+
+        image
+    }
+
+    fn build_test_fat32_image_with_cluster_loop() -> Vec<u8> {
+        let mut image = build_test_fat32_image_with_deleted_entry();
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (2 * 4), 3);
+        write_u32(&mut image, fat_sector_offset + (3 * 4), 2);
+        image
+    }
+
+    fn build_test_fat32_image_with_bad_cluster_chain() -> Vec<u8> {
+        let mut image = build_test_fat32_image_with_deleted_entry();
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (2 * 4), 0x0FFF_FFF7);
+        image
+    }
+
     fn build_test_fat32_image_with_recoverable_file(payload: &[u8]) -> Vec<u8> {
         let mut image = vec![0u8; 512 * 128];
         write_u16(&mut image, 0x0B, 512);
@@ -8045,6 +8219,33 @@ mod tests {
             .copy_from_slice(payload);
 
         image
+    }
+
+    fn write_fat32_lfn_entry(image: &mut [u8], offset: usize, order: u8, text: &str) {
+        let entry = &mut image[offset..offset + 32];
+        entry.fill(0);
+        entry[0] = order;
+        entry[11] = 0x0F;
+        entry[12] = 0x00;
+        entry[13] = 0x00;
+        write_u16(entry, 26, 0);
+        write_lfn_text(entry, text);
+    }
+
+    fn write_lfn_text(entry: &mut [u8], text: &str) {
+        const CHAR_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+        for offset in CHAR_OFFSETS {
+            write_u16(entry, offset, 0xFFFF);
+        }
+
+        let units: Vec<u16> = text.encode_utf16().take(13).collect();
+        for (index, code_unit) in units.iter().enumerate() {
+            write_u16(entry, CHAR_OFFSETS[index], *code_unit);
+        }
+
+        if units.len() < CHAR_OFFSETS.len() {
+            write_u16(entry, CHAR_OFFSETS[units.len()], 0x0000);
+        }
     }
 
     fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {

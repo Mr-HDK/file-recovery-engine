@@ -14,7 +14,7 @@ pub struct ModuleDescriptor {
 pub fn descriptor() -> ModuleDescriptor {
     ModuleDescriptor {
         name: "fr-fat",
-        purpose: "FAT32/exFAT boot metadata parsing and deleted-entry quick scan.",
+        purpose: "FAT32/exFAT boot metadata parsing and deleted-entry full-tree scan.",
         source_kind: RecoverySourceKind::Volume,
     }
 }
@@ -170,6 +170,10 @@ pub fn scan_deleted_root_entries_with_boot(
 ) -> Result<Vec<FatDeletedEntry>, ScanError> {
     scan_deleted_entries_with_boot(image, boot, max_entries, max_directory_clusters)
 }
+
+const FAT_CHAIN_BAD_CLUSTER: u32 = 0x0FFF_FFF7;
+const FAT_CHAIN_EOC_MIN: u32 = 0x0FFF_FFF8;
+const FAT_CHAIN_RESERVED_MIN: u32 = 0x0FFF_FFF0;
 
 fn parse_fat32_boot_sector(bytes: &[u8]) -> Result<FatBootSector, BootSectorParseError> {
     let boot_signature = read_u16_le(bytes, 0x1FE);
@@ -547,6 +551,7 @@ fn collect_cluster_chain(
     let mut seen = HashSet::new();
     let mut chain = Vec::new();
     let mut current = start_cluster;
+    let mut ended = false;
     for _ in 0..max_clusters {
         if !seen.insert(current) {
             return Err(ScanError::ClusterLoop(current));
@@ -554,13 +559,23 @@ fn collect_cluster_chain(
 
         chain.push(current);
         let next = read_fat_entry(image, boot, current)?;
-        if next == 0 || next >= 0x0FFF_FFF8 {
+        if next == 0 || next >= FAT_CHAIN_EOC_MIN {
+            ended = true;
             break;
         }
-        if next < 2 {
-            break;
+        if next < 2
+            || next == FAT_CHAIN_BAD_CLUSTER
+            || (FAT_CHAIN_RESERVED_MIN..FAT_CHAIN_EOC_MIN).contains(&next)
+        {
+            return Err(ScanError::InvalidCluster(next));
         }
         current = next;
+    }
+
+    if !ended {
+        return Err(ScanError::ArithmeticOverflow(
+            "directory cluster chain exceeded traversal cap",
+        ));
     }
 
     Ok(chain)
@@ -790,8 +805,37 @@ mod tests {
         let image = build_exfat_nested_test_image();
         let (_, entries) = quick_scan_deleted_root_entries(&image, 32).expect("scan nested exfat");
         let paths: HashSet<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+        assert!(paths.contains(r".\docs"));
         assert!(paths.contains(r".\lost.doc"));
         assert!(paths.contains(r".\docs\notes.txt"));
+    }
+
+    #[test]
+    fn scans_deleted_fat32_long_file_name_entries() {
+        let image = build_fat32_deleted_lfn_test_image();
+        let (_, entries) = quick_scan_deleted_root_entries(&image, 16).expect("scan lfn fat32");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "QuarterlyReport.txt");
+        assert_eq!(entry.path, r".\QuarterlyReport.txt");
+        assert!(!entry.is_directory);
+        assert_eq!(entry.start_cluster, 5);
+        assert_eq!(entry.size_bytes, 4321);
+    }
+
+    #[test]
+    fn returns_cluster_loop_error_for_directory_chain() {
+        let image = build_fat32_loop_chain_test_image();
+        let err = quick_scan_deleted_root_entries(&image, 16).expect_err("expected cluster loop");
+        assert!(matches!(err, ScanError::ClusterLoop(2)));
+    }
+
+    #[test]
+    fn returns_invalid_cluster_error_for_bad_cluster_marker() {
+        let image = build_fat32_bad_cluster_chain_test_image();
+        let err =
+            quick_scan_deleted_root_entries(&image, 16).expect_err("expected invalid cluster chain");
+        assert!(matches!(err, ScanError::InvalidCluster(0x0FFF_FFF7)));
     }
 
     fn build_fat32_test_image() -> Vec<u8> {
@@ -867,6 +911,40 @@ mod tests {
         image
     }
 
+    fn build_fat32_deleted_lfn_test_image() -> Vec<u8> {
+        let mut image = build_fat32_test_image();
+        let root_sector_offset = 33 * 512;
+        image[root_sector_offset..root_sector_offset + 512].fill(0);
+
+        write_fat32_lfn_entry(&mut image, root_sector_offset, 0x42, "rt.txt");
+        write_fat32_lfn_entry(&mut image, root_sector_offset + 32, 0x01, "QuarterlyRepo");
+
+        image[root_sector_offset + 64] = 0xE5;
+        image[root_sector_offset + 65..root_sector_offset + 72].copy_from_slice(b"EPORT~1");
+        image[root_sector_offset + 72..root_sector_offset + 75].copy_from_slice(b"TXT");
+        image[root_sector_offset + 64 + 11] = 0x20;
+        write_u16(&mut image, root_sector_offset + 64 + 26, 5);
+        write_u32(&mut image, root_sector_offset + 64 + 28, 4321);
+        image[root_sector_offset + 96] = 0x00;
+
+        image
+    }
+
+    fn build_fat32_loop_chain_test_image() -> Vec<u8> {
+        let mut image = build_fat32_test_image();
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (2 * 4), 3);
+        write_u32(&mut image, fat_sector_offset + (3 * 4), 2);
+        image
+    }
+
+    fn build_fat32_bad_cluster_chain_test_image() -> Vec<u8> {
+        let mut image = build_fat32_test_image();
+        let fat_sector_offset = 32 * 512;
+        write_u32(&mut image, fat_sector_offset + (2 * 4), 0x0FFF_FFF7);
+        image
+    }
+
     fn build_exfat_test_image() -> Vec<u8> {
         let mut image = vec![0u8; 512 * 128];
         image[0x03..0x0B].copy_from_slice(EXFAT_OEM_ID);
@@ -928,7 +1006,7 @@ mod tests {
         write_u32(&mut image, fat_sector_offset + (5 * 4), 0xFFFF_FFFF);
 
         let root_sector_offset = 40 * 512;
-        image[root_sector_offset] = 0x85;
+        image[root_sector_offset] = 0x05;
         image[root_sector_offset + 1] = 2;
         write_u16(&mut image, root_sector_offset + 4, 0x10);
 
@@ -976,6 +1054,33 @@ mod tests {
         image[docs_sector_offset + 96] = 0x00;
 
         image
+    }
+
+    fn write_fat32_lfn_entry(image: &mut [u8], offset: usize, order: u8, text: &str) {
+        let entry = &mut image[offset..offset + 32];
+        entry.fill(0);
+        entry[0] = order;
+        entry[11] = 0x0F;
+        entry[12] = 0x00;
+        entry[13] = 0x00;
+        write_u16(entry, 26, 0);
+        write_lfn_text(entry, text);
+    }
+
+    fn write_lfn_text(entry: &mut [u8], text: &str) {
+        const CHAR_OFFSETS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+        for offset in CHAR_OFFSETS {
+            write_u16(entry, offset, 0xFFFF);
+        }
+
+        let units: Vec<u16> = text.encode_utf16().take(13).collect();
+        for (index, code_unit) in units.iter().enumerate() {
+            write_u16(entry, CHAR_OFFSETS[index], *code_unit);
+        }
+
+        if units.len() < CHAR_OFFSETS.len() {
+            write_u16(entry, CHAR_OFFSETS[units.len()], 0x0000);
+        }
     }
 
     fn write_utf16_entry(slot: &mut [u8], value: &str) {
