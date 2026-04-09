@@ -271,6 +271,51 @@ public sealed record EngineFatBootProbeResult(
     int StatusCode
 );
 
+public sealed record EngineRaidLayoutMetadata(
+    string MetadataFamily,
+    string Level,
+    uint MemberCount,
+    uint StripeSizeBytes,
+    ulong DataOffsetBytes,
+    string ParityRotation,
+    byte ConfidenceScore,
+    IReadOnlyList<uint> DiskOrder
+);
+
+public sealed record EngineRaidLayoutProbeResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineRaidLayoutMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineRaidManualOverride(
+    bool OverrideLevel,
+    string? Level,
+    bool OverrideStripeSize,
+    uint StripeSizeBytes,
+    bool OverrideDataOffset,
+    ulong DataOffsetBytes,
+    bool OverrideParityRotation,
+    string? ParityRotation,
+    IReadOnlyList<uint>? DiskOrder
+);
+
+public sealed record EngineRaidLogicalMapping(
+    uint MemberIndex,
+    ulong MemberOffsetBytes,
+    uint? ParityMemberIndex
+);
+
+public sealed record EngineRaidLogicalMappingResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineRaidLogicalMapping? Mapping,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineNtfsQuickScanResult(
     bool EngineAvailable,
     bool Success,
@@ -1472,6 +1517,133 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineRaidLayoutProbeResult ProbeRaidLayoutFromSession(
+        ulong sessionId,
+        EngineRaidManualOverride? manualOverride = null)
+    {
+        NativeRaidManualOverride? nativeOverride;
+        try
+        {
+            nativeOverride = BuildNativeRaidManualOverride(manualOverride);
+        }
+        catch (ArgumentException ex)
+        {
+            return new EngineRaidLayoutProbeResult(true, false, null, ex.Message, 142);
+        }
+
+        try
+        {
+            var hasOverride = nativeOverride.HasValue;
+            int status;
+            NativeRaidLayout nativeLayout;
+            if (hasOverride)
+            {
+                var overrideValue = nativeOverride.GetValueOrDefault();
+                status = fr_probe_raid_layout_from_session(sessionId, ref overrideValue, out nativeLayout);
+            }
+            else
+            {
+                status = fr_probe_raid_layout_from_session(sessionId, IntPtr.Zero, out nativeLayout);
+            }
+
+            if (status == 0)
+            {
+                var diskOrder = new List<uint>((int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers));
+                var diskOrderCount = (int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers);
+                for (var index = 0; index < diskOrderCount; index++)
+                {
+                    diskOrder.Add(nativeLayout.DiskOrder[index]);
+                }
+
+                var metadata = new EngineRaidLayoutMetadata(
+                    MetadataFamily: MapRaidMetadataFamily(nativeLayout.MetadataFamily),
+                    Level: MapRaidLevel(nativeLayout.Level),
+                    MemberCount: nativeLayout.MemberCount,
+                    StripeSizeBytes: nativeLayout.StripeSizeBytes,
+                    DataOffsetBytes: nativeLayout.DataOffsetBytes,
+                    ParityRotation: MapRaidParityRotation(nativeLayout.ParityRotation),
+                    ConfidenceScore: nativeLayout.ConfidenceScore,
+                    DiskOrder: diskOrder);
+
+                return new EngineRaidLayoutProbeResult(
+                    true,
+                    true,
+                    metadata,
+                    "RAID layout metadata parsed.",
+                    status);
+            }
+
+            return new EngineRaidLayoutProbeResult(
+                true,
+                false,
+                null,
+                MapRaidStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRaidLayoutProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRaidLayoutProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineRaidLogicalMappingResult MapRaidLogicalOffset(
+        EngineRaidLayoutMetadata layout,
+        ulong logicalOffsetBytes)
+    {
+        if (layout is null)
+        {
+            throw new ArgumentNullException(nameof(layout));
+        }
+
+        NativeRaidLayout nativeLayout;
+        try
+        {
+            nativeLayout = BuildNativeRaidLayout(layout);
+        }
+        catch (ArgumentException ex)
+        {
+            return new EngineRaidLogicalMappingResult(true, false, null, ex.Message, 142);
+        }
+
+        try
+        {
+            var status = fr_map_raid_logical_offset(ref nativeLayout, logicalOffsetBytes, out var nativeMapping);
+            if (status == 0)
+            {
+                var mapping = new EngineRaidLogicalMapping(
+                    MemberIndex: nativeMapping.MemberIndex,
+                    MemberOffsetBytes: nativeMapping.MemberOffsetBytes,
+                    ParityMemberIndex: nativeMapping.HasParityMember != 0 ? nativeMapping.ParityMemberIndex : null);
+
+                return new EngineRaidLogicalMappingResult(
+                    true,
+                    true,
+                    mapping,
+                    "RAID logical mapping resolved.",
+                    status);
+            }
+
+            return new EngineRaidLogicalMappingResult(
+                true,
+                false,
+                null,
+                MapRaidStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRaidLogicalMappingResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRaidLogicalMappingResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
     public static EngineNtfsQuickScanResult QuickScanNtfsFromSession(ulong sessionId, uint maxRecords)
     {
         try
@@ -2265,6 +2437,26 @@ public static class NativeEngineProbe
         };
     }
 
+    private static string MapRaidStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            20 => "Session not found.",
+            31 => "Source read ended before required RAID metadata could be loaded.",
+            140 => "No supported RAID metadata detected.",
+            141 => "RAID metadata was detected but layout is unsupported or invalid.",
+            142 => "Manual RAID override is invalid.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            _ => "Unknown engine response.",
+        };
+    }
+
     private static string MapFatFilesystem(uint filesystemKind)
     {
         return filesystemKind switch
@@ -2284,6 +2476,181 @@ public static class NativeEngineProbe
             ExtFilesystemKindExt4 => "ext4",
             _ => "ext",
         };
+    }
+
+    private static string MapRaidMetadataFamily(uint family)
+    {
+        return family switch
+        {
+            RaidMetadataFamilyLinuxMd => "Linux MD",
+            RaidMetadataFamilyWindowsStorageSpaces => "Windows Storage Spaces",
+            _ => "Unknown",
+        };
+    }
+
+    private static uint MapRaidMetadataFamilyCode(string metadataFamily)
+    {
+        if (string.Equals(metadataFamily, "linux md", StringComparison.OrdinalIgnoreCase))
+        {
+            return RaidMetadataFamilyLinuxMd;
+        }
+
+        if (string.Equals(metadataFamily, "windows storage spaces", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(metadataFamily, "storage spaces", StringComparison.OrdinalIgnoreCase))
+        {
+            return RaidMetadataFamilyWindowsStorageSpaces;
+        }
+
+        return RaidMetadataFamilyLinuxMd;
+    }
+
+    private static string MapRaidLevel(uint level)
+    {
+        return level switch
+        {
+            RaidLevelRaid0 => "RAID0",
+            RaidLevelRaid1 => "RAID1",
+            RaidLevelRaid4 => "RAID4",
+            RaidLevelRaid5 => "RAID5",
+            RaidLevelRaid6 => "RAID6",
+            RaidLevelRaid10 => "RAID10",
+            RaidLevelUnknown => "Unknown",
+            _ => "Unknown",
+        };
+    }
+
+    private static uint MapRaidLevelCode(string? level)
+    {
+        if (string.IsNullOrWhiteSpace(level))
+        {
+            return RaidLevelUnknown;
+        }
+
+        return level.Trim().ToLowerInvariant() switch
+        {
+            "raid0" => RaidLevelRaid0,
+            "raid1" => RaidLevelRaid1,
+            "raid4" => RaidLevelRaid4,
+            "raid5" => RaidLevelRaid5,
+            "raid6" => RaidLevelRaid6,
+            "raid10" => RaidLevelRaid10,
+            "unknown" => RaidLevelUnknown,
+            _ => throw new ArgumentException("Unsupported RAID level override value.", nameof(level)),
+        };
+    }
+
+    private static string MapRaidParityRotation(uint parityRotation)
+    {
+        return parityRotation switch
+        {
+            RaidParityLeftSymmetric => "LeftSymmetric",
+            RaidParityRightSymmetric => "RightSymmetric",
+            RaidParityUnknown => "Unknown",
+            _ => "Unknown",
+        };
+    }
+
+    private static uint MapRaidParityRotationCode(string? parityRotation)
+    {
+        if (string.IsNullOrWhiteSpace(parityRotation))
+        {
+            return RaidParityUnknown;
+        }
+
+        return parityRotation.Trim().ToLowerInvariant() switch
+        {
+            "left" => RaidParityLeftSymmetric,
+            "leftsymmetric" => RaidParityLeftSymmetric,
+            "right" => RaidParityRightSymmetric,
+            "rightsymmetric" => RaidParityRightSymmetric,
+            "unknown" => RaidParityUnknown,
+            _ => throw new ArgumentException("Unsupported RAID parity rotation override value.", nameof(parityRotation)),
+        };
+    }
+
+    private static NativeRaidLayout BuildNativeRaidLayout(EngineRaidLayoutMetadata layout)
+    {
+        var native = new NativeRaidLayout
+        {
+            MetadataFamily = MapRaidMetadataFamilyCode(layout.MetadataFamily),
+            Level = MapRaidLevelCode(layout.Level),
+            MemberCount = layout.MemberCount,
+            StripeSizeBytes = layout.StripeSizeBytes,
+            DataOffsetBytes = layout.DataOffsetBytes,
+            ParityRotation = MapRaidParityRotationCode(layout.ParityRotation),
+            ConfidenceScore = layout.ConfidenceScore,
+            Reserved0 = new byte[3],
+            DiskOrderCount = 0,
+            DiskOrder = new uint[RaidLayoutMaxMembers],
+        };
+
+        if (layout.DiskOrder is { Count: > 0 })
+        {
+            var diskOrderCount = Math.Min(layout.DiskOrder.Count, RaidLayoutMaxMembers);
+            native.DiskOrderCount = (uint)diskOrderCount;
+            for (var i = 0; i < diskOrderCount; i++)
+            {
+                native.DiskOrder[i] = layout.DiskOrder[i];
+            }
+        }
+
+        return native;
+    }
+
+    private static NativeRaidManualOverride? BuildNativeRaidManualOverride(EngineRaidManualOverride? manualOverride)
+    {
+        if (manualOverride is null)
+        {
+            return null;
+        }
+
+        var native = new NativeRaidManualOverride
+        {
+            Flags = 0,
+            Level = RaidLevelUnknown,
+            StripeSizeBytes = 0,
+            DataOffsetBytes = 0,
+            ParityRotation = RaidParityUnknown,
+            DiskOrderCount = 0,
+            DiskOrder = new uint[RaidLayoutMaxMembers],
+        };
+
+        if (manualOverride.OverrideLevel)
+        {
+            native.Flags |= RaidManualOverrideFlagLevel;
+            native.Level = MapRaidLevelCode(manualOverride.Level);
+        }
+
+        if (manualOverride.OverrideStripeSize)
+        {
+            native.Flags |= RaidManualOverrideFlagStripeSize;
+            native.StripeSizeBytes = manualOverride.StripeSizeBytes;
+        }
+
+        if (manualOverride.OverrideDataOffset)
+        {
+            native.Flags |= RaidManualOverrideFlagDataOffset;
+            native.DataOffsetBytes = manualOverride.DataOffsetBytes;
+        }
+
+        if (manualOverride.OverrideParityRotation)
+        {
+            native.Flags |= RaidManualOverrideFlagParityRotation;
+            native.ParityRotation = MapRaidParityRotationCode(manualOverride.ParityRotation);
+        }
+
+        if (manualOverride.DiskOrder is { Count: > 0 })
+        {
+            native.Flags |= RaidManualOverrideFlagDiskOrder;
+            var diskOrderCount = Math.Min(manualOverride.DiskOrder.Count, RaidLayoutMaxMembers);
+            native.DiskOrderCount = (uint)diskOrderCount;
+            for (var i = 0; i < diskOrderCount; i++)
+            {
+                native.DiskOrder[i] = manualOverride.DiskOrder[i];
+            }
+        }
+
+        return native;
     }
 
     private static string MapCarveStatusMessage(int statusCode)
@@ -2536,6 +2903,24 @@ public static class NativeEngineProbe
     private const uint ExtFilesystemKindExt4 = 3;
     private const uint FatFilesystemKindFat32 = 1;
     private const uint FatFilesystemKindExFat = 2;
+    private const int RaidLayoutMaxMembers = 32;
+    private const uint RaidManualOverrideFlagLevel = 0x0001;
+    private const uint RaidManualOverrideFlagStripeSize = 0x0002;
+    private const uint RaidManualOverrideFlagDataOffset = 0x0004;
+    private const uint RaidManualOverrideFlagParityRotation = 0x0008;
+    private const uint RaidManualOverrideFlagDiskOrder = 0x0010;
+    private const uint RaidMetadataFamilyLinuxMd = 1;
+    private const uint RaidMetadataFamilyWindowsStorageSpaces = 2;
+    private const uint RaidLevelRaid0 = 1;
+    private const uint RaidLevelRaid1 = 2;
+    private const uint RaidLevelRaid4 = 3;
+    private const uint RaidLevelRaid5 = 4;
+    private const uint RaidLevelRaid6 = 5;
+    private const uint RaidLevelRaid10 = 6;
+    private const uint RaidLevelUnknown = 255;
+    private const uint RaidParityLeftSymmetric = 1;
+    private const uint RaidParityRightSymmetric = 2;
+    private const uint RaidParityUnknown = 255;
     private const uint CarveCandidateFlagPartial = 0x0001;
     private const uint RecoveryDiagHasNamedDataStream = 0x0001;
     private const uint RecoveryDiagSkippedNamedDataStreams = 0x0002;
@@ -2731,6 +3116,49 @@ public static class NativeEngineProbe
         public ulong DataRegionOffsetBytes;
         public uint VolumeSerial;
         public uint Reserved1;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRaidLayout
+    {
+        public uint MetadataFamily;
+        public uint Level;
+        public uint MemberCount;
+        public uint StripeSizeBytes;
+        public ulong DataOffsetBytes;
+        public uint ParityRotation;
+        public byte ConfidenceScore;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 3)]
+        public byte[] Reserved0;
+
+        public uint DiskOrderCount;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = RaidLayoutMaxMembers)]
+        public uint[] DiskOrder;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRaidManualOverride
+    {
+        public uint Flags;
+        public uint Level;
+        public uint StripeSizeBytes;
+        public ulong DataOffsetBytes;
+        public uint ParityRotation;
+        public uint DiskOrderCount;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = RaidLayoutMaxMembers)]
+        public uint[] DiskOrder;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRaidLogicalMapping
+    {
+        public uint MemberIndex;
+        public ulong MemberOffsetBytes;
+        public uint HasParityMember;
+        public uint ParityMemberIndex;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2953,6 +3381,24 @@ public static class NativeEngineProbe
         [Out] NativeFatDeletedCandidate[] candidates,
         uint candidateCapacity,
         out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_raid_layout_from_session(
+        ulong sessionId,
+        IntPtr overrideConfig,
+        out NativeRaidLayout layout);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_raid_layout_from_session(
+        ulong sessionId,
+        ref NativeRaidManualOverride overrideConfig,
+        out NativeRaidLayout layout);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_map_raid_logical_offset(
+        ref NativeRaidLayout layout,
+        ulong logicalOffsetBytes,
+        out NativeRaidLogicalMapping mapping);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_quick_scan_ntfs_from_session(

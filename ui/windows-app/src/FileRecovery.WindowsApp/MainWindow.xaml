@@ -137,21 +137,48 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="220"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Quick scan max records"/>
-                                <TextBox x:Name="QuickScanMaxRecordsTextBox" Grid.Row="0" Grid.Column="1" Margin="8,0,0,6" Text="2048"/>
+                            <TextBox x:Name="QuickScanMaxRecordsTextBox" Grid.Row="0" Grid.Column="1" Margin="8,0,0,6" Text="2048"/>
                             <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Candidate capacity"/>
-                                <TextBox x:Name="CandidateCapacityTextBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" Text="1024"/>
+                            <TextBox x:Name="CandidateCapacityTextBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,6" Text="1024"/>
                             <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Preview cap MiB / chunk KiB"/>
                             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
                                 <TextBox x:Name="PreviewCapMiBTextBox" Width="52" Text="8"/>
                                 <TextBlock Margin="6,4,6,0" Text="/"/>
                                 <TextBox x:Name="PreviewChunkKiBTextBox" Width="52" Text="1024"/>
                             </StackPanel>
+
+                            <CheckBox x:Name="RaidManualOverrideCheckBox"
+                                      Grid.Row="3"
+                                      Grid.ColumnSpan="2"
+                                      Margin="0,8,0,6"
+                                      Content="Enable RAID manual override (expert)"/>
+
+                            <TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="RAID level (raid0/raid1/raid4/raid5/raid6/raid10)"/>
+                            <TextBox x:Name="RaidLevelOverrideTextBox" Grid.Row="4" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Text="RAID stripe size bytes"/>
+                            <TextBox x:Name="RaidStripeSizeTextBox" Grid.Row="5" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="6" Grid.Column="0" VerticalAlignment="Center" Text="RAID data offset bytes"/>
+                            <TextBox x:Name="RaidDataOffsetTextBox" Grid.Row="6" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="7" Grid.Column="0" VerticalAlignment="Center" Text="RAID parity rotation (left/right)"/>
+                            <TextBox x:Name="RaidParityRotationTextBox" Grid.Row="7" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="8" Grid.Column="0" VerticalAlignment="Center" Text="RAID disk order (comma separated)"/>
+                            <TextBox x:Name="RaidDiskOrderTextBox" Grid.Row="8" Grid.Column="1" Margin="8,0,0,0"/>
                         </Grid>
                     </Expander>
 

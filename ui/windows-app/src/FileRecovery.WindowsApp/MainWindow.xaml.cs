@@ -560,6 +560,13 @@ public partial class MainWindow : Window
         var scanMode = ScanModeComboBox.SelectedItem is ScanMode mode ? mode : ScanMode.Quick;
         var quickScanMaxRecords = GetQuickScanMaxRecords();
         var candidateCapacity = GetCandidateCapacity();
+        if (!TryBuildRaidManualOverride(out var raidManualOverride, out var raidOverrideMessage))
+        {
+            StatusTextBlock.Text = "Session blocked by invalid RAID override settings";
+            _validationOutput.Add($"Error: {raidOverrideMessage}");
+            AppendSessionMessage($"RAID override parse error: {raidOverrideMessage}");
+            return;
+        }
         Guid? sessionId = null;
 
         if (!ConfirmImageFirstRecommendation(selectedSource, "session initialization"))
@@ -609,6 +616,40 @@ public partial class MainWindow : Window
                         {
                             _validationOutput.Add($"Error: Engine preflight read failed ({read.Message}).");
                             StatusTextBlock.Text = "Session blocked by engine preflight read";
+                            return;
+                        }
+
+                        operationToken.ThrowIfCancellationRequested();
+                        var raidProbe = NativeEngineProbe.ProbeRaidLayoutFromSession(open.SessionId, raidManualOverride);
+                        AppendSessionMessage($"RAID layout probe: {raidProbe.Message} (status {raidProbe.StatusCode}).");
+                        if (raidProbe.Success && raidProbe.Metadata is not null)
+                        {
+                            var metadata = raidProbe.Metadata;
+                            var orderSummary = metadata.DiskOrder.Count == 0
+                                ? "(none)"
+                                : string.Join(",", metadata.DiskOrder.Select(value => value.ToString(CultureInfo.InvariantCulture)));
+                            AppendSessionMessage(
+                                $"RAID layout details: family={metadata.MetadataFamily}, level={metadata.Level}, members={metadata.MemberCount}, stripe={metadata.StripeSizeBytes}, offset={metadata.DataOffsetBytes}, parity={metadata.ParityRotation}, confidence={metadata.ConfidenceScore}, order={orderSummary}.");
+
+                            var mapping = NativeEngineProbe.MapRaidLogicalOffset(metadata, 0);
+                            if (mapping.Success && mapping.Mapping is not null)
+                            {
+                                var paritySummary = mapping.Mapping.ParityMemberIndex.HasValue
+                                    ? mapping.Mapping.ParityMemberIndex.Value.ToString(CultureInfo.InvariantCulture)
+                                    : "none";
+                                AppendSessionMessage(
+                                    $"RAID logical offset 0 -> member {mapping.Mapping.MemberIndex} @ {mapping.Mapping.MemberOffsetBytes} (parity member {paritySummary}).");
+                            }
+                            else
+                            {
+                                AppendSessionMessage(
+                                    $"RAID logical mapping skipped: {mapping.Message} (status {mapping.StatusCode}).");
+                            }
+                        }
+                        else if (raidProbe.StatusCode == 142)
+                        {
+                            _validationOutput.Add($"Error: RAID override invalid ({raidProbe.Message}).");
+                            StatusTextBlock.Text = "Session blocked by RAID override";
                             return;
                         }
 
@@ -1753,6 +1794,170 @@ public partial class MainWindow : Window
 
         parsed = numeric;
         return true;
+    }
+
+    private static bool TryParseOptionalUInt(string? value, out uint? parsed)
+    {
+        parsed = null;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (!uint.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var numeric))
+        {
+            return false;
+        }
+
+        parsed = numeric;
+        return true;
+    }
+
+    private bool TryBuildRaidManualOverride(
+        out EngineRaidManualOverride? manualOverride,
+        out string errorMessage)
+    {
+        manualOverride = null;
+        errorMessage = string.Empty;
+        if (RaidManualOverrideCheckBox.IsChecked != true)
+        {
+            return true;
+        }
+
+        var hasLevel = !string.IsNullOrWhiteSpace(RaidLevelOverrideTextBox.Text);
+        var hasStripe = !string.IsNullOrWhiteSpace(RaidStripeSizeTextBox.Text);
+        var hasOffset = !string.IsNullOrWhiteSpace(RaidDataOffsetTextBox.Text);
+        var hasParity = !string.IsNullOrWhiteSpace(RaidParityRotationTextBox.Text);
+        var hasDiskOrder = !string.IsNullOrWhiteSpace(RaidDiskOrderTextBox.Text);
+
+        if (!hasLevel && !hasStripe && !hasOffset && !hasParity && !hasDiskOrder)
+        {
+            errorMessage = "RAID override is enabled but no override fields were provided.";
+            return false;
+        }
+
+        uint stripeSizeBytes = 0;
+        if (hasStripe)
+        {
+            if (!TryParseOptionalUInt(RaidStripeSizeTextBox.Text, out var parsedStripe) || !parsedStripe.HasValue)
+            {
+                errorMessage = "RAID stripe size must be an unsigned integer.";
+                return false;
+            }
+            stripeSizeBytes = parsedStripe.Value;
+        }
+
+        ulong dataOffsetBytes = 0;
+        if (hasOffset)
+        {
+            if (!TryParseOptionalUlong(RaidDataOffsetTextBox.Text, out var parsedOffset) || !parsedOffset.HasValue)
+            {
+                errorMessage = "RAID data offset must be an unsigned integer.";
+                return false;
+            }
+            dataOffsetBytes = parsedOffset.Value;
+        }
+
+        var levelValue = hasLevel ? NormalizeRaidLevel(RaidLevelOverrideTextBox.Text) : null;
+        if (hasLevel && levelValue is null)
+        {
+            errorMessage = "RAID level must be one of: raid0, raid1, raid4, raid5, raid6, raid10.";
+            return false;
+        }
+
+        var parityValue = hasParity ? NormalizeRaidParityRotation(RaidParityRotationTextBox.Text) : null;
+        if (hasParity && parityValue is null)
+        {
+            errorMessage = "RAID parity rotation must be either: left or right.";
+            return false;
+        }
+
+        IReadOnlyList<uint>? diskOrder = null;
+        if (hasDiskOrder)
+        {
+            var parsedDiskOrder = ParseRaidDiskOrder(RaidDiskOrderTextBox.Text);
+            if (parsedDiskOrder is null)
+            {
+                errorMessage = "RAID disk order must be comma-separated unsigned integers (example: 0,1,2,3).";
+                return false;
+            }
+
+            if (parsedDiskOrder.Count == 0)
+            {
+                errorMessage = "RAID disk order cannot be empty.";
+                return false;
+            }
+
+            diskOrder = parsedDiskOrder;
+        }
+
+        manualOverride = new EngineRaidManualOverride(
+            OverrideLevel: hasLevel,
+            Level: levelValue,
+            OverrideStripeSize: hasStripe,
+            StripeSizeBytes: stripeSizeBytes,
+            OverrideDataOffset: hasOffset,
+            DataOffsetBytes: dataOffsetBytes,
+            OverrideParityRotation: hasParity,
+            ParityRotation: parityValue,
+            DiskOrder: diskOrder);
+        return true;
+    }
+
+    private static string? NormalizeRaidLevel(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "raid0" => "RAID0",
+            "raid1" => "RAID1",
+            "raid4" => "RAID4",
+            "raid5" => "RAID5",
+            "raid6" => "RAID6",
+            "raid10" => "RAID10",
+            _ => null,
+        };
+    }
+
+    private static string? NormalizeRaidParityRotation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "left" => "LeftSymmetric",
+            "right" => "RightSymmetric",
+            _ => null,
+        };
+    }
+
+    private static IReadOnlyList<uint>? ParseRaidDiskOrder(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<uint>();
+        }
+
+        var segments = raw.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var values = new List<uint>(segments.Length);
+        foreach (var segment in segments)
+        {
+            if (!uint.TryParse(segment, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return null;
+            }
+
+            values.Add(parsed);
+        }
+
+        return values;
     }
 
     private static DateTime? ToUtcStartOfDay(DateTime? date)

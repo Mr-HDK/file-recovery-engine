@@ -13,6 +13,10 @@ use fr_hfs::{
 };
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
+use fr_raid::{
+    map_logical_offset as map_raid_logical_offset, resolve_layout_with_override, ParityRotation,
+    RaidLayout, RaidLevel, RaidLogicalMapping, RaidManualOverride, RaidMetadataFamily,
+};
 use fr_refs::{parse_boot_sector as parse_refs_boot_sector, scan_deleted_candidates_with_boot};
 use fr_scoring::score_candidate_with_reasons;
 use fr_session::{
@@ -252,6 +256,42 @@ pub struct FrFatDeletedCandidate {
 }
 
 #[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrRaidLayout {
+    pub metadata_family: u32,
+    pub level: u32,
+    pub member_count: u32,
+    pub stripe_size_bytes: u32,
+    pub data_offset_bytes: u64,
+    pub parity_rotation: u32,
+    pub confidence_score: u8,
+    pub _reserved0: [u8; 3],
+    pub disk_order_count: u32,
+    pub disk_order: [u32; 32],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrRaidManualOverride {
+    pub flags: u32,
+    pub level: u32,
+    pub stripe_size_bytes: u32,
+    pub data_offset_bytes: u64,
+    pub parity_rotation: u32,
+    pub disk_order_count: u32,
+    pub disk_order: [u32; 32],
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrRaidLogicalMapping {
+    pub member_index: u32,
+    pub member_offset_bytes: u64,
+    pub has_parity_member: u32,
+    pub parity_member_index: u32,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FrCarveCandidate {
     pub offset_bytes: u64,
@@ -323,6 +363,24 @@ const FAT_DELETED_CANDIDATE_FLAG_DIRECTORY: u32 = 0x0002;
 const FAT_FILESYSTEM_KIND_FAT32: u32 = 1;
 const FAT_FILESYSTEM_KIND_EXFAT: u32 = 2;
 const FAT_EOC_MIN: u32 = 0x0FFF_FFF8;
+const RAID_LAYOUT_MAX_MEMBERS: usize = 32;
+const RAID_MANUAL_OVERRIDE_FLAG_LEVEL: u32 = 0x0001;
+const RAID_MANUAL_OVERRIDE_FLAG_STRIPE_SIZE: u32 = 0x0002;
+const RAID_MANUAL_OVERRIDE_FLAG_DATA_OFFSET: u32 = 0x0004;
+const RAID_MANUAL_OVERRIDE_FLAG_PARITY_ROTATION: u32 = 0x0008;
+const RAID_MANUAL_OVERRIDE_FLAG_DISK_ORDER: u32 = 0x0010;
+const RAID_METADATA_FAMILY_LINUX_MD: u32 = 1;
+const RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES: u32 = 2;
+const RAID_LEVEL_RAID0: u32 = 1;
+const RAID_LEVEL_RAID1: u32 = 2;
+const RAID_LEVEL_RAID4: u32 = 3;
+const RAID_LEVEL_RAID5: u32 = 4;
+const RAID_LEVEL_RAID6: u32 = 5;
+const RAID_LEVEL_RAID10: u32 = 6;
+const RAID_LEVEL_UNKNOWN: u32 = 255;
+const RAID_PARITY_LEFT_SYMMETRIC: u32 = 1;
+const RAID_PARITY_RIGHT_SYMMETRIC: u32 = 2;
+const RAID_PARITY_UNKNOWN: u32 = 255;
 
 const CARVE_FAMILY_IMAGES: u32 = 0x0001;
 const CARVE_FAMILY_DOCUMENTS: u32 = 0x0002;
@@ -1333,6 +1391,81 @@ pub extern "C" fn fr_get_fat_deleted_candidates_from_session(
 
     unsafe {
         *out_written = total;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_raid_layout_from_session(
+    session_id: u64,
+    override_cfg: *const FrRaidManualOverride,
+    out_layout: *mut FrRaidLayout,
+) -> i32 {
+    if out_layout.is_null() {
+        return -1;
+    }
+
+    let Ok(mut map) = read_sessions().lock() else {
+        return -200;
+    };
+
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
+
+    let image = match read_prefix_for_raid_scan(session) {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+    if image.len() < 4096 {
+        return 31;
+    }
+
+    let parsed_override = if override_cfg.is_null() {
+        None
+    } else {
+        match decode_raid_manual_override(unsafe { &*override_cfg }) {
+            Ok(value) => Some(value),
+            Err(status) => return status,
+        }
+    };
+
+    let layout = match resolve_layout_with_override(&image, parsed_override.as_ref()) {
+        Ok(Some(layout)) => layout,
+        Ok(None) => return 140,
+        Err(err) => return map_raid_error_to_status(err, parsed_override.is_some()),
+    };
+
+    unsafe {
+        *out_layout = encode_raid_layout(&layout);
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_map_raid_logical_offset(
+    layout: *const FrRaidLayout,
+    logical_offset_bytes: u64,
+    out_mapping: *mut FrRaidLogicalMapping,
+) -> i32 {
+    if layout.is_null() || out_mapping.is_null() {
+        return -1;
+    }
+
+    let layout = match decode_raid_layout(unsafe { &*layout }) {
+        Ok(layout) => layout,
+        Err(status) => return status,
+    };
+
+    let mapping = match map_raid_logical_offset(&layout, logical_offset_bytes) {
+        Ok(mapping) => mapping,
+        Err(err) => return map_raid_error_to_status(err, true),
+    };
+
+    unsafe {
+        *out_mapping = encode_raid_mapping(&mapping);
     }
 
     0
@@ -2491,6 +2624,172 @@ fn encode_fat_deleted_candidate(candidate: &fr_fat::FatDeletedEntry) -> FrFatDel
     write_utf8(&candidate.name, &mut out.name);
     write_utf8(&candidate.path, &mut out.reconstructed_path);
     out
+}
+
+fn encode_raid_layout(layout: &RaidLayout) -> FrRaidLayout {
+    let mut out = FrRaidLayout {
+        metadata_family: encode_raid_metadata_family(layout.metadata_family),
+        level: encode_raid_level(layout.level),
+        member_count: layout.member_count,
+        stripe_size_bytes: layout.stripe_size_bytes,
+        data_offset_bytes: layout.data_offset_bytes,
+        parity_rotation: encode_raid_parity_rotation(layout.parity_rotation),
+        confidence_score: layout.confidence_score,
+        _reserved0: [0u8; 3],
+        disk_order_count: layout.disk_order.len().min(RAID_LAYOUT_MAX_MEMBERS) as u32,
+        disk_order: [0u32; RAID_LAYOUT_MAX_MEMBERS],
+    };
+
+    for (index, value) in layout
+        .disk_order
+        .iter()
+        .take(RAID_LAYOUT_MAX_MEMBERS)
+        .enumerate()
+    {
+        out.disk_order[index] = *value;
+    }
+
+    out
+}
+
+fn decode_raid_layout(layout: &FrRaidLayout) -> Result<RaidLayout, i32> {
+    if layout.member_count < 2 || layout.member_count as usize > RAID_LAYOUT_MAX_MEMBERS {
+        return Err(142);
+    }
+
+    let metadata_family = match decode_raid_metadata_family(layout.metadata_family) {
+        Some(value) => value,
+        None => return Err(142),
+    };
+    let level = match decode_raid_level(layout.level) {
+        Some(value) => value,
+        None => return Err(142),
+    };
+    let parity_rotation = match decode_raid_parity_rotation(layout.parity_rotation) {
+        Some(value) => value,
+        None => return Err(142),
+    };
+
+    let disk_order_count = layout
+        .disk_order_count
+        .min(layout.member_count)
+        .min(RAID_LAYOUT_MAX_MEMBERS as u32) as usize;
+    let disk_order = if disk_order_count == 0 {
+        (0..layout.member_count).collect()
+    } else {
+        layout.disk_order[..disk_order_count].to_vec()
+    };
+
+    Ok(RaidLayout {
+        metadata_family,
+        level,
+        member_count: layout.member_count,
+        stripe_size_bytes: layout.stripe_size_bytes,
+        data_offset_bytes: layout.data_offset_bytes,
+        parity_rotation,
+        disk_order,
+        confidence_score: layout.confidence_score,
+    })
+}
+
+fn decode_raid_manual_override(raw: &FrRaidManualOverride) -> Result<RaidManualOverride, i32> {
+    let mut out = RaidManualOverride::default();
+
+    if raw.flags & RAID_MANUAL_OVERRIDE_FLAG_LEVEL != 0 {
+        out.level = match decode_raid_level(raw.level) {
+            Some(value) => Some(value),
+            None => return Err(142),
+        };
+    }
+    if raw.flags & RAID_MANUAL_OVERRIDE_FLAG_STRIPE_SIZE != 0 {
+        out.stripe_size_bytes = Some(raw.stripe_size_bytes);
+    }
+    if raw.flags & RAID_MANUAL_OVERRIDE_FLAG_DATA_OFFSET != 0 {
+        out.data_offset_bytes = Some(raw.data_offset_bytes);
+    }
+    if raw.flags & RAID_MANUAL_OVERRIDE_FLAG_PARITY_ROTATION != 0 {
+        out.parity_rotation = match decode_raid_parity_rotation(raw.parity_rotation) {
+            Some(value) => Some(value),
+            None => return Err(142),
+        };
+    }
+    if raw.flags & RAID_MANUAL_OVERRIDE_FLAG_DISK_ORDER != 0 {
+        if raw.disk_order_count == 0 || raw.disk_order_count as usize > RAID_LAYOUT_MAX_MEMBERS {
+            return Err(142);
+        }
+
+        out.disk_order = Some(raw.disk_order[..raw.disk_order_count as usize].to_vec());
+    }
+
+    Ok(out)
+}
+
+fn encode_raid_mapping(mapping: &RaidLogicalMapping) -> FrRaidLogicalMapping {
+    FrRaidLogicalMapping {
+        member_index: mapping.member_index,
+        member_offset_bytes: mapping.member_offset_bytes,
+        has_parity_member: u32::from(mapping.parity_member_index.is_some()),
+        parity_member_index: mapping.parity_member_index.unwrap_or(0),
+    }
+}
+
+fn encode_raid_metadata_family(family: RaidMetadataFamily) -> u32 {
+    match family {
+        RaidMetadataFamily::LinuxMd => RAID_METADATA_FAMILY_LINUX_MD,
+        RaidMetadataFamily::WindowsStorageSpaces => RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES,
+    }
+}
+
+fn decode_raid_metadata_family(value: u32) -> Option<RaidMetadataFamily> {
+    match value {
+        RAID_METADATA_FAMILY_LINUX_MD => Some(RaidMetadataFamily::LinuxMd),
+        RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES => {
+            Some(RaidMetadataFamily::WindowsStorageSpaces)
+        }
+        _ => None,
+    }
+}
+
+fn encode_raid_level(level: RaidLevel) -> u32 {
+    match level {
+        RaidLevel::Raid0 => RAID_LEVEL_RAID0,
+        RaidLevel::Raid1 => RAID_LEVEL_RAID1,
+        RaidLevel::Raid4 => RAID_LEVEL_RAID4,
+        RaidLevel::Raid5 => RAID_LEVEL_RAID5,
+        RaidLevel::Raid6 => RAID_LEVEL_RAID6,
+        RaidLevel::Raid10 => RAID_LEVEL_RAID10,
+        RaidLevel::Unknown => RAID_LEVEL_UNKNOWN,
+    }
+}
+
+fn decode_raid_level(value: u32) -> Option<RaidLevel> {
+    match value {
+        RAID_LEVEL_RAID0 => Some(RaidLevel::Raid0),
+        RAID_LEVEL_RAID1 => Some(RaidLevel::Raid1),
+        RAID_LEVEL_RAID4 => Some(RaidLevel::Raid4),
+        RAID_LEVEL_RAID5 => Some(RaidLevel::Raid5),
+        RAID_LEVEL_RAID6 => Some(RaidLevel::Raid6),
+        RAID_LEVEL_RAID10 => Some(RaidLevel::Raid10),
+        RAID_LEVEL_UNKNOWN => Some(RaidLevel::Unknown),
+        _ => None,
+    }
+}
+
+fn encode_raid_parity_rotation(rotation: ParityRotation) -> u32 {
+    match rotation {
+        ParityRotation::LeftSymmetric => RAID_PARITY_LEFT_SYMMETRIC,
+        ParityRotation::RightSymmetric => RAID_PARITY_RIGHT_SYMMETRIC,
+        ParityRotation::Unknown => RAID_PARITY_UNKNOWN,
+    }
+}
+
+fn decode_raid_parity_rotation(value: u32) -> Option<ParityRotation> {
+    match value {
+        RAID_PARITY_LEFT_SYMMETRIC => Some(ParityRotation::LeftSymmetric),
+        RAID_PARITY_RIGHT_SYMMETRIC => Some(ParityRotation::RightSymmetric),
+        RAID_PARITY_UNKNOWN => Some(ParityRotation::Unknown),
+        _ => None,
+    }
 }
 
 fn recover_fat_candidate_data(
@@ -4334,6 +4633,26 @@ fn read_prefix_for_fat_scan(
     }
 }
 
+fn read_prefix_for_raid_scan(
+    session: &mut fr_winio::ReadSession,
+) -> Result<Vec<u8>, fr_winio::WinIoError> {
+    const DEFAULT_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+    const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+
+    let source_len = session.size_bytes().unwrap_or(DEFAULT_SCAN_BYTES);
+    let scan_len = source_len.min(MAX_SCAN_BYTES) as usize;
+    if scan_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = vec![0u8; scan_len];
+    if read_from_session(session, 0, &mut bytes)? {
+        Ok(bytes)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn normalize_max_scan_bytes(max_scan_bytes: u64) -> u64 {
     const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_ALLOWED_SCAN_BYTES: u64 = 256 * 1024 * 1024;
@@ -4397,6 +4716,22 @@ fn map_fat_scan_error(err: fr_fat::ScanError) -> i32 {
     }
 }
 
+fn map_raid_error_to_status(err: fr_raid::RaidError, has_manual_override: bool) -> i32 {
+    match err {
+        fr_raid::RaidError::InvalidDiskOrder | fr_raid::RaidError::InvalidStripeSize(_)
+            if has_manual_override =>
+        {
+            142
+        }
+        fr_raid::RaidError::UnsupportedLayout => 141,
+        fr_raid::RaidError::InvalidDiskOrder
+        | fr_raid::RaidError::InvalidMemberCount(_)
+        | fr_raid::RaidError::InvalidStripeSize(_)
+        | fr_raid::RaidError::ArithmeticOverflow(_)
+        | fr_raid::RaidError::BufferTooSmall { .. } => 141,
+    }
+}
+
 fn map_usn_parse_error(err: fr_usn::UsnParseError) -> i32 {
     match err {
         fr_usn::UsnParseError::TruncatedRecordHeader { .. }
@@ -4438,6 +4773,77 @@ mod tests {
     #[test]
     fn health_check_returns_zero() {
         assert_eq!(fr_health_check(), 0);
+    }
+
+    #[test]
+    fn ffi_probe_raid_layout_from_session_detects_linux_mdraid() {
+        let image = build_test_mdraid_image();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-raid-layout-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("mdraid.img");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut layout = FrRaidLayout::default();
+        assert_eq!(
+            fr_probe_raid_layout_from_session(session_id, std::ptr::null(), &mut layout),
+            0
+        );
+        assert_eq!(layout.metadata_family, RAID_METADATA_FAMILY_LINUX_MD);
+        assert_eq!(layout.level, RAID_LEVEL_RAID5);
+        assert_eq!(layout.member_count, 4);
+        assert_eq!(layout.stripe_size_bytes, 128 * 1024);
+        assert_eq!(layout.data_offset_bytes, 2048 * 512);
+        assert_eq!(layout.parity_rotation, RAID_PARITY_LEFT_SYMMETRIC);
+        assert_eq!(layout.disk_order_count, 4);
+        assert_eq!(&layout.disk_order[..4], &[0, 1, 2, 3]);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_map_raid_logical_offset_reports_member_and_parity() {
+        let layout = FrRaidLayout {
+            metadata_family: RAID_METADATA_FAMILY_LINUX_MD,
+            level: RAID_LEVEL_RAID5,
+            member_count: 4,
+            stripe_size_bytes: 64 * 1024,
+            data_offset_bytes: 2 * 1024 * 1024,
+            parity_rotation: RAID_PARITY_LEFT_SYMMETRIC,
+            confidence_score: 85,
+            _reserved0: [0u8; 3],
+            disk_order_count: 4,
+            disk_order: [
+                0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+            ],
+        };
+        let mut mapping = FrRaidLogicalMapping::default();
+        assert_eq!(fr_map_raid_logical_offset(&layout, 0, &mut mapping), 0);
+        assert_eq!(mapping.member_index, 0);
+        assert_eq!(mapping.member_offset_bytes, 2 * 1024 * 1024);
+        assert_eq!(mapping.has_parity_member, 1);
+        assert_eq!(mapping.parity_member_index, 3);
     }
 
     #[test]
@@ -8091,6 +8497,20 @@ mod tests {
         entry[7] = file_type;
         entry[8..8 + name_bytes.len()].copy_from_slice(name_bytes);
         entry
+    }
+
+    fn build_test_mdraid_image() -> Vec<u8> {
+        let mut image = vec![0u8; 512 * 256];
+        const MD_BASE: usize = 4096;
+        const MD_MAGIC: u32 = 0xA92B4EFC;
+        write_u32(&mut image, MD_BASE + 0x00, MD_MAGIC);
+        write_u32(&mut image, MD_BASE + 0x04, 1);
+        write_u32(&mut image, MD_BASE + 0x48, 5);
+        write_u32(&mut image, MD_BASE + 0x4C, 0);
+        write_u32(&mut image, MD_BASE + 0x50, 128 * 1024);
+        write_u32(&mut image, MD_BASE + 0x5C, 4);
+        write_u64(&mut image, MD_BASE + 0x80, 2048);
+        image
     }
 
     fn build_test_fat32_image_with_deleted_entry() -> Vec<u8> {

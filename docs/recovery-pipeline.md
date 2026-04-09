@@ -25,6 +25,7 @@
 - Phase 8 baseline adds ReFS boot-sector probing and deleted-candidate metadata scanning in-session.
 - Phase 9 baseline adds ext superblock probing and deleted directory-entry candidate scanning for image workflows.
 - Phase 9 ext candidate reconstruction now links directory-entry names to deleted inode-table metadata when inode references remain available.
+- Phase 14 adds RAID preflight metadata probing with optional expert override input (level/stripe/offset/parity/order) and logical member mapping diagnostics before filesystem probe fallback.
 
 5. Artifact-assisted pass
 - Parse USN records and merge rename/move evidence.

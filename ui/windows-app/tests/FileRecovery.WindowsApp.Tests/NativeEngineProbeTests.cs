@@ -99,6 +99,53 @@ public sealed class NativeEngineProbeTests
     }
 
     [Fact]
+    public void ProbeRaidLayoutFromSessionReturnsDeterministicStatus()
+    {
+        var result = NativeEngineProbe.ProbeRaidLayoutFromSession(987654321);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Metadata);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 20, 31, 140, 141, 142, 10, 11, 12, 13, 14, 15, 16 });
+        }
+    }
+
+    [Fact]
+    public void MapRaidLogicalOffsetReturnsDeterministicStatus()
+    {
+        var layout = new EngineRaidLayoutMetadata(
+            MetadataFamily: "Linux MD",
+            Level: "RAID5",
+            MemberCount: 4,
+            StripeSizeBytes: 64 * 1024,
+            DataOffsetBytes: 2 * 1024 * 1024,
+            ParityRotation: "LeftSymmetric",
+            ConfidenceScore: 85,
+            DiskOrder: new uint[] { 0, 1, 2, 3 });
+
+        var result = NativeEngineProbe.MapRaidLogicalOffset(layout, 0);
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Mapping);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 141, 142 });
+        }
+    }
+
+    [Fact]
     public void ProbeRefsBootFromSessionReturnsDeterministicStatus()
     {
         var result = NativeEngineProbe.ProbeRefsBootFromSession(987654321);

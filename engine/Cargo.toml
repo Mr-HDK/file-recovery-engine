@@ -9,6 +9,7 @@ members = [
   "crates/fr-ext",
   "crates/fr-apfs",
   "crates/fr-hfs",
+  "crates/fr-raid",
   "crates/fr-xfs",
   "crates/fr-ufs",
   "crates/fr-refs",

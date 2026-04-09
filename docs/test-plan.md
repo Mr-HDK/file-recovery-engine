@@ -73,7 +73,9 @@
 - Image-acquisition service tests for clone-first copy flow, resume from checkpoint, hash/prefix mismatch handling, and checkpoint compatibility behavior for prior read-error states.
 - Rust unit coverage in `fr-fat` for FAT32/exFAT boot parsing and full-tree deleted-entry extraction (including nested/deleted-directory traversal).
 - Rust unit coverage in `fr-ext` for superblock parsing, deleted inode-table extraction, and deleted directory-entry to inode-metadata reconstruction.
+- Rust unit coverage in `fr-raid` for metadata detection, manual override validation, and logical offset mapping seams.
 - Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions (including nested directory paths).
+- Rust FFI integration coverage for RAID metadata probe and logical mapping ABI seams (`fr_probe_raid_layout_from_session`, `fr_map_raid_logical_offset`).
 - Rust FFI integration coverage for ext direct/single/double/triple-indirect recovery, extent-leaf recovery, sparse/uninitialized extent zero-fill semantics, inline/non-inline symlink export, and directory inode export plus partial/unsupported fallback status handling.
 
 ## Benchmarks

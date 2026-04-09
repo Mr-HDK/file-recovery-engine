@@ -116,6 +116,7 @@ dependencies = [
  "fr-hfs",
  "fr-mft",
  "fr-ntfs",
+ "fr-raid",
  "fr-refs",
  "fr-scoring",
  "fr-session",
@@ -163,6 +164,13 @@ name = "fr-path-recon"
 version = "0.1.0"
 dependencies = [
  "fr-types",
+]
+
+[[package]]
+name = "fr-raid"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
