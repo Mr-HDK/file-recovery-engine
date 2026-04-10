@@ -57,6 +57,59 @@ public sealed class WindowsDeviceEnumerationServiceTests
             service.BuildImageSourceAsync(imagePath, cts.Token));
     }
 
+    [Fact]
+    public async Task BuildNetworkImageSourceAsyncReturnsNetworkCandidateWithEndpointHint()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var imagePath = Path.Combine(tempRoot, "nas-snapshot.img");
+        await File.WriteAllBytesAsync(imagePath, new byte[8192]);
+
+        var topology = new FakeStorageTopologyService();
+        topology.Map(imagePath, "VOL-NAS", 3, 4096);
+        topology.MapMountPaths("VOL-NAS", "N:\\");
+
+        var service = new WindowsDeviceEnumerationService(topology);
+        var candidate = await service.BuildNetworkImageSourceAsync(
+            new NetworkSourceRequest(NetworkSourceProtocol.Smb, imagePath, "nas01/archive"),
+            CancellationToken.None);
+
+        Assert.Equal(RecoverySourceKind.ImageFile, candidate.Kind);
+        Assert.True(candidate.ReadOnlyEnforced);
+        Assert.True(candidate.IsNetworkSource);
+        Assert.Equal("SMB", candidate.NetworkProtocol);
+        Assert.Equal("nas01/archive", candidate.NetworkEndpoint);
+        Assert.Equal("SMB mounted image source", candidate.PartitionInfo);
+        Assert.Equal(Path.GetFullPath(imagePath), candidate.SourcePath);
+        Assert.Equal("VOL-NAS", candidate.VolumeIdentity);
+        Assert.Equal(3, candidate.DiskIndex);
+        Assert.Equal(4096, candidate.SectorSizeBytes);
+    }
+
+    [Fact]
+    public async Task BuildNetworkImageSourceAsyncThrowsWhenPathMissing()
+    {
+        var topology = new FakeStorageTopologyService();
+        var service = new WindowsDeviceEnumerationService(topology);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.BuildNetworkImageSourceAsync(
+                new NetworkSourceRequest(NetworkSourceProtocol.Nfs, "   ", EndpointHint: null),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task BuildNetworkImageSourceAsyncThrowsFileNotFoundWhenImageMissing()
+    {
+        var topology = new FakeStorageTopologyService();
+        var service = new WindowsDeviceEnumerationService(topology);
+        var missingPath = Path.Combine(CreateTemporaryDirectory(), "missing-network.img");
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() =>
+            service.BuildNetworkImageSourceAsync(
+                new NetworkSourceRequest(NetworkSourceProtocol.Smb, missingPath),
+                CancellationToken.None));
+    }
+
     private static string CreateTemporaryDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), "fr-tests", Guid.NewGuid().ToString("N"));

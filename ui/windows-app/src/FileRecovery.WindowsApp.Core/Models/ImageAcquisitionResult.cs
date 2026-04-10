@@ -10,5 +10,12 @@ public sealed record ImageAcquisitionResult(
     bool Resumed,
     ImageReadErrorPolicy ReadErrorPolicy,
     int ReadErrorChunks,
-    long ZeroFilledBytes
+    long ZeroFilledBytes,
+    bool SourceIsNetwork,
+    bool ConstrainedNetworkIo,
+    long? MaxNetworkThroughputBytesPerSecond,
+    RemoteAgentMode RemoteAgentMode,
+    string? RemoteAgentEndpoint,
+    string? ChainOfCustodyLogPath,
+    int NetworkCheckpointCount
 );

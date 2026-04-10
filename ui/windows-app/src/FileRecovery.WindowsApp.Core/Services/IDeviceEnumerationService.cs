@@ -7,4 +7,6 @@ public interface IDeviceEnumerationService
     Task<SourceEnumerationResult> EnumerateAsync(CancellationToken cancellationToken);
 
     Task<SourceCandidate> BuildImageSourceAsync(string imagePath, CancellationToken cancellationToken);
+
+    Task<SourceCandidate> BuildNetworkImageSourceAsync(NetworkSourceRequest request, CancellationToken cancellationToken);
 }

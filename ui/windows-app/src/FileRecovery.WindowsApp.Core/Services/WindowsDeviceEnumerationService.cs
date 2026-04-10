@@ -53,7 +53,64 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
                 ReadOnlyEnforced: true,
                 VolumeLabel: null,
                 MountedPaths: string.Join(";", mountPaths),
-                PartitionInfo: "Image file source");
+                PartitionInfo: "Image file source",
+                IsNetworkSource: false,
+                NetworkProtocol: null,
+                NetworkEndpoint: null);
+        }, cancellationToken);
+    }
+
+    public Task<SourceCandidate> BuildNetworkImageSourceAsync(
+        NetworkSourceRequest request,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ArgumentNullException.ThrowIfNull(request);
+
+            if (string.IsNullOrWhiteSpace(request.SourcePath))
+            {
+                throw new ArgumentException("Network source path is required.", nameof(request));
+            }
+
+            var normalizedPath = NormalizeNetworkPath(request.SourcePath);
+            if (!File.Exists(normalizedPath))
+            {
+                throw new FileNotFoundException("Network source image not found.", normalizedPath);
+            }
+
+            var info = new FileInfo(normalizedPath);
+            var volumeId = _topologyService.TryGetVolumeIdFromPath(normalizedPath);
+            var mountPaths = volumeId is null
+                ? []
+                : _topologyService.GetMountPathsForVolumeId(volumeId);
+            var endpoint = ResolveNetworkEndpoint(normalizedPath, request.EndpointHint);
+            var protocolLabel = request.Protocol switch
+            {
+                NetworkSourceProtocol.Smb => "SMB",
+                NetworkSourceProtocol.Nfs => "NFS",
+                _ => "Network",
+            };
+
+            return new SourceCandidate(
+                Id: $"network-{request.Protocol}-{info.Name}-{info.Length}",
+                Kind: RecoverySourceKind.ImageFile,
+                DisplayName: $"{protocolLabel} Image: {info.Name}",
+                DevicePath: null,
+                FileSystem: "Network image",
+                SizeBytes: info.Length,
+                SectorSizeBytes: _topologyService.TryGetSectorSizeFromPath(normalizedPath),
+                DiskIndex: _topologyService.TryGetDiskIndexFromPath(normalizedPath),
+                VolumeIdentity: volumeId,
+                SourcePath: normalizedPath,
+                ReadOnlyEnforced: true,
+                VolumeLabel: null,
+                MountedPaths: string.Join(";", mountPaths),
+                PartitionInfo: $"{protocolLabel} mounted image source",
+                IsNetworkSource: true,
+                NetworkProtocol: protocolLabel,
+                NetworkEndpoint: endpoint);
         }, cancellationToken);
     }
 
@@ -209,6 +266,40 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
         {
             return string.Empty;
         }
+    }
+
+    private static string NormalizeNetworkPath(string sourcePath)
+    {
+        var trimmed = sourcePath.Trim();
+        if (trimmed.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return trimmed;
+        }
+
+        return Path.GetFullPath(trimmed);
+    }
+
+    private static string? ResolveNetworkEndpoint(string normalizedPath, string? endpointHint)
+    {
+        if (!string.IsNullOrWhiteSpace(endpointHint))
+        {
+            return endpointHint.Trim();
+        }
+
+        if (!normalizedPath.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var segments = normalizedPath
+            .TrimStart('\\')
+            .Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length < 2)
+        {
+            return null;
+        }
+
+        return $"{segments[0]}/{segments[1]}";
     }
 
     private static long? TryReadInt64(ManagementObject obj, string propertyName)

@@ -1,5 +1,6 @@
 using FileRecovery.WindowsApp.Core.Models;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace FileRecovery.WindowsApp.Core.Services;
@@ -7,10 +8,15 @@ namespace FileRecovery.WindowsApp.Core.Services;
 public sealed class FileImageAcquisitionService : IImageAcquisitionService
 {
     private const int MinChunkSizeBytes = 64 * 1024;
+    private const int DefaultConstrainedNetworkChunkSizeBytes = 512 * 1024;
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
+    };
+    private static readonly JsonSerializerOptions JsonLineSerializerOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false,
     };
 
     public async Task<ImageAcquisitionResult> AcquireImageAsync(
@@ -30,8 +36,27 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Max read error chunks must be non-negative.");
         }
+        if (request.ConstrainedNetworkChunkSizeBytes < MinChunkSizeBytes)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                $"Constrained network chunk size must be at least {MinChunkSizeBytes} bytes.");
+        }
+        if (request.MaxNetworkThroughputBytesPerSecond.HasValue
+            && request.MaxNetworkThroughputBytesPerSecond.Value <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "Max network throughput must be positive when specified.");
+        }
+        if (request.RemoteAgentMode == RemoteAgentMode.Required
+            && string.IsNullOrWhiteSpace(request.RemoteAgentEndpoint))
+        {
+            throw new InvalidOperationException(
+                "Remote agent endpoint is required when remote agent mode is set to Required.");
+        }
 
-        var sourcePath = Path.GetFullPath(request.SourcePath);
+        var sourcePath = NormalizeSourcePath(request.SourcePath);
         var destinationPath = Path.GetFullPath(request.DestinationImagePath);
         if (string.Equals(sourcePath, destinationPath, StringComparison.OrdinalIgnoreCase))
         {
@@ -41,6 +66,21 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         var stateLogPath = string.IsNullOrWhiteSpace(request.StateLogPath)
             ? destinationPath + ".acquisition.json"
             : Path.GetFullPath(request.StateLogPath);
+        var isNetworkSource = request.SourceIsNetwork || IsLikelyNetworkPath(sourcePath);
+        var constrainedNetworkIo = isNetworkSource && request.EnableConstrainedNetworkIo;
+        var effectiveChunkSizeBytes = AlignChunkSize(
+            constrainedNetworkIo
+                ? Math.Min(request.ChunkSizeBytes, request.ConstrainedNetworkChunkSizeBytes)
+                : request.ChunkSizeBytes);
+        if (effectiveChunkSizeBytes <= 0)
+        {
+            effectiveChunkSizeBytes = AlignChunkSize(DefaultConstrainedNetworkChunkSizeBytes);
+        }
+        var custodyLogPath = isNetworkSource
+            ? (string.IsNullOrWhiteSpace(request.ChainOfCustodyLogPath)
+                ? stateLogPath + ".custody.jsonl"
+                : Path.GetFullPath(request.ChainOfCustodyLogPath))
+            : null;
 
         var destinationDirectory = Path.GetDirectoryName(destinationPath);
         if (string.IsNullOrWhiteSpace(destinationDirectory))
@@ -54,6 +94,14 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         {
             Directory.CreateDirectory(stateDirectory);
         }
+        if (isNetworkSource && custodyLogPath is not null)
+        {
+            var custodyDirectory = Path.GetDirectoryName(custodyLogPath);
+            if (!string.IsNullOrWhiteSpace(custodyDirectory))
+            {
+                Directory.CreateDirectory(custodyDirectory);
+            }
+        }
 
         if (!File.Exists(sourcePath))
         {
@@ -65,7 +113,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,
-            request.ChunkSizeBytes,
+            effectiveChunkSizeBytes,
             FileOptions.SequentialScan);
 
         var sourceSizeBytes = sourceStream.Length;
@@ -91,7 +139,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 sourcePath,
                 destinationPath,
                 sourceSizeBytes,
-                request.ChunkSizeBytes);
+                effectiveChunkSizeBytes);
+
+        var networkCheckpointCount = 0;
+        var custodyState = await InitializeCustodyStateAsync(custodyLogPath, cancellationToken);
 
         if (canResume)
         {
@@ -101,7 +152,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             resumed = bytesWritten > 0;
             readErrorChunks = checkpoint.ReadErrorChunks;
             zeroFilledBytes = checkpoint.ZeroFilledBytes;
+            networkCheckpointCount = checkpoint.NetworkCheckpointCount;
+            if (isNetworkSource && custodyState is not null)
+            {
+                custodyState.Sequence = Math.Max(custodyState.Sequence, networkCheckpointCount);
+            }
         }
+        var runStartBytesWritten = bytesWritten;
 
         await WriteStateAsync(
             stateLogPath,
@@ -109,7 +166,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 sourcePath,
                 destinationPath,
                 sourceSizeBytes,
-                request.ChunkSizeBytes,
+                effectiveChunkSizeBytes,
                 bytesWritten,
                 startedUtc,
                 status: "in_progress",
@@ -118,7 +175,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 zeroFilledBytes: zeroFilledBytes,
                 sourceSha256Hex: null,
                 destinationSha256Hex: null,
-                error: null),
+                error: null,
+                sourceIsNetwork: isNetworkSource,
+                constrainedNetworkIo: constrainedNetworkIo,
+                maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                remoteAgentMode: request.RemoteAgentMode,
+                remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                networkCheckpointCount: networkCheckpointCount),
             cancellationToken);
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -126,6 +189,25 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         var bytesAtLastSample = bytesWritten;
         var lastSampleElapsed = TimeSpan.Zero;
         using var sourceHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (isNetworkSource && custodyState is not null)
+        {
+            custodyState = await AppendCustodyEventAsync(
+                custodyLogPath!,
+                custodyState,
+                eventName: "network_acquisition_started",
+                payload: new
+                {
+                    source_path = sourcePath,
+                    destination_path = destinationPath,
+                    resumed,
+                    chunk_size_bytes = effectiveChunkSizeBytes,
+                    constrained_network_io = constrainedNetworkIo,
+                    max_network_throughput_bps = request.MaxNetworkThroughputBytesPerSecond,
+                    remote_agent_mode = request.RemoteAgentMode.ToString(),
+                    remote_agent_endpoint = request.RemoteAgentEndpoint,
+                },
+                cancellationToken);
+        }
 
         try
         {
@@ -135,7 +217,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     sourceStream,
                     destinationPath,
                     bytesWritten,
-                    request.ChunkSizeBytes,
+                    effectiveChunkSizeBytes,
                     sourceHash,
                     cancellationToken);
             }
@@ -146,7 +228,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     resumed ? FileMode.Open : FileMode.Create,
                     FileAccess.Write,
                     FileShare.None,
-                    request.ChunkSizeBytes,
+                    effectiveChunkSizeBytes,
                     FileOptions.SequentialScan))
             {
                 destinationStream.Position = bytesWritten;
@@ -161,7 +243,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     ReadErrorChunks: readErrorChunks,
                     ZeroFilledBytes: zeroFilledBytes));
 
-                var buffer = new byte[request.ChunkSizeBytes];
+                var buffer = new byte[effectiveChunkSizeBytes];
                 while (bytesWritten < sourceSizeBytes)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -188,6 +270,16 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                         readErrorChunks++;
                         zeroFilledBytes += read;
                     }
+                    if (isNetworkSource
+                        && request.MaxNetworkThroughputBytesPerSecond.HasValue
+                        && request.MaxNetworkThroughputBytesPerSecond.Value > 0)
+                    {
+                        await ApplyNetworkThroughputThrottleAsync(
+                            bytesWritten - runStartBytesWritten,
+                            request.MaxNetworkThroughputBytesPerSecond.Value,
+                            stopwatch.Elapsed,
+                            cancellationToken);
+                    }
 
                     var elapsed = stopwatch.Elapsed;
                     var elapsedDelta = elapsed - lastSampleElapsed;
@@ -206,13 +298,17 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
 
                     if (elapsed - lastCheckpointWrite >= TimeSpan.FromSeconds(1))
                     {
+                        if (isNetworkSource)
+                        {
+                            networkCheckpointCount++;
+                        }
                         await WriteStateAsync(
                             stateLogPath,
                             BuildState(
                                 sourcePath,
                                 destinationPath,
                                 sourceSizeBytes,
-                                request.ChunkSizeBytes,
+                                effectiveChunkSizeBytes,
                                 bytesWritten,
                                 startedUtc,
                                 status: "in_progress",
@@ -221,8 +317,29 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                                 zeroFilledBytes: zeroFilledBytes,
                                 sourceSha256Hex: null,
                                 destinationSha256Hex: null,
-                                error: null),
+                                error: null,
+                                sourceIsNetwork: isNetworkSource,
+                                constrainedNetworkIo: constrainedNetworkIo,
+                                maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                                remoteAgentMode: request.RemoteAgentMode,
+                                remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                                networkCheckpointCount: networkCheckpointCount),
                             cancellationToken);
+                        if (isNetworkSource && custodyState is not null)
+                        {
+                            custodyState = await AppendCustodyEventAsync(
+                                custodyLogPath!,
+                                custodyState,
+                                eventName: "network_transfer_checkpoint",
+                                payload: new
+                                {
+                                    bytes_written = bytesWritten,
+                                    read_error_chunks = readErrorChunks,
+                                    zero_filled_bytes = zeroFilledBytes,
+                                    checkpoint = networkCheckpointCount,
+                                },
+                                cancellationToken);
+                        }
                         lastCheckpointWrite = elapsed;
                     }
 
@@ -234,17 +351,35 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             }
 
             sourceHashHex = Convert.ToHexString(sourceHash.GetHashAndReset()).ToLowerInvariant();
-            destinationHashHex = await ComputeSha256HexAsync(destinationPath, request.ChunkSizeBytes, cancellationToken);
+            destinationHashHex = await ComputeSha256HexAsync(destinationPath, effectiveChunkSizeBytes, cancellationToken);
             if (!string.Equals(sourceHashHex, destinationHashHex, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("Source and destination SHA-256 digests do not match.");
+            }
+
+            if (isNetworkSource && custodyState is not null)
+            {
+                custodyState = await AppendCustodyEventAsync(
+                    custodyLogPath!,
+                    custodyState,
+                    eventName: "network_acquisition_completed",
+                    payload: new
+                    {
+                        bytes_written = bytesWritten,
+                        source_sha256 = sourceHashHex,
+                        destination_sha256 = destinationHashHex,
+                        read_error_chunks = readErrorChunks,
+                        zero_filled_bytes = zeroFilledBytes,
+                        checkpoints = networkCheckpointCount,
+                    },
+                    cancellationToken);
             }
 
             var completedState = BuildState(
                 sourcePath,
                 destinationPath,
                 sourceSizeBytes,
-                request.ChunkSizeBytes,
+                effectiveChunkSizeBytes,
                 bytesWritten,
                 startedUtc,
                 status: "completed",
@@ -253,7 +388,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 zeroFilledBytes: zeroFilledBytes,
                 sourceSha256Hex: sourceHashHex,
                 destinationSha256Hex: destinationHashHex,
-                error: null);
+                error: null,
+                sourceIsNetwork: isNetworkSource,
+                constrainedNetworkIo: constrainedNetworkIo,
+                maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                remoteAgentMode: request.RemoteAgentMode,
+                remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                networkCheckpointCount: networkCheckpointCount);
             await WriteStateAsync(stateLogPath, completedState, cancellationToken);
 
             return new ImageAcquisitionResult(
@@ -266,17 +407,38 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 Resumed: resumed,
                 ReadErrorPolicy: request.ReadErrorPolicy,
                 ReadErrorChunks: readErrorChunks,
-                ZeroFilledBytes: zeroFilledBytes);
+                ZeroFilledBytes: zeroFilledBytes,
+                SourceIsNetwork: isNetworkSource,
+                ConstrainedNetworkIo: constrainedNetworkIo,
+                MaxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                RemoteAgentMode: request.RemoteAgentMode,
+                RemoteAgentEndpoint: request.RemoteAgentEndpoint,
+                ChainOfCustodyLogPath: custodyLogPath,
+                NetworkCheckpointCount: networkCheckpointCount);
         }
         catch (OperationCanceledException)
         {
+            if (isNetworkSource && custodyState is not null)
+            {
+                await AppendCustodyEventAsync(
+                    custodyLogPath!,
+                    custodyState,
+                    eventName: "network_acquisition_canceled",
+                    payload: new
+                    {
+                        bytes_written = bytesWritten,
+                        read_error_chunks = readErrorChunks,
+                        zero_filled_bytes = zeroFilledBytes,
+                    },
+                    CancellationToken.None);
+            }
             await WriteStateAsync(
                 stateLogPath,
                 BuildState(
                     sourcePath,
                     destinationPath,
                     sourceSizeBytes,
-                    request.ChunkSizeBytes,
+                    effectiveChunkSizeBytes,
                     bytesWritten,
                     startedUtc,
                     status: "canceled",
@@ -285,19 +447,40 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     zeroFilledBytes: zeroFilledBytes,
                     sourceSha256Hex: sourceHashHex,
                     destinationSha256Hex: destinationHashHex,
-                    error: "Acquisition canceled."),
+                    error: "Acquisition canceled.",
+                    sourceIsNetwork: isNetworkSource,
+                    constrainedNetworkIo: constrainedNetworkIo,
+                    maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                    remoteAgentMode: request.RemoteAgentMode,
+                    remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                    networkCheckpointCount: networkCheckpointCount),
                 CancellationToken.None);
             throw;
         }
         catch (Exception ex)
         {
+            if (isNetworkSource && custodyState is not null)
+            {
+                await AppendCustodyEventAsync(
+                    custodyLogPath!,
+                    custodyState,
+                    eventName: "network_acquisition_failed",
+                    payload: new
+                    {
+                        bytes_written = bytesWritten,
+                        read_error_chunks = readErrorChunks,
+                        zero_filled_bytes = zeroFilledBytes,
+                        error = ex.Message,
+                    },
+                    CancellationToken.None);
+            }
             await WriteStateAsync(
                 stateLogPath,
                 BuildState(
                     sourcePath,
                     destinationPath,
                     sourceSizeBytes,
-                    request.ChunkSizeBytes,
+                    effectiveChunkSizeBytes,
                     bytesWritten,
                     startedUtc,
                     status: "failed",
@@ -306,7 +489,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     zeroFilledBytes: zeroFilledBytes,
                     sourceSha256Hex: sourceHashHex,
                     destinationSha256Hex: destinationHashHex,
-                    error: ex.Message),
+                    error: ex.Message,
+                    sourceIsNetwork: isNetworkSource,
+                    constrainedNetworkIo: constrainedNetworkIo,
+                    maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
+                    remoteAgentMode: request.RemoteAgentMode,
+                    remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                    networkCheckpointCount: networkCheckpointCount),
                 CancellationToken.None);
             throw;
         }
@@ -445,6 +634,205 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         return Convert.ToHexString(digest).ToLowerInvariant();
     }
 
+    private static async Task ApplyNetworkThroughputThrottleAsync(
+        long bytesTransferredInCurrentRun,
+        long maxThroughputBytesPerSecond,
+        TimeSpan elapsed,
+        CancellationToken cancellationToken)
+    {
+        if (bytesTransferredInCurrentRun <= 0 || maxThroughputBytesPerSecond <= 0)
+        {
+            return;
+        }
+
+        var expectedElapsedSeconds = bytesTransferredInCurrentRun / (double)maxThroughputBytesPerSecond;
+        var expectedElapsed = TimeSpan.FromSeconds(expectedElapsedSeconds);
+        if (expectedElapsed <= elapsed)
+        {
+            return;
+        }
+
+        var delay = expectedElapsed - elapsed;
+        if (delay > TimeSpan.Zero)
+        {
+            await Task.Delay(delay, cancellationToken);
+        }
+    }
+
+    private static int AlignChunkSize(int chunkSizeBytes)
+    {
+        if (chunkSizeBytes < MinChunkSizeBytes)
+        {
+            return MinChunkSizeBytes;
+        }
+
+        var remainder = chunkSizeBytes % MinChunkSizeBytes;
+        if (remainder == 0)
+        {
+            return chunkSizeBytes;
+        }
+
+        return checked(chunkSizeBytes + (MinChunkSizeBytes - remainder));
+    }
+
+    private static bool IsLikelyNetworkPath(string sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            return false;
+        }
+
+        if (sourcePath.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        try
+        {
+            var root = Path.GetPathRoot(sourcePath);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return false;
+            }
+
+            var drive = new DriveInfo(root);
+            return drive.DriveType == DriveType.Network;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeSourcePath(string sourcePath)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            throw new ArgumentException("Source path is required.", nameof(sourcePath));
+        }
+
+        var trimmed = sourcePath.Trim();
+        if (trimmed.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return trimmed;
+        }
+
+        return Path.GetFullPath(trimmed);
+    }
+
+    private static async Task<CustodyState?> InitializeCustodyStateAsync(
+        string? custodyLogPath,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(custodyLogPath))
+        {
+            return null;
+        }
+
+        if (!File.Exists(custodyLogPath))
+        {
+            return new CustodyState();
+        }
+
+        var lastRecord = await ReadLastCustodyRecordAsync(custodyLogPath, cancellationToken);
+        if (lastRecord is null)
+        {
+            return new CustodyState();
+        }
+
+        return new CustodyState
+        {
+            Sequence = lastRecord.Value.Sequence,
+            PreviousHash = lastRecord.Value.RecordHash,
+        };
+    }
+
+    private static async Task<CustodyState> AppendCustodyEventAsync(
+        string custodyLogPath,
+        CustodyState custodyState,
+        string eventName,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        var payloadJson = JsonSerializer.Serialize(payload, JsonLineSerializerOptions);
+        var timestampUtc = DateTimeOffset.UtcNow;
+        var sequence = custodyState.Sequence + 1;
+        var previousHash = custodyState.PreviousHash;
+        var hashInput = $"{previousHash}|{sequence}|{timestampUtc:O}|{eventName}|{payloadJson}";
+        var recordHash = ComputeDeterministicHash(hashInput);
+
+        var record = new
+        {
+            sequence,
+            timestamp_utc = timestampUtc,
+            event_name = eventName,
+            previous_hash = previousHash,
+            payload,
+            record_hash = recordHash,
+        };
+
+        var line = JsonSerializer.Serialize(record, JsonLineSerializerOptions) + Environment.NewLine;
+        await File.AppendAllTextAsync(custodyLogPath, line, cancellationToken);
+
+        custodyState.Sequence = sequence;
+        custodyState.PreviousHash = recordHash;
+        return custodyState;
+    }
+
+    private static string ComputeDeterministicHash(string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static async Task<(int Sequence, string RecordHash)?> ReadLastCustodyRecordAsync(
+        string custodyLogPath,
+        CancellationToken cancellationToken)
+    {
+        string? lastLine = null;
+        await using var stream = new FileStream(
+            custodyLogPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            bufferSize: 16 * 1024,
+            FileOptions.SequentialScan);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        while (!reader.EndOfStream)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                lastLine = line;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(lastLine))
+        {
+            return null;
+        }
+
+        using var doc = JsonDocument.Parse(lastLine);
+        if (!doc.RootElement.TryGetProperty("sequence", out var sequenceElement))
+        {
+            return null;
+        }
+        if (!doc.RootElement.TryGetProperty("record_hash", out var recordHashElement))
+        {
+            return null;
+        }
+        var sequence = sequenceElement.GetInt32();
+        var recordHash = recordHashElement.GetString();
+        if (string.IsNullOrWhiteSpace(recordHash))
+        {
+            return null;
+        }
+
+        return (sequence, recordHash);
+    }
+
     private static async Task<ImageAcquisitionState?> TryReadStateAsync(
         string stateLogPath,
         CancellationToken cancellationToken)
@@ -493,7 +881,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         long zeroFilledBytes,
         string? sourceSha256Hex,
         string? destinationSha256Hex,
-        string? error)
+        string? error,
+        bool sourceIsNetwork,
+        bool constrainedNetworkIo,
+        long? maxNetworkThroughputBytesPerSecond,
+        RemoteAgentMode remoteAgentMode,
+        string? remoteAgentEndpoint,
+        int networkCheckpointCount)
     {
         return new ImageAcquisitionState
         {
@@ -511,6 +905,12 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             SourceSha256Hex = sourceSha256Hex,
             DestinationSha256Hex = destinationSha256Hex,
             Error = error,
+            SourceIsNetwork = sourceIsNetwork,
+            ConstrainedNetworkIo = constrainedNetworkIo,
+            MaxNetworkThroughputBytesPerSecond = maxNetworkThroughputBytesPerSecond,
+            RemoteAgentMode = remoteAgentMode,
+            RemoteAgentEndpoint = remoteAgentEndpoint,
+            NetworkCheckpointCount = networkCheckpointCount,
         };
     }
 
@@ -523,6 +923,12 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
 
         var percent = (bytesWritten / (double)totalBytes) * 100.0;
         return Math.Clamp(percent, 0, 100);
+    }
+
+    private sealed class CustodyState
+    {
+        public int Sequence { get; set; }
+        public string? PreviousHash { get; set; }
     }
 
     private sealed record ImageAcquisitionState
@@ -541,5 +947,11 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         public string? SourceSha256Hex { get; init; }
         public string? DestinationSha256Hex { get; init; }
         public string? Error { get; init; }
+        public bool SourceIsNetwork { get; init; }
+        public bool ConstrainedNetworkIo { get; init; }
+        public long? MaxNetworkThroughputBytesPerSecond { get; init; }
+        public RemoteAgentMode RemoteAgentMode { get; init; } = RemoteAgentMode.Disabled;
+        public string? RemoteAgentEndpoint { get; init; }
+        public int NetworkCheckpointCount { get; init; }
     }
 }

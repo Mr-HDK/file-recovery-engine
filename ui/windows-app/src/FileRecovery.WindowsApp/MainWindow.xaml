@@ -67,12 +67,21 @@
                         <StackPanel Orientation="Horizontal">
                             <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
                             <Button Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
+                            <Button Content="Add Network Image" Width="140" Margin="0,0,8,0" Click="AddNetworkImageButton_Click"/>
                             <Button Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
                         </StackPanel>
+                        <WrapPanel Margin="0,6,0,0">
+                            <TextBlock Margin="0,4,6,0" Text="Protocol"/>
+                            <ComboBox x:Name="NetworkProtocolComboBox" Width="90" Margin="0,0,8,0"/>
+                            <TextBlock Margin="0,4,6,0" Text="Path"/>
+                            <TextBox x:Name="NetworkSourcePathTextBox" Width="280" Margin="0,0,8,0"/>
+                            <TextBlock Margin="0,4,6,0" Text="Endpoint (optional)"/>
+                            <TextBox x:Name="NetworkEndpointHintTextBox" Width="180"/>
+                        </WrapPanel>
                         <TextBlock Margin="0,6,0,0"
                                    FontSize="11"
                                    Foreground="#6B7280"
-                                   Text="Recommended workflow: acquire an image first, then scan/recover from the image."/>
+                                   Text="Recommended workflow: acquire an image first, then scan/recover from the image. Network images can be SMB/NFS paths or mounted NAS images."/>
                     </StackPanel>
 
                     <DataGrid x:Name="SourcesDataGrid"
@@ -92,6 +101,8 @@
                             <DataGridTextColumn Header="Partition" Binding="{Binding PartitionInfo}" Width="140"/>
                             <DataGridTextColumn Header="Sector" Binding="{Binding SectorSizeBytes}" Width="75"/>
                             <DataGridTextColumn Header="Mounts" Binding="{Binding MountedPaths}" Width="170"/>
+                            <DataGridTextColumn Header="Protocol" Binding="{Binding NetworkProtocol}" Width="85"/>
+                            <DataGridTextColumn Header="Endpoint" Binding="{Binding NetworkEndpoint}" Width="140"/>
                             <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="190"/>
                             <DataGridTextColumn Header="Read Only" Binding="{Binding ReadOnlyEnforced}" Width="90"/>
                         </DataGrid.Columns>
@@ -143,6 +154,11 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="220"/>
@@ -179,6 +195,28 @@
 
                             <TextBlock Grid.Row="8" Grid.Column="0" VerticalAlignment="Center" Text="RAID disk order (comma separated)"/>
                             <TextBox x:Name="RaidDiskOrderTextBox" Grid.Row="8" Grid.Column="1" Margin="8,0,0,0"/>
+
+                            <CheckBox x:Name="NetworkConstrainedIoCheckBox"
+                                      Grid.Row="9"
+                                      Grid.ColumnSpan="2"
+                                      Margin="0,8,0,6"
+                                      IsChecked="True"
+                                      Content="Constrain network I/O for remote/NAS imaging"/>
+
+                            <TextBlock Grid.Row="10" Grid.Column="0" VerticalAlignment="Center" Text="Network chunk size (KiB)"/>
+                            <TextBox x:Name="ConstrainedNetworkChunkKiBTextBox" Grid.Row="10" Grid.Column="1" Margin="8,0,0,6" Text="512"/>
+
+                            <TextBlock Grid.Row="11" Grid.Column="0" VerticalAlignment="Center" Text="Max throughput (MiB/s, optional)"/>
+                            <TextBox x:Name="MaxNetworkThroughputMiBTextBox" Grid.Row="11" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="12" Grid.Column="0" VerticalAlignment="Center" Text="Remote agent mode"/>
+                            <ComboBox x:Name="RemoteAgentModeComboBox" Grid.Row="12" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="13" Grid.Column="0" VerticalAlignment="Center" Text="Remote agent endpoint"/>
+                            <TextBox x:Name="RemoteAgentEndpointTextBox" Grid.Row="13" Grid.Column="1" Margin="8,0,0,6"/>
+
+                            <TextBlock Grid.Row="14" Grid.Column="0" VerticalAlignment="Center" Text="Chain-of-custody log path"/>
+                            <TextBox x:Name="ChainOfCustodyLogPathTextBox" Grid.Row="14" Grid.Column="1" Margin="8,0,0,0"/>
                         </Grid>
                     </Expander>
 

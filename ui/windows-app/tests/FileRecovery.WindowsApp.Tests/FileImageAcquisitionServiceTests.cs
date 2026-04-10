@@ -37,6 +37,12 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Equal(result.SourceSha256Hex, result.DestinationSha256Hex);
         Assert.Equal(await ComputeSha256HexAsync(sourcePath), result.SourceSha256Hex);
         Assert.Equal(await ComputeSha256HexAsync(destinationPath), result.DestinationSha256Hex);
+        Assert.False(result.SourceIsNetwork);
+        Assert.False(result.ConstrainedNetworkIo);
+        Assert.Equal(RemoteAgentMode.Disabled, result.RemoteAgentMode);
+        Assert.Null(result.RemoteAgentEndpoint);
+        Assert.Null(result.ChainOfCustodyLogPath);
+        Assert.Equal(0, result.NetworkCheckpointCount);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(destinationPath));
         Assert.True(progressSnapshots.Count > 0);
         Assert.True(progressSnapshots[^1].PercentComplete >= 100.0);
@@ -47,6 +53,9 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Equal((int)ImageReadErrorPolicy.ContinueWithZeroFill, state.RootElement.GetProperty("readErrorPolicy").GetInt32());
         Assert.Equal(0, state.RootElement.GetProperty("readErrorChunks").GetInt32());
         Assert.Equal(0, state.RootElement.GetProperty("zeroFilledBytes").GetInt64());
+        Assert.False(state.RootElement.GetProperty("sourceIsNetwork").GetBoolean());
+        Assert.False(state.RootElement.GetProperty("constrainedNetworkIo").GetBoolean());
+        Assert.Equal(0, state.RootElement.GetProperty("networkCheckpointCount").GetInt32());
     }
 
     [Fact]
@@ -190,6 +199,95 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Equal(0, result.ReadErrorChunks);
         Assert.Equal(0, result.ZeroFilledBytes);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(destinationPath));
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncNetworkModeWritesCustodyLogAndNetworkState()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-network.bin");
+        var destinationPath = Path.Combine(tempRoot, "network-output.img");
+        var custodyPath = Path.Combine(tempRoot, "network-custody.jsonl");
+
+        var sourceBytes = BuildBytes(420_000);
+        await File.WriteAllBytesAsync(sourcePath, sourceBytes);
+
+        var service = new FileImageAcquisitionService();
+        var result = await service.AcquireImageAsync(
+            new ImageAcquisitionRequest(
+                SourcePath: sourcePath,
+                DestinationImagePath: destinationPath,
+                ChunkSizeBytes: 64 * 1024,
+                SourceIsNetwork: true,
+                EnableConstrainedNetworkIo: true,
+                ConstrainedNetworkChunkSizeBytes: 128 * 1024,
+                RemoteAgentMode: RemoteAgentMode.Optional,
+                RemoteAgentEndpoint: "agent://nas-sidecar",
+                ChainOfCustodyLogPath: custodyPath),
+            progress: null,
+            CancellationToken.None);
+
+        Assert.True(result.SourceIsNetwork);
+        Assert.True(result.ConstrainedNetworkIo);
+        Assert.Equal(RemoteAgentMode.Optional, result.RemoteAgentMode);
+        Assert.Equal("agent://nas-sidecar", result.RemoteAgentEndpoint);
+        Assert.Equal(custodyPath, result.ChainOfCustodyLogPath);
+        Assert.True(File.Exists(custodyPath));
+
+        var custodyLines = await File.ReadAllLinesAsync(custodyPath);
+        Assert.True(custodyLines.Length >= 2);
+        using var startEvent = JsonDocument.Parse(custodyLines[0]);
+        using var completionEvent = JsonDocument.Parse(custodyLines[^1]);
+        Assert.Equal("network_acquisition_started", startEvent.RootElement.GetProperty("event_name").GetString());
+        Assert.Equal("network_acquisition_completed", completionEvent.RootElement.GetProperty("event_name").GetString());
+
+        var state = await ReadJsonAsync(result.StateLogPath);
+        Assert.True(state.RootElement.GetProperty("sourceIsNetwork").GetBoolean());
+        Assert.True(state.RootElement.GetProperty("constrainedNetworkIo").GetBoolean());
+        Assert.Equal((int)RemoteAgentMode.Optional, state.RootElement.GetProperty("remoteAgentMode").GetInt32());
+        Assert.Equal("agent://nas-sidecar", state.RootElement.GetProperty("remoteAgentEndpoint").GetString());
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncThrowsWhenRemoteAgentRequiredWithoutEndpoint()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-remote.bin");
+        var destinationPath = Path.Combine(tempRoot, "remote-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(65_536));
+
+        var service = new FileImageAcquisitionService();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 64 * 1024,
+                    SourceIsNetwork: true,
+                    RemoteAgentMode: RemoteAgentMode.Required),
+                progress: null,
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncThrowsWhenThroughputLimitIsNotPositive()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-throughput.bin");
+        var destinationPath = Path.Combine(tempRoot, "throughput-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(65_536));
+
+        var service = new FileImageAcquisitionService();
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            service.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 64 * 1024,
+                    SourceIsNetwork: true,
+                    MaxNetworkThroughputBytesPerSecond: 0),
+                progress: null,
+                CancellationToken.None));
     }
 
     private static byte[] BuildBytes(int length)

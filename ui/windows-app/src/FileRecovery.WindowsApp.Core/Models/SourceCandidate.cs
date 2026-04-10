@@ -14,5 +14,8 @@ public sealed record SourceCandidate(
     bool ReadOnlyEnforced,
     string? VolumeLabel = null,
     string? MountedPaths = null,
-    string? PartitionInfo = null
+    string? PartitionInfo = null,
+    bool IsNetworkSource = false,
+    string? NetworkProtocol = null,
+    string? NetworkEndpoint = null
 );

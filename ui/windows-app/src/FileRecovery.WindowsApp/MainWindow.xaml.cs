@@ -157,7 +157,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
-    private const string UiBuildTag = "phase7-polish-complete-20260328-0013";
+    private const string UiBuildTag = "phase15-network-workflows-20260410-0017";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
     private const ulong FullScanCarveMaxBytes = 256UL * 1024UL * 1024UL;
@@ -166,6 +166,7 @@ public partial class MainWindow : Window
     private const int DefaultCandidateCapacity = 1024;
     private const int DefaultPreviewCapMiB = 8;
     private const int DefaultPreviewChunkKiB = 1024;
+    private const int DefaultNetworkChunkKiB = 512;
     private SourceCandidate? _selectedSource;
     private ICollectionView? _quickScanCandidatesView;
     private CancellationTokenSource? _previewReadCts;
@@ -221,6 +222,11 @@ public partial class MainWindow : Window
 
         ScanModeComboBox.ItemsSource = Enum.GetValues<ScanMode>();
         ScanModeComboBox.SelectedItem = ScanMode.Quick;
+        NetworkProtocolComboBox.ItemsSource = Enum.GetValues<NetworkSourceProtocol>();
+        NetworkProtocolComboBox.SelectedItem = NetworkSourceProtocol.Smb;
+        RemoteAgentModeComboBox.ItemsSource = Enum.GetValues<RemoteAgentMode>();
+        RemoteAgentModeComboBox.SelectedItem = RemoteAgentMode.Disabled;
+        ConstrainedNetworkChunkKiBTextBox.Text = DefaultNetworkChunkKiB.ToString(CultureInfo.InvariantCulture);
         UpdateCandidateSummary();
 
         var version = NativeEngineProbe.GetVersionDisplay();
@@ -420,6 +426,41 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void AddNetworkImageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var sourcePath = (NetworkSourcePathTextBox.Text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            StatusTextBlock.Text = "Network source path required";
+            AppendSessionMessage("Network image import blocked: network source path is empty.");
+            return;
+        }
+
+        var protocol = NetworkProtocolComboBox.SelectedItem is NetworkSourceProtocol selectedProtocol
+            ? selectedProtocol
+            : NetworkSourceProtocol.Smb;
+        var endpointHint = string.IsNullOrWhiteSpace(NetworkEndpointHintTextBox.Text)
+            ? null
+            : NetworkEndpointHintTextBox.Text.Trim();
+
+        try
+        {
+            var networkImage = await _deviceEnumerationService.BuildNetworkImageSourceAsync(
+                new NetworkSourceRequest(protocol, sourcePath, endpointHint),
+                CancellationToken.None);
+            _sources.Insert(0, networkImage);
+            SourcesDataGrid.SelectedIndex = 0;
+            AppendSessionMessage(
+                $"Imported network image source ({networkImage.NetworkProtocol}): {networkImage.SourcePath} endpoint={networkImage.NetworkEndpoint ?? "n/a"}");
+            StatusTextBlock.Text = "Network image source imported";
+        }
+        catch (Exception ex)
+        {
+            StatusTextBlock.Text = "Network image import failed";
+            AppendSessionMessage($"Network image import error: {ex.Message}");
+        }
+    }
+
     private async void AcquireImageButton_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedSource is null)
@@ -466,6 +507,21 @@ public partial class MainWindow : Window
             StatusTextBlock.Text =
                 $"Imaging source... {state.PercentComplete:0.0}% ({state.BytesWritten:N0}/{state.TotalBytes:N0} bytes)";
         });
+        if (!TryGetNetworkAcquisitionSettings(
+            out var constrainedNetworkChunkSizeBytes,
+            out var maxNetworkThroughputBytesPerSecond,
+            out var remoteAgentMode,
+            out var remoteAgentEndpoint,
+            out var chainOfCustodyLogPath,
+            out var settingsError))
+        {
+            StatusTextBlock.Text = "Image acquisition blocked: invalid network settings";
+            AppendSessionMessage($"Image acquisition blocked: {settingsError}");
+            CompleteOperationScope(operationScope);
+            return;
+        }
+        var sourceIsNetwork = _selectedSource.IsNetworkSource
+            || sourcePath.StartsWith(@"\\", StringComparison.Ordinal);
 
         try
         {
@@ -480,7 +536,14 @@ public partial class MainWindow : Window
                     ChunkSizeBytes: 4 * 1024 * 1024,
                     AllowResume: true,
                     ReadErrorPolicy: ImageReadErrorPolicy.ContinueWithZeroFill,
-                    MaxReadErrorChunks: 1024),
+                    MaxReadErrorChunks: 1024,
+                    SourceIsNetwork: sourceIsNetwork,
+                    EnableConstrainedNetworkIo: NetworkConstrainedIoCheckBox.IsChecked == true,
+                    ConstrainedNetworkChunkSizeBytes: constrainedNetworkChunkSizeBytes,
+                    MaxNetworkThroughputBytesPerSecond: maxNetworkThroughputBytesPerSecond,
+                    RemoteAgentMode: remoteAgentMode,
+                    RemoteAgentEndpoint: remoteAgentEndpoint,
+                    ChainOfCustodyLogPath: chainOfCustodyLogPath),
                 progressReporter,
                 operationToken);
 
@@ -493,6 +556,18 @@ public partial class MainWindow : Window
             AppendSessionMessage(
                 $"Image acquisition completed ({result.BytesWritten:N0} bytes, SHA256 {result.SourceSha256Hex[..16]}..., resumed={result.Resumed}, read-errors={result.ReadErrorChunks}, zero-filled={result.ZeroFilledBytes:N0} bytes, policy={result.ReadErrorPolicy}).");
             AppendSessionMessage($"Image acquisition state log: {result.StateLogPath}");
+            if (result.SourceIsNetwork)
+            {
+                var throughputCap = result.MaxNetworkThroughputBytesPerSecond.HasValue
+                    ? $"{result.MaxNetworkThroughputBytesPerSecond.Value} B/s"
+                    : "none";
+                AppendSessionMessage(
+                    $"Network acquisition details: constrained={result.ConstrainedNetworkIo}, cap={throughputCap}, remote-agent={result.RemoteAgentMode}, endpoint={result.RemoteAgentEndpoint ?? "n/a"}, checkpoints={result.NetworkCheckpointCount}.");
+                if (!string.IsNullOrWhiteSpace(result.ChainOfCustodyLogPath))
+                {
+                    AppendSessionMessage($"Network chain-of-custody log: {result.ChainOfCustodyLogPath}");
+                }
+            }
             if (result.ReadErrorChunks > 0)
             {
                 AppendSessionMessage(
@@ -880,6 +955,9 @@ public partial class MainWindow : Window
             {
                 source_id = selectedSource.Id,
                 source_kind = selectedSource.Kind.ToString(),
+                source_is_network = selectedSource.IsNetworkSource,
+                source_network_protocol = selectedSource.NetworkProtocol,
+                source_network_endpoint = selectedSource.NetworkEndpoint,
                 destination = DestinationPathTextBox.Text,
                 scan_mode = scanMode.ToString(),
             }, operationToken);
@@ -1765,6 +1843,81 @@ public partial class MainWindow : Window
         }
 
         return ext.Trim().TrimStart('.').ToLowerInvariant();
+    }
+
+    private bool TryGetNetworkAcquisitionSettings(
+        out int constrainedNetworkChunkSizeBytes,
+        out long? maxNetworkThroughputBytesPerSecond,
+        out RemoteAgentMode remoteAgentMode,
+        out string? remoteAgentEndpoint,
+        out string? chainOfCustodyLogPath,
+        out string errorMessage)
+    {
+        errorMessage = string.Empty;
+        maxNetworkThroughputBytesPerSecond = null;
+        chainOfCustodyLogPath = null;
+
+        if (!TryParsePositiveInt(
+            ConstrainedNetworkChunkKiBTextBox.Text,
+            min: 64,
+            max: 16 * 1024,
+            fallback: DefaultNetworkChunkKiB,
+            out var constrainedChunkKiB))
+        {
+            errorMessage = "Network chunk size must be an integer between 64 and 16384 KiB.";
+            constrainedNetworkChunkSizeBytes = DefaultNetworkChunkKiB * 1024;
+            remoteAgentMode = RemoteAgentMode.Disabled;
+            remoteAgentEndpoint = null;
+            return false;
+        }
+
+        constrainedNetworkChunkSizeBytes = constrainedChunkKiB * 1024;
+        remoteAgentMode = RemoteAgentModeComboBox.SelectedItem is RemoteAgentMode selectedMode
+            ? selectedMode
+            : RemoteAgentMode.Disabled;
+        remoteAgentEndpoint = string.IsNullOrWhiteSpace(RemoteAgentEndpointTextBox.Text)
+            ? null
+            : RemoteAgentEndpointTextBox.Text.Trim();
+
+        if (remoteAgentMode == RemoteAgentMode.Required && string.IsNullOrWhiteSpace(remoteAgentEndpoint))
+        {
+            errorMessage = "Remote agent endpoint is required when mode is Required.";
+            return false;
+        }
+
+        var throughputRaw = MaxNetworkThroughputMiBTextBox.Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(throughputRaw))
+        {
+            if (!double.TryParse(
+                throughputRaw,
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out var throughputMiB)
+                || throughputMiB <= 0
+                || throughputMiB > 10_000)
+            {
+                errorMessage = "Max network throughput must be a positive number in MiB/s.";
+                return false;
+            }
+
+            maxNetworkThroughputBytesPerSecond = (long)Math.Round(throughputMiB * 1024d * 1024d);
+        }
+
+        var custodyPathRaw = ChainOfCustodyLogPathTextBox.Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(custodyPathRaw))
+        {
+            try
+            {
+                chainOfCustodyLogPath = Path.GetFullPath(custodyPathRaw);
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"Chain-of-custody log path is invalid: {ex.Message}";
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryParsePositiveInt(string? value, int min, int max, int fallback, out int parsed)
