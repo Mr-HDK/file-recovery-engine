@@ -23,3 +23,4 @@
 ## Notes
 
 - This phase validates network workflow plumbing, safety controls, and auditability; full remote-agent compute execution is deferred.
+- Acquisition tests now include deterministic intermittent-read fault injection to validate zero-fill continuation and unreadable-range manifest emission.

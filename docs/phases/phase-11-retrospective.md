@@ -26,4 +26,4 @@ Completed (`DONE`) on `2026-04-08`.
 
 ## Remaining Gaps (Deferred, Non-Blocking)
 
-- XFS/UFS file recovery/export logic is still pending.
+- XFS/UFS full file recovery/export logic is still pending (metadata-manifest export is now available).

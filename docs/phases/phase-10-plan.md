@@ -41,4 +41,4 @@
 
 ## Deferred in Phase 10
 
-- APFS/HFS+ file-content recovery/export paths (candidates are metadata-only in this phase).
+- APFS/HFS+ full file-content recovery/export paths (metadata-manifest export path is now available).

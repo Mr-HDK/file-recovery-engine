@@ -43,4 +43,4 @@
 
 ## Deferred in Phase 11
 
-- XFS/UFS file-content recovery/export paths (candidates remain metadata-only in this phase).
+- XFS/UFS full file-content recovery/export paths (metadata-manifest export path is now available).

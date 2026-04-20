@@ -43,6 +43,7 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Null(result.RemoteAgentEndpoint);
         Assert.Null(result.ChainOfCustodyLogPath);
         Assert.Equal(0, result.NetworkCheckpointCount);
+        Assert.Null(result.UnreadableRangesManifestPath);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(destinationPath));
         Assert.True(progressSnapshots.Count > 0);
         Assert.True(progressSnapshots[^1].PercentComplete >= 100.0);
@@ -232,6 +233,7 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Equal(RemoteAgentMode.Optional, result.RemoteAgentMode);
         Assert.Equal("agent://nas-sidecar", result.RemoteAgentEndpoint);
         Assert.Equal(custodyPath, result.ChainOfCustodyLogPath);
+        Assert.Null(result.UnreadableRangesManifestPath);
         Assert.True(File.Exists(custodyPath));
 
         var custodyLines = await File.ReadAllLinesAsync(custodyPath);
@@ -290,6 +292,49 @@ public sealed class FileImageAcquisitionServiceTests
                 CancellationToken.None));
     }
 
+    [Fact]
+    public async Task AcquireImageAsyncFaultInjectionEmitsUnreadableRangeManifest()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-fault.bin");
+        var destinationPath = Path.Combine(tempRoot, "fault-output.img");
+        var sourceBytes = BuildBytes(512 * 1024);
+        await File.WriteAllBytesAsync(sourcePath, sourceBytes);
+
+        var service = new FileImageAcquisitionService((path, chunkSizeBytes) =>
+        {
+            var fileStream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                chunkSizeBytes,
+                FileOptions.SequentialScan);
+            return new FaultInjectingReadStream(fileStream, failEveryNReads: 3);
+        });
+
+        var result = await service.AcquireImageAsync(
+            new ImageAcquisitionRequest(
+                SourcePath: sourcePath,
+                DestinationImagePath: destinationPath,
+                ChunkSizeBytes: 64 * 1024,
+                SourceIsNetwork: true,
+                ReadErrorPolicy: ImageReadErrorPolicy.ContinueWithZeroFill),
+            progress: null,
+            CancellationToken.None);
+
+        Assert.True(result.ReadErrorChunks > 0);
+        Assert.True(result.ZeroFilledBytes > 0);
+        Assert.False(string.IsNullOrWhiteSpace(result.UnreadableRangesManifestPath));
+        Assert.True(File.Exists(result.UnreadableRangesManifestPath!));
+
+        using var manifest = await ReadJsonAsync(result.UnreadableRangesManifestPath!);
+        var root = manifest.RootElement;
+        Assert.Equal(result.ReadErrorChunks, root.GetProperty("rangeCount").GetInt32());
+        Assert.Equal(result.ZeroFilledBytes, root.GetProperty("zeroFilledBytes").GetInt64());
+        Assert.Equal((int)ImageReadErrorPolicy.ContinueWithZeroFill, root.GetProperty("readErrorPolicy").GetInt32());
+    }
+
     private static byte[] BuildBytes(int length)
     {
         var bytes = new byte[length];
@@ -325,5 +370,73 @@ public sealed class FileImageAcquisitionServiceTests
         var path = Path.Combine(Path.GetTempPath(), "fr-tests-imaging", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private sealed class FaultInjectingReadStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly int _failEveryNReads;
+        private int _readCalls;
+
+        public FaultInjectingReadStream(Stream inner, int failEveryNReads)
+        {
+            _inner = inner;
+            _failEveryNReads = failEveryNReads;
+        }
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+
+        public override long Position
+        {
+            get => _inner.Position;
+            set => _inner.Position = value;
+        }
+
+        public override void Flush() => _inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            _readCalls++;
+            if (_failEveryNReads > 0 && _readCalls % _failEveryNReads == 0)
+            {
+                throw new IOException("Injected intermittent read failure.");
+            }
+
+            return _inner.Read(buffer, offset, count);
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _readCalls++;
+            if (_failEveryNReads > 0 && _readCalls % _failEveryNReads == 0)
+            {
+                throw new IOException("Injected intermittent read failure.");
+            }
+
+            return _inner.ReadAsync(buffer, cancellationToken);
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            return _inner.DisposeAsync();
+        }
     }
 }

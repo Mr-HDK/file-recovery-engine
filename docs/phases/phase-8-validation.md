@@ -24,5 +24,5 @@
 
 ## Deferred follow-up (outside Phase 8 gate)
 
-- ReFS recovery/export path is not yet implemented.
+- ReFS metadata-manifest export path is implemented; full ReFS file-content recovery remains pending.
 - ReFS candidate persistence/reporting plumbing remains pending.

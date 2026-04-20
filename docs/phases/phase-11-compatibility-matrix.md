@@ -11,8 +11,8 @@ Compatibility coverage for Phase 11 foundation support (`ext2/ext3/ext4` detecti
 | ext2 | Yes (`fr_probe_ext_superblock_from_session`) | Yes (`fr_get_ext_deleted_candidates_from_session`) | Partial (ext-only implementation from prior phase) | `90` |
 | ext3 | Yes (`fr_probe_ext_superblock_from_session`) | Yes (`fr_get_ext_deleted_candidates_from_session`) | Partial (ext-only implementation from prior phase) | `90` |
 | ext4 | Yes (`fr_probe_ext_superblock_from_session`) | Yes (`fr_get_ext_deleted_candidates_from_session`) | Partial (ext-only implementation from prior phase) | `90` |
-| XFS | Yes (`fr_probe_xfs_superblock_from_session`) | Yes (`fr_get_xfs_deleted_candidates_from_session`) | No (deferred) | `120` |
-| UFS | Yes (`fr_probe_ufs_superblock_from_session`) | Yes (`fr_get_ufs_deleted_candidates_from_session`) | No (deferred) | `130` |
+| XFS | Yes (`fr_probe_xfs_superblock_from_session`) | Yes (`fr_get_xfs_deleted_candidates_from_session`) | Metadata-manifest export only (full content deferred) | `120` |
+| UFS | Yes (`fr_probe_ufs_superblock_from_session`) | Yes (`fr_get_ufs_deleted_candidates_from_session`) | Metadata-manifest export only (full content deferred) | `130` |
 
 ## Notes
 

@@ -32,7 +32,10 @@ pub enum FileFormat {
     Xlsx,
     Pptx,
     Utf8Text,
+    Rtf,
     Mp4,
+    Avi,
+    Midi,
     Ogg,
     Flac,
     Mp3,
@@ -57,7 +60,10 @@ impl FileFormat {
             FileFormat::Xlsx => "xlsx",
             FileFormat::Pptx => "pptx",
             FileFormat::Utf8Text => "txt",
+            FileFormat::Rtf => "rtf",
             FileFormat::Mp4 => "mp4",
+            FileFormat::Avi => "avi",
+            FileFormat::Midi => "mid",
             FileFormat::Ogg => "ogg",
             FileFormat::Flac => "flac",
             FileFormat::Mp3 => "mp3",
@@ -100,7 +106,10 @@ pub fn validate_carved_bytes_with_extension(
         FileFormat::Xlsx => validate_office_zip(bytes, FileFormat::Xlsx),
         FileFormat::Pptx => validate_office_zip(bytes, FileFormat::Pptx),
         FileFormat::Utf8Text => validate_utf8_text(bytes),
+        FileFormat::Rtf => validate_rtf(bytes),
         FileFormat::Mp4 => validate_mp4(bytes),
+        FileFormat::Avi => validate_avi(bytes),
+        FileFormat::Midi => validate_midi(bytes),
         FileFormat::Ogg => validate_ogg(bytes),
         FileFormat::Flac => validate_flac(bytes),
         FileFormat::Mp3 => validate_mp3(bytes),
@@ -487,6 +496,25 @@ fn validate_utf8_text(bytes: &[u8]) -> ValidationReport {
     valid(FileFormat::Utf8Text, reasons)
 }
 
+fn validate_rtf(bytes: &[u8]) -> ValidationReport {
+    let mut reasons = Vec::new();
+    if bytes.len() < 6 {
+        reasons.push("RTF candidate too small".to_string());
+        return invalid(FileFormat::Rtf, reasons);
+    }
+    if !bytes.starts_with(b"{\\rtf") {
+        reasons.push("RTF signature mismatch".to_string());
+        return invalid(FileFormat::Rtf, reasons);
+    }
+
+    if bytes.last().copied() != Some(b'}') {
+        reasons.push("RTF closing brace missing (likely truncated)".to_string());
+        return partial(FileFormat::Rtf, reasons);
+    }
+
+    valid(FileFormat::Rtf, reasons)
+}
+
 fn validate_mp4(bytes: &[u8]) -> ValidationReport {
     let mut reasons = Vec::new();
     if bytes.len() < 16 {
@@ -510,6 +538,70 @@ fn validate_mp4(bytes: &[u8]) -> ValidationReport {
     }
 
     valid(FileFormat::Mp4, reasons)
+}
+
+fn validate_avi(bytes: &[u8]) -> ValidationReport {
+    let mut reasons = Vec::new();
+    if bytes.len() < 12 {
+        reasons.push("AVI candidate too small".to_string());
+        return invalid(FileFormat::Avi, reasons);
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"AVI " {
+        reasons.push("AVI RIFF/AVI markers missing".to_string());
+        return invalid(FileFormat::Avi, reasons);
+    }
+
+    let declared_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize + 8;
+    if declared_size > bytes.len() {
+        reasons.push("AVI RIFF size exceeds captured bytes (likely truncated)".to_string());
+        return partial(FileFormat::Avi, reasons);
+    }
+
+    valid(FileFormat::Avi, reasons)
+}
+
+fn validate_midi(bytes: &[u8]) -> ValidationReport {
+    let mut reasons = Vec::new();
+    if bytes.len() < 14 {
+        reasons.push("MIDI candidate too small".to_string());
+        return invalid(FileFormat::Midi, reasons);
+    }
+    if &bytes[0..4] != b"MThd" {
+        reasons.push("MIDI header marker missing".to_string());
+        return invalid(FileFormat::Midi, reasons);
+    }
+
+    let header_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if header_len < 6 {
+        reasons.push("MIDI header length is implausible".to_string());
+        return invalid(FileFormat::Midi, reasons);
+    }
+    let header_end = 8 + header_len;
+    if header_end > bytes.len() {
+        reasons.push("MIDI header truncated".to_string());
+        return partial(FileFormat::Midi, reasons);
+    }
+    if header_end + 8 > bytes.len() {
+        reasons.push("MIDI first track header truncated".to_string());
+        return partial(FileFormat::Midi, reasons);
+    }
+    if &bytes[header_end..header_end + 4] != b"MTrk" {
+        reasons.push("MIDI track marker missing".to_string());
+        return invalid(FileFormat::Midi, reasons);
+    }
+
+    let track_len = u32::from_be_bytes([
+        bytes[header_end + 4],
+        bytes[header_end + 5],
+        bytes[header_end + 6],
+        bytes[header_end + 7],
+    ]) as usize;
+    if header_end + 8 + track_len > bytes.len() {
+        reasons.push("MIDI track payload truncated".to_string());
+        return partial(FileFormat::Midi, reasons);
+    }
+
+    valid(FileFormat::Midi, reasons)
 }
 
 fn validate_ogg(bytes: &[u8]) -> ValidationReport {
@@ -818,6 +910,42 @@ mod tests {
         bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // ISIZE
         let report = validate_carved_bytes(FileFormat::Gzip, &bytes);
         assert!(report.is_valid);
+    }
+
+    #[test]
+    fn validates_avi_riff_header() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(20u32).to_le_bytes());
+        bytes.extend_from_slice(b"AVI ");
+        bytes.extend_from_slice(&[0u8; 20]);
+        let report = validate_carved_bytes(FileFormat::Avi, &bytes);
+        assert!(report.is_valid);
+        assert!(!report.partial);
+    }
+
+    #[test]
+    fn validates_midi_header_and_track() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"MThd");
+        bytes.extend_from_slice(&6u32.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // format
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // tracks
+        bytes.extend_from_slice(&96u16.to_be_bytes()); // division
+        bytes.extend_from_slice(b"MTrk");
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]); // end of track
+        let report = validate_carved_bytes(FileFormat::Midi, &bytes);
+        assert!(report.is_valid);
+        assert!(!report.partial);
+    }
+
+    #[test]
+    fn validates_rtf_document() {
+        let bytes = br"{\rtf1\ansi test}";
+        let report = validate_carved_bytes(FileFormat::Rtf, bytes);
+        assert!(report.is_valid);
+        assert!(!report.partial);
     }
 
     #[test]

@@ -681,6 +681,10 @@ public partial class MainWindow : Window
             {
                 AppendSessionMessage(
                     "Image acquisition used zero-fill continuation for unreadable ranges. Treat recovered content as partial in affected spans.");
+                if (!string.IsNullOrWhiteSpace(result.UnreadableRangesManifestPath))
+                {
+                    AppendSessionMessage($"Unreadable-range manifest: {result.UnreadableRangesManifestPath}");
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1403,8 +1407,22 @@ public partial class MainWindow : Window
                 var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
                     ? $".\\{name}"
                     : candidate.ReconstructedPath;
-                var confidenceReason =
-                    $"{evidenceSources} deleted directory-entry candidate from metadata scan (recovery path not implemented yet).";
+                var hasRecoverableInode = candidate.InodeNumber > 0;
+                var candidateStatus = candidate.Deleted && hasRecoverableInode
+                    ? ComputeCandidateStatus(
+                        candidate.Deleted,
+                        false,
+                        candidate.IsDirectory,
+                        false,
+                        false,
+                        false,
+                        name,
+                        path,
+                        evidenceSources)
+                    : RecoveryCandidateStatus.Invalid;
+                var confidenceReason = candidate.Deleted && hasRecoverableInode
+                    ? $"{evidenceSources} deleted inode candidate from metadata scan with inode-backed recovery path."
+                    : $"{evidenceSources} candidate is missing deleted/inode metadata required for recovery.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildExtSyntheticRecordNumber(candidate.EntryOffsetBytes, index),
@@ -1458,8 +1476,22 @@ public partial class MainWindow : Window
                 var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
                     ? $".\\{name}"
                     : candidate.ReconstructedPath;
-                var confidenceReason =
-                    $"{evidenceSources} deleted inode candidate from metadata scan (recovery path not implemented yet).";
+                var hasInode = candidate.InodeNumber > 0;
+                var candidateStatus = candidate.Deleted && hasInode
+                    ? ComputeCandidateStatus(
+                        candidate.Deleted,
+                        false,
+                        candidate.IsDirectory,
+                        false,
+                        false,
+                        false,
+                        name,
+                        path,
+                        evidenceSources)
+                    : RecoveryCandidateStatus.Invalid;
+                var confidenceReason = candidate.Deleted && hasInode
+                    ? $"{evidenceSources} deleted inode candidate supports metadata-manifest export; full content recovery requires extent parsing."
+                    : $"{evidenceSources} candidate is missing deleted/inode metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildXfsSyntheticRecordNumber(candidate.InodeNumber, index),
@@ -1484,7 +1516,7 @@ public partial class MainWindow : Window
                     EvidenceSources: evidenceSources,
                     ConfidenceTier: "Low",
                     ConfidenceReason: confidenceReason,
-                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+                    CandidateStatus: candidateStatus);
             })
             .ToArray();
 
@@ -1513,8 +1545,22 @@ public partial class MainWindow : Window
                 var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
                     ? $".\\{name}"
                     : candidate.ReconstructedPath;
-                var confidenceReason =
-                    $"{evidenceSources} deleted inode candidate from metadata scan (recovery path not implemented yet).";
+                var hasInode = candidate.InodeNumber > 0;
+                var candidateStatus = candidate.Deleted && hasInode
+                    ? ComputeCandidateStatus(
+                        candidate.Deleted,
+                        false,
+                        candidate.IsDirectory,
+                        false,
+                        false,
+                        false,
+                        name,
+                        path,
+                        evidenceSources)
+                    : RecoveryCandidateStatus.Invalid;
+                var confidenceReason = candidate.Deleted && hasInode
+                    ? $"{evidenceSources} deleted inode candidate supports metadata-manifest export; full content recovery requires block mapping."
+                    : $"{evidenceSources} candidate is missing deleted/inode metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildUfsSyntheticRecordNumber(candidate.InodeNumber, index),
@@ -1539,7 +1585,7 @@ public partial class MainWindow : Window
                     EvidenceSources: evidenceSources,
                     ConfidenceTier: "Low",
                     ConfidenceReason: confidenceReason,
-                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+                    CandidateStatus: candidateStatus);
             })
             .ToArray();
 
@@ -1568,8 +1614,22 @@ public partial class MainWindow : Window
                 var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
                     ? $".\\{name}"
                     : candidate.ReconstructedPath;
-                var confidenceReason =
-                    $"{evidenceSources} deleted metadata tombstone candidate (recovery path not implemented yet).";
+                var hasCnid = candidate.Cnid > 0;
+                var candidateStatus = candidate.Deleted && hasCnid
+                    ? ComputeCandidateStatus(
+                        candidate.Deleted,
+                        false,
+                        candidate.IsDirectory,
+                        false,
+                        false,
+                        false,
+                        name,
+                        path,
+                        evidenceSources)
+                    : RecoveryCandidateStatus.Invalid;
+                var confidenceReason = candidate.Deleted && hasCnid
+                    ? $"{evidenceSources} deleted metadata tombstone candidate supports metadata-manifest export; full content recovery requires APFS extent parsing."
+                    : $"{evidenceSources} candidate is missing deleted/CNID metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildApfsSyntheticRecordNumber(candidate.Cnid, index),
@@ -1594,7 +1654,7 @@ public partial class MainWindow : Window
                     EvidenceSources: evidenceSources,
                     ConfidenceTier: "Low",
                     ConfidenceReason: confidenceReason,
-                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+                    CandidateStatus: candidateStatus);
             })
             .ToArray();
 
@@ -1623,8 +1683,22 @@ public partial class MainWindow : Window
                 var path = string.IsNullOrWhiteSpace(candidate.ReconstructedPath)
                     ? $".\\{name}"
                     : candidate.ReconstructedPath;
-                var confidenceReason =
-                    $"{evidenceSources} deleted catalog tombstone candidate (recovery path not implemented yet).";
+                var hasCnid = candidate.Cnid > 0;
+                var candidateStatus = candidate.Deleted && hasCnid
+                    ? ComputeCandidateStatus(
+                        candidate.Deleted,
+                        false,
+                        candidate.IsDirectory,
+                        false,
+                        false,
+                        false,
+                        name,
+                        path,
+                        evidenceSources)
+                    : RecoveryCandidateStatus.Invalid;
+                var confidenceReason = candidate.Deleted && hasCnid
+                    ? $"{evidenceSources} deleted catalog tombstone candidate supports metadata-manifest export; full content recovery requires HFS+ extent parsing."
+                    : $"{evidenceSources} candidate is missing deleted/CNID metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
                     RecordNumber: BuildHfsSyntheticRecordNumber(candidate.Cnid, index),
@@ -1649,7 +1723,7 @@ public partial class MainWindow : Window
                     EvidenceSources: evidenceSources,
                     ConfidenceTier: "Low",
                     ConfidenceReason: confidenceReason,
-                    CandidateStatus: RecoveryCandidateStatus.Invalid);
+                    CandidateStatus: candidateStatus);
             })
             .ToArray();
 
@@ -2016,7 +2090,22 @@ public partial class MainWindow : Window
     {
         FilterFileTypeComboBox.ItemsSource = new[] { "All" };
         FilterStatusComboBox.ItemsSource = new[] { "All", "full", "partial", "invalid", "overwritten-risk" };
-        FilterEvidenceComboBox.ItemsSource = new[] { "All", "MFT", "USN", "VSS", "ReFS", "ext4", "FAT32", "exFAT", "Carve" };
+        FilterEvidenceComboBox.ItemsSource = new[]
+        {
+            "All",
+            "MFT",
+            "USN",
+            "VSS",
+            "ReFS",
+            "ext4",
+            "XFS",
+            "UFS",
+            "APFS",
+            "HFS+",
+            "FAT32",
+            "exFAT",
+            "Carve"
+        };
         FilterConfidenceComboBox.ItemsSource = new[] { "All", "Very high", "High", "Medium", "Low", "Very low" };
 
         FilterFileTypeComboBox.SelectedIndex = 0;
@@ -2817,7 +2906,12 @@ public partial class MainWindow : Window
 
         if (IsExtEvidence(evidenceSources))
         {
-            return RecoveryCandidateStatus.Invalid;
+            return deleted ? RecoveryCandidateStatus.Partial : RecoveryCandidateStatus.Invalid;
+        }
+
+        if (IsMetadataOnlyEvidence(evidenceSources))
+        {
+            return deleted ? RecoveryCandidateStatus.Partial : RecoveryCandidateStatus.Invalid;
         }
 
         if (!deleted)
@@ -2879,6 +2973,75 @@ public partial class MainWindow : Window
                 || string.Equals(source, "ext3", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(source, "ext2", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(source, "ext", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsRefsEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "ReFS", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsXfsEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "XFS", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsUfsEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "UFS", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsApfsEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "APFS", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsHfsEvidence(string? evidenceSources)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceSources))
+        {
+            return false;
+        }
+
+        return evidenceSources
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(source => string.Equals(source, "HFS+", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsMetadataOnlyEvidence(string? evidenceSources)
+    {
+        return IsRefsEvidence(evidenceSources)
+            || IsXfsEvidence(evidenceSources)
+            || IsUfsEvidence(evidenceSources)
+            || IsApfsEvidence(evidenceSources)
+            || IsHfsEvidence(evidenceSources);
     }
 
     private static RecoveryCandidateStatus MapRecoveryFailureStatus(int statusCode)
@@ -3639,6 +3802,53 @@ public partial class MainWindow : Window
                     continue;
                 }
 
+                if (IsMetadataOnlyEvidence(candidate.EvidenceSource))
+                {
+                    var metadataRelativePath = BuildMetadataManifestRecoveryRelativePath(candidate);
+                    var metadataTargetPath = Path.Combine(recoveryRoot, metadataRelativePath);
+                    var metadataTargetDirectory = Path.GetDirectoryName(metadataTargetPath);
+                    if (!string.IsNullOrWhiteSpace(metadataTargetDirectory))
+                    {
+                        Directory.CreateDirectory(metadataTargetDirectory);
+                    }
+
+                    var metadataResult = ExportMetadataOnlyCandidateToFile(
+                        candidate,
+                        metadataTargetPath,
+                        sourcePath,
+                        _selectedSource.Kind);
+
+                    if (metadataResult.Success)
+                    {
+                        candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
+                        candidate.LastRecoveryStatusCode = metadataResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = metadataResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = metadataResult.BytesWritten;
+                        candidate.LastRecoveryPartial = true;
+                        candidate.RecoveryDiagnostics = metadataResult.DiagnosticsSummary;
+                        candidate.RecoveredPath = metadataTargetPath;
+                        candidate.IsSelected = false;
+                        partial++;
+                        AppendSessionMessage(
+                            $"Exported metadata manifest for {candidate.Name} to {metadataTargetPath} ({metadataResult.BytesWritten} bytes).");
+                    }
+                    else
+                    {
+                        candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                        candidate.LastRecoveryStatusCode = metadataResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = metadataResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = metadataResult.BytesWritten;
+                        candidate.LastRecoveryPartial = null;
+                        candidate.RecoveryDiagnostics = metadataResult.DiagnosticsSummary;
+                        failed++;
+                        AppendSessionMessage(
+                            $"Metadata export failed for R{candidate.RecordNumber}: {metadataResult.Message} (status {metadataResult.StatusCode}).");
+                    }
+
+                    await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                    continue;
+                }
+
                 if (candidate.IsGhostRecord)
                 {
                     candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
@@ -4133,6 +4343,75 @@ public partial class MainWindow : Window
         finally
         {
             NativeEngineProbe.CloseSourceSession(open.SessionId);
+        }
+    }
+
+    private static string BuildMetadataManifestRecoveryRelativePath(QuickScanCandidateRow candidate)
+    {
+        var baseRelativePath = BuildRecoveryRelativePath(candidate);
+        return baseRelativePath + ".metadata.json";
+    }
+
+    private static EngineRecoverCandidateResult ExportMetadataOnlyCandidateToFile(
+        QuickScanCandidateRow candidate,
+        string outputPath,
+        string sourcePath,
+        RecoverySourceKind sourceKind)
+    {
+        try
+        {
+            var outputDirectory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrWhiteSpace(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+
+            var payload = new
+            {
+                generated_utc = DateTimeOffset.UtcNow,
+                source_path = sourcePath,
+                source_kind = sourceKind.ToString(),
+                evidence_source = candidate.EvidenceSource,
+                record_number = candidate.RecordNumber,
+                deleted = candidate.Deleted,
+                directory = candidate.Directory,
+                name = candidate.Name,
+                original_path = candidate.OriginalPath,
+                estimated_size_bytes = candidate.DataSizeBytes,
+                confidence_tier = candidate.ConfidenceTier,
+                confidence_score = candidate.ConfidenceScore,
+                note =
+                    "Metadata-manifest export only. Full file-content recovery for this filesystem is not available in the current parser.",
+            };
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true,
+            });
+
+            File.WriteAllText(outputPath, json, Encoding.UTF8);
+            var bytesWritten = (ulong)new FileInfo(outputPath).Length;
+            return new EngineRecoverCandidateResult(
+                EngineAvailable: true,
+                Success: true,
+                Partial: true,
+                BytesWritten: bytesWritten,
+                DiagnosticsFlags: 0,
+                DiagnosticsSummary:
+                    "Metadata-manifest export completed. Full content recovery for this filesystem is pending parser support.",
+                Message: "Metadata manifest exported.",
+                StatusCode: 0);
+        }
+        catch (Exception ex)
+        {
+            return new EngineRecoverCandidateResult(
+                EngineAvailable: true,
+                Success: false,
+                Partial: false,
+                BytesWritten: 0,
+                DiagnosticsFlags: 0,
+                DiagnosticsSummary: "Metadata-manifest export failed.",
+                Message: ex.Message,
+                StatusCode: -430);
         }
     }
 

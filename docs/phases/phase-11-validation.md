@@ -23,4 +23,4 @@
 
 ## Deferred follow-up (non-blocking)
 
-- Implement XFS/UFS recover-to-file data paths beyond metadata candidate surfacing.
+- Implement XFS/UFS full recover-to-file data paths beyond metadata-manifest export.

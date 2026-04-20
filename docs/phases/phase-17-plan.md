@@ -30,7 +30,7 @@
 - Expand format coverage in multiple batches (images/documents/archives/media).
 - Add signature-pack metadata (`version`, `batch`) and expose diagnostics for pack provenance.
 - Add regression fixtures focused on false-positive and partial/truncated behavior.
-- Current landed batch (`2026.04-b1`): `jpg`, `png`, `gif`, `bmp`, `tiff`, `webp`, `pdf`, `txt`, `zip`, `gz`, `7z`, `rar`, `docx`, `xlsx`, `pptx`, `mp4`, `ogg`, `flac`, `mp3`, `wav`.
+- Current landed batch (`2026.04-b2`): `jpg`, `png`, `gif`, `bmp`, `tiff`, `webp`, `pdf`, `txt`, `rtf`, `zip`, `gz`, `7z`, `rar`, `docx`, `xlsx`, `pptx`, `mp4`, `avi`, `mid`, `ogg`, `flac`, `mp3`, `wav`.
 
 4. Validation and rollout:
 - Add Rust tests for window-offset carve behavior.

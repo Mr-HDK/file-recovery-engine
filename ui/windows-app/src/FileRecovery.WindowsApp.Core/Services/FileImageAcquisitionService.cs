@@ -9,6 +9,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
 {
     private const int MinChunkSizeBytes = 64 * 1024;
     private const int DefaultConstrainedNetworkChunkSizeBytes = 512 * 1024;
+    private readonly Func<string, int, Stream> _sourceStreamFactory;
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -18,6 +19,16 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
     {
         WriteIndented = false,
     };
+
+    public FileImageAcquisitionService()
+        : this(null)
+    {
+    }
+
+    public FileImageAcquisitionService(Func<string, int, Stream>? sourceStreamFactory)
+    {
+        _sourceStreamFactory = sourceStreamFactory ?? OpenDefaultSourceStream;
+    }
 
     public async Task<ImageAcquisitionResult> AcquireImageAsync(
         ImageAcquisitionRequest request,
@@ -108,13 +119,15 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             throw new FileNotFoundException("Source path not found.", sourcePath);
         }
 
-        await using var sourceStream = new FileStream(
-            sourcePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            effectiveChunkSizeBytes,
-            FileOptions.SequentialScan);
+        await using var sourceStream = _sourceStreamFactory(sourcePath, effectiveChunkSizeBytes);
+        if (!sourceStream.CanRead)
+        {
+            throw new InvalidOperationException("Source stream is not readable.");
+        }
+        if (!sourceStream.CanSeek)
+        {
+            throw new InvalidOperationException("Source stream must be seekable.");
+        }
 
         var sourceSizeBytes = sourceStream.Length;
         var startedUtc = DateTimeOffset.UtcNow;
@@ -124,6 +137,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         var destinationHashHex = string.Empty;
         var readErrorChunks = 0;
         var zeroFilledBytes = 0L;
+        var unreadableRanges = new List<UnreadableRange>();
+        string? unreadableRangesManifestPath = null;
 
         if (sourceSizeBytes < 0)
         {
@@ -262,6 +277,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                         break;
                     }
 
+                    var rangeStartOffset = bytesWritten;
                     await destinationStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                     sourceHash.AppendData(buffer, 0, read);
                     bytesWritten += read;
@@ -269,6 +285,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     {
                         readErrorChunks++;
                         zeroFilledBytes += read;
+                        unreadableRanges.Add(new UnreadableRange(
+                            OffsetBytes: rangeStartOffset,
+                            LengthBytes: read,
+                            Reason: "source-read-io-error"));
                     }
                     if (isNetworkSource
                         && request.MaxNetworkThroughputBytesPerSecond.HasValue
@@ -374,6 +394,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     },
                     cancellationToken);
             }
+            unreadableRangesManifestPath = await WriteUnreadableRangesManifestIfNeededAsync(
+                stateLogPath,
+                sourcePath,
+                destinationPath,
+                request.ReadErrorPolicy,
+                unreadableRanges,
+                cancellationToken);
 
             var completedState = BuildState(
                 sourcePath,
@@ -394,7 +421,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                 remoteAgentMode: request.RemoteAgentMode,
                 remoteAgentEndpoint: request.RemoteAgentEndpoint,
-                networkCheckpointCount: networkCheckpointCount);
+                networkCheckpointCount: networkCheckpointCount,
+                unreadableRangesManifestPath: unreadableRangesManifestPath);
             await WriteStateAsync(stateLogPath, completedState, cancellationToken);
 
             return new ImageAcquisitionResult(
@@ -414,7 +442,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 RemoteAgentMode: request.RemoteAgentMode,
                 RemoteAgentEndpoint: request.RemoteAgentEndpoint,
                 ChainOfCustodyLogPath: custodyLogPath,
-                NetworkCheckpointCount: networkCheckpointCount);
+                NetworkCheckpointCount: networkCheckpointCount,
+                UnreadableRangesManifestPath: unreadableRangesManifestPath);
         }
         catch (OperationCanceledException)
         {
@@ -432,6 +461,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     },
                     CancellationToken.None);
             }
+            unreadableRangesManifestPath = await WriteUnreadableRangesManifestIfNeededAsync(
+                stateLogPath,
+                sourcePath,
+                destinationPath,
+                request.ReadErrorPolicy,
+                unreadableRanges,
+                CancellationToken.None);
             await WriteStateAsync(
                 stateLogPath,
                 BuildState(
@@ -453,7 +489,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                     remoteAgentMode: request.RemoteAgentMode,
                     remoteAgentEndpoint: request.RemoteAgentEndpoint,
-                    networkCheckpointCount: networkCheckpointCount),
+                    networkCheckpointCount: networkCheckpointCount,
+                    unreadableRangesManifestPath: unreadableRangesManifestPath),
                 CancellationToken.None);
             throw;
         }
@@ -474,6 +511,13 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     },
                     CancellationToken.None);
             }
+            unreadableRangesManifestPath = await WriteUnreadableRangesManifestIfNeededAsync(
+                stateLogPath,
+                sourcePath,
+                destinationPath,
+                request.ReadErrorPolicy,
+                unreadableRanges,
+                CancellationToken.None);
             await WriteStateAsync(
                 stateLogPath,
                 BuildState(
@@ -495,7 +539,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                     remoteAgentMode: request.RemoteAgentMode,
                     remoteAgentEndpoint: request.RemoteAgentEndpoint,
-                    networkCheckpointCount: networkCheckpointCount),
+                    networkCheckpointCount: networkCheckpointCount,
+                    unreadableRangesManifestPath: unreadableRangesManifestPath),
                 CancellationToken.None);
             throw;
         }
@@ -518,7 +563,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
     }
 
     private static async Task<(int bytesRead, bool zeroFilled)> ReadSourceChunkWithPolicyAsync(
-        FileStream sourceStream,
+        Stream sourceStream,
         byte[] buffer,
         int requestedBytes,
         ImageAcquisitionRequest request,
@@ -550,7 +595,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
     }
 
     private static async Task VerifyAndHashResumePrefixAsync(
-        FileStream sourceStream,
+        Stream sourceStream,
         string destinationPath,
         long prefixBytes,
         int chunkSizeBytes,
@@ -673,6 +718,17 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         }
 
         return checked(chunkSizeBytes + (MinChunkSizeBytes - remainder));
+    }
+
+    private static Stream OpenDefaultSourceStream(string sourcePath, int chunkSizeBytes)
+    {
+        return new FileStream(
+            sourcePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            chunkSizeBytes,
+            FileOptions.SequentialScan);
     }
 
     private static bool IsLikelyNetworkPath(string sourcePath)
@@ -868,6 +924,52 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         await stream.FlushAsync(cancellationToken);
     }
 
+    private static async Task<string?> WriteUnreadableRangesManifestIfNeededAsync(
+        string stateLogPath,
+        string sourcePath,
+        string destinationPath,
+        ImageReadErrorPolicy readErrorPolicy,
+        IReadOnlyList<UnreadableRange> unreadableRanges,
+        CancellationToken cancellationToken)
+    {
+        if (unreadableRanges.Count == 0)
+        {
+            return null;
+        }
+
+        var manifestPath = BuildUnreadableRangesManifestPath(stateLogPath);
+        var manifest = new UnreadableRangesManifest(
+            SourcePath: sourcePath,
+            DestinationImagePath: destinationPath,
+            GeneratedUtc: DateTimeOffset.UtcNow,
+            ReadErrorPolicy: readErrorPolicy,
+            RangeCount: unreadableRanges.Count,
+            ZeroFilledBytes: unreadableRanges.Aggregate(0L, (total, range) => total + range.LengthBytes),
+            Ranges: unreadableRanges
+                .Select((range, index) => new UnreadableRangeManifestEntry(
+                    Sequence: index + 1,
+                    OffsetBytes: range.OffsetBytes,
+                    LengthBytes: range.LengthBytes,
+                    Reason: range.Reason))
+                .ToArray());
+
+        await using var stream = new FileStream(
+            manifestPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 32 * 1024,
+            FileOptions.SequentialScan);
+        await JsonSerializer.SerializeAsync(stream, manifest, SerializerOptions, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+        return manifestPath;
+    }
+
+    private static string BuildUnreadableRangesManifestPath(string stateLogPath)
+    {
+        return stateLogPath + ".unreadable-ranges.json";
+    }
+
     private static ImageAcquisitionState BuildState(
         string sourcePath,
         string destinationPath,
@@ -887,7 +989,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         long? maxNetworkThroughputBytesPerSecond,
         RemoteAgentMode remoteAgentMode,
         string? remoteAgentEndpoint,
-        int networkCheckpointCount)
+        int networkCheckpointCount,
+        string? unreadableRangesManifestPath = null)
     {
         return new ImageAcquisitionState
         {
@@ -911,6 +1014,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             RemoteAgentMode = remoteAgentMode,
             RemoteAgentEndpoint = remoteAgentEndpoint,
             NetworkCheckpointCount = networkCheckpointCount,
+            UnreadableRangesManifestPath = unreadableRangesManifestPath,
         };
     }
 
@@ -930,6 +1034,23 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         public int Sequence { get; set; }
         public string? PreviousHash { get; set; }
     }
+
+    private sealed record UnreadableRange(long OffsetBytes, int LengthBytes, string Reason);
+
+    private sealed record UnreadableRangeManifestEntry(
+        int Sequence,
+        long OffsetBytes,
+        int LengthBytes,
+        string Reason);
+
+    private sealed record UnreadableRangesManifest(
+        string SourcePath,
+        string DestinationImagePath,
+        DateTimeOffset GeneratedUtc,
+        ImageReadErrorPolicy ReadErrorPolicy,
+        int RangeCount,
+        long ZeroFilledBytes,
+        IReadOnlyList<UnreadableRangeManifestEntry> Ranges);
 
     private sealed record ImageAcquisitionState
     {
@@ -953,5 +1074,6 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         public RemoteAgentMode RemoteAgentMode { get; init; } = RemoteAgentMode.Disabled;
         public string? RemoteAgentEndpoint { get; init; }
         public int NetworkCheckpointCount { get; init; }
+        public string? UnreadableRangesManifestPath { get; init; }
     }
 }

@@ -51,6 +51,7 @@
 - Session retention maintenance applies a 30-day window plus maximum recent-session cap and supports explicit compaction (`VACUUM`) from the diagnostics actions.
 - Structured session logs written as JSONL plus readable text logs.
 - Image acquisition service now supports clone-first capture to raw image files with resume-safe checkpoint logs, SHA-256 verification, and explicit read-error policy controls (`FailFast` or `ContinueWithZeroFill`).
+- Image acquisition now emits a durable unreadable-range manifest (`*.unreadable-ranges.json`) when zero-fill continuation is used.
 - Session and recovery actions now gate live-media operations behind an explicit image-first recommendation confirmation.
 
 ## Interop boundary
@@ -66,6 +67,7 @@
 - Engine now includes an ext superblock parser boundary (`fr-ext`) with FFI/UI candidate-listing wiring in Phase 9.
 - Engine now includes concrete USN v2/v3 record parsing (`fr-usn`) and evidence-source propagation flags over the FFI quick-scan candidate boundary.
 - Recovery export now includes non-resident NTFS compressed-stream decompression and encrypted-stream raw export with explicit diagnostics/partial signaling through the FFI boundary.
+- UI recovery now supports metadata-manifest export for metadata-only deleted candidates (`ReFS`, `APFS`, `HFS+`, `XFS`, `UFS`) while full content parsers remain deferred.
 
 ## Observability
 

@@ -17,5 +17,6 @@ public sealed record ImageAcquisitionResult(
     RemoteAgentMode RemoteAgentMode,
     string? RemoteAgentEndpoint,
     string? ChainOfCustodyLogPath,
-    int NetworkCheckpointCount
+    int NetworkCheckpointCount,
+    string? UnreadableRangesManifestPath
 );

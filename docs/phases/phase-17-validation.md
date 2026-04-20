@@ -19,8 +19,8 @@
 
 ## Evidence
 
-- `cargo test -p fr-validator` passed (`13` tests), including a signature regression matrix for false-positive and partial/truncation edges.
-- `cargo test -p fr-carving` passed (`7` tests).
+- `cargo test -p fr-validator` passed (`16` tests), including a signature regression matrix for false-positive and partial/truncation edges.
+- `cargo test -p fr-carving` passed (`8` tests).
 - `cargo test -p fr-ffi` passed (`53` tests).
-- `dotnet test ui/windows-app/tests/FileRecovery.WindowsApp.Tests/FileRecovery.WindowsApp.Tests.csproj -c Debug` passed (`60` tests).
+- `dotnet test ui/windows-app/tests/FileRecovery.WindowsApp.Tests/FileRecovery.WindowsApp.Tests.csproj -c Debug` passed (`61` tests).
 - `dotnet build ui/windows-app/src/FileRecovery.WindowsApp/FileRecovery.WindowsApp.csproj -c Debug` passed.

@@ -27,4 +27,4 @@ Completed (`DONE`) on `2026-04-05`.
 
 ## Remaining Gaps (Deferred, Non-Blocking)
 
-- APFS/HFS+ data recovery/export implementation is still pending.
+- APFS/HFS+ full data recovery/export implementation is still pending (metadata-manifest export is now available).

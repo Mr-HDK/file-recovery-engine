@@ -40,4 +40,4 @@
 
 ## Deferred in Phase 13
 
-- No dedicated per-chunk unreadable-range export/report artifact yet (only aggregate counters in logs/state).
+- Full forensic unreadable-range classification remains deferred; per-range unreadable-manifest export is now implemented.

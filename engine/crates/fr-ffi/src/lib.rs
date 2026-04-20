@@ -2563,10 +2563,10 @@ fn encode_carve_signature_pack_metadata() -> FrCarveSignaturePackMetadata {
 fn carve_family_flag_for_extension(extension: &str) -> u32 {
     match extension {
         "jpg" | "png" | "gif" | "bmp" | "tiff" | "webp" => CARVE_FAMILY_IMAGES,
-        "pdf" | "txt" => CARVE_FAMILY_DOCUMENTS,
+        "pdf" | "txt" | "rtf" => CARVE_FAMILY_DOCUMENTS,
         "zip" | "gz" | "7z" | "rar" => CARVE_FAMILY_ARCHIVES,
         "docx" | "xlsx" | "pptx" => CARVE_FAMILY_OFFICE,
-        "mp4" | "ogg" | "flac" | "mp3" | "wav" => CARVE_FAMILY_MEDIA,
+        "mp4" | "avi" | "mid" | "ogg" | "flac" | "mp3" | "wav" => CARVE_FAMILY_MEDIA,
         _ => 0,
     }
 }

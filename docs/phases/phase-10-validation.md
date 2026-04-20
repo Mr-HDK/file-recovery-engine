@@ -24,4 +24,4 @@
 
 ## Deferred follow-up (non-blocking)
 
-- Implement APFS/HFS+ recover-to-file data paths beyond metadata candidate surfacing.
+- Implement APFS/HFS+ full recover-to-file data paths beyond metadata-manifest export.

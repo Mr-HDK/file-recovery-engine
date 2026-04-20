@@ -15,7 +15,7 @@ Completed on `2026-04-04`.
 
 ## What did not ship and why
 
-- ReFS recovery/export execution path was not included in Phase 8 scope and is deferred.
+- ReFS full file-content recovery/export execution path was not included in Phase 8 scope and is deferred (metadata-manifest export path is now available).
 - Host-level ReFS fixture/integration validation remains deferred to later phases.
 
 ## Test outcomes

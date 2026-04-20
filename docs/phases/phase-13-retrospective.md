@@ -24,4 +24,4 @@ Completed (`DONE`) on `2026-04-09`.
 
 ## Remaining Gaps (Deferred, Non-Blocking)
 
-- Future forensic workflows may require durable per-range unreadable-sector manifests beyond aggregate counters.
+- Future forensic workflows may require richer unreadable-range classification beyond the new durable per-range manifest export.

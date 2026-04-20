@@ -32,4 +32,4 @@ Completed (`DONE`) on `2026-04-10`.
 ## Remaining Gaps (Deferred, Non-Blocking)
 
 - Remote agent mode is currently declarative and logged; no agent RPC execution plane yet.
-- No dedicated network fault-injection harness yet for high-latency or intermittent link simulation.
+- Network fault-injection coverage now exists at acquisition-service level; full latency/profile simulation across mounted network filesystems remains future work.

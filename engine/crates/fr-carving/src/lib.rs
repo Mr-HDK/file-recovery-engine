@@ -21,7 +21,7 @@ pub fn descriptor() -> ModuleDescriptor {
 }
 
 pub const SIGNATURE_PACK_NAME: &str = "core-signatures";
-pub const SIGNATURE_PACK_VERSION: &str = "2026.04-b1";
+pub const SIGNATURE_PACK_VERSION: &str = "2026.04-b2";
 
 pub fn signature_pack_formats() -> &'static [FileFormat] {
     &[
@@ -33,6 +33,7 @@ pub fn signature_pack_formats() -> &'static [FileFormat] {
         FileFormat::Webp,
         FileFormat::Pdf,
         FileFormat::Utf8Text,
+        FileFormat::Rtf,
         FileFormat::Zip,
         FileFormat::Gzip,
         FileFormat::SevenZip,
@@ -41,6 +42,8 @@ pub fn signature_pack_formats() -> &'static [FileFormat] {
         FileFormat::Xlsx,
         FileFormat::Pptx,
         FileFormat::Mp4,
+        FileFormat::Avi,
+        FileFormat::Midi,
         FileFormat::Ogg,
         FileFormat::Flac,
         FileFormat::Mp3,
@@ -185,6 +188,16 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
     if plan.format_enabled(FileFormat::Utf8Text) {
         carve_utf8_bom_text(bytes, &mut seen, &mut carved);
     }
+    if plan.format_enabled(FileFormat::Rtf) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Rtf,
+            b"{\\rtf",
+            Some(b"}"),
+            &mut seen,
+            &mut carved,
+        );
+    }
 
     let zip_related_enabled = [
         FileFormat::Zip,
@@ -244,6 +257,12 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
 
     if plan.format_enabled(FileFormat::Mp4) {
         carve_mp4(bytes, &mut seen, &mut carved);
+    }
+    if plan.format_enabled(FileFormat::Avi) {
+        carve_avi(bytes, &mut seen, &mut carved);
+    }
+    if plan.format_enabled(FileFormat::Midi) {
+        carve_midi(bytes, &mut seen, &mut carved);
     }
 
     if plan.format_enabled(FileFormat::Ogg) {
@@ -426,6 +445,68 @@ fn carve_mp4(
     }
 }
 
+fn carve_avi(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"RIFF") {
+        if offset + 12 > bytes.len() {
+            continue;
+        }
+        if &bytes[offset + 8..offset + 12] != b"AVI " {
+            continue;
+        }
+        let declared_size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize
+            + 8;
+        let end = bytes
+            .len()
+            .min(offset.saturating_add(declared_size.max(12)));
+        push_candidate(bytes, FileFormat::Avi, offset, end, seen, carved);
+    }
+}
+
+fn carve_midi(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"MThd") {
+        if offset + 8 > bytes.len() {
+            continue;
+        }
+
+        let header_len = u32::from_be_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        if header_len < 6 {
+            continue;
+        }
+
+        let header_end = offset.saturating_add(8).saturating_add(header_len);
+        let mut end = bytes.len().min(offset.saturating_add(1024 * 1024));
+        if header_end + 8 <= bytes.len() && &bytes[header_end..header_end + 4] == b"MTrk" {
+            let track_len = u32::from_be_bytes([
+                bytes[header_end + 4],
+                bytes[header_end + 5],
+                bytes[header_end + 6],
+                bytes[header_end + 7],
+            ]) as usize;
+            end = end.min(header_end.saturating_add(8).saturating_add(track_len));
+        }
+
+        push_candidate(bytes, FileFormat::Midi, offset, end, seen, carved);
+    }
+}
+
 fn carve_utf8_bom_text(
     bytes: &[u8],
     seen: &mut HashSet<(usize, FileFormat)>,
@@ -592,7 +673,7 @@ fn family_for_format(format: FileFormat) -> CarvingFamily {
         | FileFormat::Bmp
         | FileFormat::Tiff
         | FileFormat::Webp => CarvingFamily::Images,
-        FileFormat::Pdf | FileFormat::Utf8Text => CarvingFamily::Documents,
+        FileFormat::Pdf | FileFormat::Utf8Text | FileFormat::Rtf => CarvingFamily::Documents,
         FileFormat::Zip | FileFormat::Gzip | FileFormat::SevenZip | FileFormat::Rar => {
             CarvingFamily::Archives
         }
@@ -600,6 +681,8 @@ fn family_for_format(format: FileFormat) -> CarvingFamily {
         FileFormat::Mp3
         | FileFormat::Wav
         | FileFormat::Mp4
+        | FileFormat::Avi
+        | FileFormat::Midi
         | FileFormat::Ogg
         | FileFormat::Flac => CarvingFamily::Media,
     }
@@ -621,10 +704,12 @@ mod tests {
     #[test]
     fn signature_pack_declares_expected_batch_metadata() {
         assert_eq!(SIGNATURE_PACK_NAME, "core-signatures");
-        assert_eq!(SIGNATURE_PACK_VERSION, "2026.04-b1");
+        assert_eq!(SIGNATURE_PACK_VERSION, "2026.04-b2");
         assert!(signature_pack_formats().contains(&FileFormat::Webp));
         assert!(signature_pack_formats().contains(&FileFormat::SevenZip));
         assert!(signature_pack_formats().contains(&FileFormat::Mp4));
+        assert!(signature_pack_formats().contains(&FileFormat::Avi));
+        assert!(signature_pack_formats().contains(&FileFormat::Rtf));
     }
 
     #[test]
@@ -701,6 +786,24 @@ mod tests {
         assert!(carved
             .iter()
             .any(|candidate| candidate.format == FileFormat::Mp4));
+    }
+
+    #[test]
+    fn media_family_can_find_avi_candidate() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(20u32).to_le_bytes());
+        bytes.extend_from_slice(b"AVI ");
+        bytes.extend_from_slice(&[0u8; 20]);
+
+        let plan = CarvingPlan::default()
+            .without_family(CarvingFamily::Images)
+            .without_family(CarvingFamily::Documents)
+            .with_family(CarvingFamily::Media);
+        let carved = carve_bytes(&plan, &bytes);
+        assert!(carved
+            .iter()
+            .any(|candidate| candidate.format == FileFormat::Avi));
     }
 
     fn build_test_zip_blob(file_name: &str, payload: &[u8]) -> Vec<u8> {

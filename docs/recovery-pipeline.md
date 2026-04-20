@@ -45,7 +45,7 @@
 - Validate structures to minimize false positives.
 - Mark carved outputs with lower default confidence.
 - Full-scan mode now performs chunked window streaming with overlap and candidate deduplication, replacing the previous fixed-size prefix carve behavior.
-- Signature-pack provenance is surfaced in session logs (pack/version/count) and the active batch currently covers `20` validator-backed formats across image/document/archive/office/media families.
+- Signature-pack provenance is surfaced in session logs (pack/version/count) and the active batch currently covers `23` validator-backed formats across image/document/archive/office/media families.
 
 8. Candidate consolidation
 - Cluster duplicate candidates from different evidence streams.
@@ -63,6 +63,7 @@
 - Export encrypted streams as raw bytes with explicit "not decrypted" diagnostics and partial recovery signaling.
 - Surface ADS-only edge cases explicitly instead of silent fallback.
 - ext recovery baseline supports regular-file direct/single/double/triple-indirect export plus extents-tree export (with sparse/uninitialized extents emitted as zero-filled ranges), inline/non-inline symlink target export, and directory inode byte export, and returns explicit unsupported status for candidates requiring unimplemented inode/block semantics.
+- Metadata-only filesystems (`ReFS`, `APFS`, `HFS+`, `XFS`, `UFS`) now export per-candidate metadata manifests in recovery flow; full file-content recovery for those filesystems remains parser-dependent.
 
 10. Reporting
 - Generate session report with recovered count, failures, partials, and evidence breakdown.

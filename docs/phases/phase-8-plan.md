@@ -50,6 +50,6 @@
 
 ## Deferred follow-up (post-Phase 8)
 
-- ReFS recovery/export implementation.
+- ReFS full file-content recovery implementation (metadata-manifest export is now available in UI recovery flow).
 - ReFS candidate persistence/reporting pipeline.
 - Host-level ReFS fixture/integration validation.
