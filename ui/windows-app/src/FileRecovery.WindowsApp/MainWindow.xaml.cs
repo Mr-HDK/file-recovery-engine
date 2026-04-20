@@ -158,10 +158,11 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
-    private const string UiBuildTag = "phase16-winpe-offline-20260420-0011";
+    private const string UiBuildTag = "phase17-streaming-signatures-20260420-1245";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
-    private const ulong FullScanCarveMaxBytes = 256UL * 1024UL * 1024UL;
+    private const ulong FullScanCarveChunkBytes = 64UL * 1024UL * 1024UL;
+    private const ulong FullScanCarveOverlapBytes = 1UL * 1024UL * 1024UL;
     private static readonly Regex PdfTitleRegex = new("/Title\\s*\\((?<title>[^\\)]{3,120})\\)", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private const int DefaultQuickScanMaxRecords = 2048;
     private const int DefaultCandidateCapacity = 1024;
@@ -1049,11 +1050,24 @@ public partial class MainWindow : Window
                         {
                             operationToken.ThrowIfCancellationRequested();
                             var familyFlags = BuildSelectedCarveFamilyFlags();
-                            var carveResult = NativeEngineProbe.GetCarveCandidatesFromSession(
+                            var signaturePack = NativeEngineProbe.GetCarveSignaturePackMetadata();
+                            if (signaturePack.Success && signaturePack.Metadata is not null)
+                            {
+                                var metadata = signaturePack.Metadata;
+                                AppendSessionMessage(
+                                    $"Carve signature pack: {metadata.PackName} {metadata.PackVersion} ({metadata.FormatCount} formats).");
+                            }
+                            else if (!signaturePack.EngineAvailable)
+                            {
+                                AppendSessionMessage($"Carve signature pack metadata unavailable: {signaturePack.Message}.");
+                            }
+
+                            var carveResult = RunStreamingCarveScan(
                                 open.SessionId,
+                                open.SizeBytes,
                                 familyFlags,
-                                FullScanCarveMaxBytes,
-                                candidateCapacity: Math.Max(candidateCapacity, 256));
+                                candidateCapacity: Math.Max(candidateCapacity, 256),
+                                operationToken);
                             AppendSessionMessage(
                                 $"Carving scan: {carveResult.Message} (status {carveResult.StatusCode}, count={carveResult.Candidates.Count}).");
                             AppendCarveCandidates(carveResult);
@@ -1744,6 +1758,87 @@ public partial class MainWindow : Window
         }
 
         return flags;
+    }
+
+    private static EngineCarveCandidatesResult RunStreamingCarveScan(
+        ulong sessionId,
+        ulong sourceSizeBytes,
+        uint familyFlags,
+        int candidateCapacity,
+        CancellationToken operationToken)
+    {
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        var aggregated = new List<EngineCarveCandidate>();
+        var windowsScanned = 0;
+
+        // Unknown source sizes (or zero-sized probes) run one bounded carve window.
+        var unknownSourceLength = sourceSizeBytes == 0;
+        var totalBytes = sourceSizeBytes;
+        var offset = 0UL;
+
+        while (unknownSourceLength || offset < totalBytes)
+        {
+            operationToken.ThrowIfCancellationRequested();
+
+            var windowLength = unknownSourceLength
+                ? FullScanCarveChunkBytes + FullScanCarveOverlapBytes
+                : Math.Min(totalBytes - offset, FullScanCarveChunkBytes + FullScanCarveOverlapBytes);
+            var windowResult = NativeEngineProbe.GetCarveCandidatesFromSessionWindow(
+                sessionId,
+                familyFlags,
+                windowOffsetBytes: offset,
+                windowLengthBytes: windowLength,
+                candidateCapacity: candidateCapacity);
+
+            windowsScanned++;
+            if (!windowResult.Success)
+            {
+                var failedMessage = $"Streaming carve window at 0x{offset:X} failed: {windowResult.Message}";
+                return new EngineCarveCandidatesResult(
+                    windowResult.EngineAvailable,
+                    false,
+                    aggregated,
+                    failedMessage,
+                    windowResult.StatusCode);
+            }
+
+            foreach (var candidate in windowResult.Candidates)
+            {
+                var key = $"{candidate.OffsetBytes:X16}|{candidate.LengthBytes:X16}|{candidate.Format}";
+                if (unique.Add(key))
+                {
+                    aggregated.Add(candidate);
+                }
+            }
+
+            if (unknownSourceLength)
+            {
+                break;
+            }
+
+            var remaining = totalBytes - offset;
+            if (remaining <= FullScanCarveChunkBytes)
+            {
+                break;
+            }
+
+            var nextOffset = offset + FullScanCarveChunkBytes;
+            if (nextOffset <= offset)
+            {
+                break;
+            }
+
+            offset = nextOffset;
+        }
+
+        aggregated.Sort((left, right) => left.OffsetBytes.CompareTo(right.OffsetBytes));
+        var message = $"Streaming carve scan completed across {windowsScanned} window(s).";
+        return new EngineCarveCandidatesResult(
+            true,
+            true,
+            aggregated,
+            message,
+            0);
     }
 
     private void AppendCarveCandidates(EngineCarveCandidatesResult result)

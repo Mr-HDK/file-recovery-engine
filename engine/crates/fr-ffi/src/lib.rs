@@ -2,7 +2,10 @@ use fr_apfs::{
     parse_container_superblock as parse_apfs_container_superblock,
     scan_deleted_candidates_with_container as scan_apfs_deleted_candidates_with_container,
 };
-use fr_carving::{carve_bytes, CarvingFamily, CarvingPlan};
+use fr_carving::{
+    carve_bytes, signature_pack_formats, CarvingFamily, CarvingPlan, SIGNATURE_PACK_NAME,
+    SIGNATURE_PACK_VERSION,
+};
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
     parse_boot_sector as parse_fat_boot_sector, scan_deleted_entries_with_boot, FatFilesystemKind,
@@ -305,6 +308,16 @@ pub struct FrCarveCandidate {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct FrCarveSignaturePackMetadata {
+    pub pack_name: [u8; 64],
+    pub pack_version: [u8; 32],
+    pub format_count: u32,
+    pub family_flags: u32,
+    pub formats_csv: [u8; 512],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrVssSnapshot {
     pub snapshot_id: [u8; 96],
     pub volume_name: [u8; 260],
@@ -432,6 +445,21 @@ pub extern "C" fn fr_engine_version() -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn fr_health_check() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_carve_signature_pack_metadata(
+    out_metadata: *mut FrCarveSignaturePackMetadata,
+) -> i32 {
+    if out_metadata.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        *out_metadata = encode_carve_signature_pack_metadata();
+    }
+
     0
 }
 
@@ -1591,6 +1619,27 @@ pub extern "C" fn fr_get_carve_candidates_from_session(
     candidate_capacity: u32,
     out_written: *mut u32,
 ) -> i32 {
+    fr_get_carve_candidates_from_session_window(
+        session_id,
+        family_flags,
+        0,
+        max_scan_bytes,
+        out_candidates,
+        candidate_capacity,
+        out_written,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_get_carve_candidates_from_session_window(
+    session_id: u64,
+    family_flags: u32,
+    window_offset_bytes: u64,
+    window_length_bytes: u64,
+    out_candidates: *mut FrCarveCandidate,
+    candidate_capacity: u32,
+    out_written: *mut u32,
+) -> i32 {
     if out_written.is_null() {
         return -1;
     }
@@ -1611,7 +1660,7 @@ pub extern "C" fn fr_get_carve_candidates_from_session(
         return 20;
     };
 
-    let bytes = match read_prefix_for_carving(session, max_scan_bytes) {
+    let bytes = match read_window_for_carving(session, window_offset_bytes, window_length_bytes) {
         Ok(data) => data,
         Err(err) => return map_winio_error(err),
     };
@@ -1620,8 +1669,18 @@ pub extern "C" fn fr_get_carve_candidates_from_session(
         return 0;
     }
 
-    let plan = build_carving_plan(family_flags, max_scan_bytes);
-    let candidates = carve_bytes(&plan, &bytes);
+    let plan = build_carving_plan(family_flags, window_length_bytes);
+    let mut candidates = carve_bytes(&plan, &bytes);
+    if window_offset_bytes > 0 {
+        let Ok(base_offset) = usize::try_from(window_offset_bytes) else {
+            return -4;
+        };
+        for candidate in &mut candidates {
+            candidate.offset = candidate.offset.saturating_add(base_offset);
+            candidate.id = format!("carve-{:?}-{:x}", candidate.format, candidate.offset);
+        }
+    }
+
     let written = candidates.len().min(candidate_capacity as usize);
     if written > 0 {
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_candidates, written) };
@@ -2467,6 +2526,49 @@ fn encode_carve_candidate(candidate: fr_carving::CarvedCandidate) -> FrCarveCand
     write_utf8(&reason, &mut out.confidence_reason);
 
     out
+}
+
+fn encode_carve_signature_pack_metadata() -> FrCarveSignaturePackMetadata {
+    let mut out = FrCarveSignaturePackMetadata {
+        pack_name: [0u8; 64],
+        pack_version: [0u8; 32],
+        format_count: 0,
+        family_flags: 0,
+        formats_csv: [0u8; 512],
+    };
+
+    write_utf8(SIGNATURE_PACK_NAME, &mut out.pack_name);
+    write_utf8(SIGNATURE_PACK_VERSION, &mut out.pack_version);
+
+    let formats = signature_pack_formats();
+    out.format_count = usize_to_u32_saturating(formats.len());
+
+    let mut family_flags = 0u32;
+    let mut extensions = Vec::with_capacity(formats.len());
+    for format in formats {
+        let extension = format.default_extension();
+        family_flags |= carve_family_flag_for_extension(extension);
+        extensions.push(extension);
+    }
+    out.family_flags = family_flags;
+
+    extensions.sort_unstable();
+    extensions.dedup();
+    let csv = extensions.join(",");
+    write_utf8(&csv, &mut out.formats_csv);
+
+    out
+}
+
+fn carve_family_flag_for_extension(extension: &str) -> u32 {
+    match extension {
+        "jpg" | "png" | "gif" | "bmp" | "tiff" | "webp" => CARVE_FAMILY_IMAGES,
+        "pdf" | "txt" => CARVE_FAMILY_DOCUMENTS,
+        "zip" | "gz" | "7z" | "rar" => CARVE_FAMILY_ARCHIVES,
+        "docx" | "xlsx" | "pptx" => CARVE_FAMILY_OFFICE,
+        "mp4" | "ogg" | "flac" | "mp3" | "wav" => CARVE_FAMILY_MEDIA,
+        _ => 0,
+    }
 }
 
 fn encode_vss_snapshot(snapshot: &fr_vss::VssSnapshot) -> FrVssSnapshot {
@@ -4470,23 +4572,32 @@ fn build_carving_plan(family_flags: u32, max_scan_bytes: u64) -> CarvingPlan {
     plan.with_max_scan_bytes(max_scan_bytes)
 }
 
-fn read_prefix_for_carving(
+fn read_window_for_carving(
     session: &mut fr_winio::ReadSession,
-    max_scan_bytes: u64,
+    window_offset_bytes: u64,
+    window_length_bytes: u64,
 ) -> Result<Vec<u8>, fr_winio::WinIoError> {
     const UNKNOWN_SIZE_FALLBACK_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
-    let normalized_max = normalize_max_scan_bytes(max_scan_bytes);
-    let source_len = session
-        .size_bytes()
-        .unwrap_or(normalized_max.min(UNKNOWN_SIZE_FALLBACK_SCAN_BYTES));
-    let scan_len = source_len.min(normalized_max) as usize;
+    let normalized_window = normalize_max_scan_bytes(window_length_bytes);
+    let scan_len_u64 = match session.size_bytes() {
+        Some(source_len) => {
+            if source_len <= window_offset_bytes {
+                return Ok(Vec::new());
+            }
+            let available = source_len - window_offset_bytes;
+            available.min(normalized_window)
+        }
+        None => normalized_window.min(UNKNOWN_SIZE_FALLBACK_SCAN_BYTES),
+    };
+    let scan_len =
+        usize::try_from(scan_len_u64).map_err(|_| fr_winio::WinIoError::InvalidReadOffset)?;
     if scan_len == 0 {
         return Ok(Vec::new());
     }
 
     let mut bytes = vec![0u8; scan_len];
-    if read_from_session(session, 0, &mut bytes)? {
+    if read_from_session(session, window_offset_bytes, &mut bytes)? {
         Ok(bytes)
     } else {
         Ok(Vec::new())
@@ -4655,7 +4766,7 @@ fn read_prefix_for_raid_scan(
 
 fn normalize_max_scan_bytes(max_scan_bytes: u64) -> u64 {
     const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
-    const MAX_ALLOWED_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+    const MAX_ALLOWED_SCAN_BYTES: u64 = usize::MAX as u64;
 
     if max_scan_bytes == 0 {
         DEFAULT_MAX_SCAN_BYTES
@@ -6436,6 +6547,87 @@ mod tests {
     }
 
     #[test]
+    fn ffi_carve_candidates_from_session_window_uses_absolute_offsets() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-carve-window-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("carve-window.img");
+
+        let prefix_len = 2 * 1024 * 1024;
+        let mut bytes = vec![0x41; prefix_len];
+        bytes.extend_from_slice(b"\xFF\xD8\xFF\xE0window-jpeg\xFF\xD9");
+        fs::write(&image_path, &bytes).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut out_written = 0u32;
+        let mut carved = vec![empty_carve_candidate(); 8];
+        let status = fr_get_carve_candidates_from_session_window(
+            session_id,
+            CARVE_FAMILY_IMAGES,
+            prefix_len as u64,
+            1024 * 1024,
+            carved.as_mut_ptr(),
+            carved.len() as u32,
+            &mut out_written,
+        );
+        assert_eq!(status, 0);
+        assert!(out_written >= 1);
+
+        let first = carved[0];
+        assert_eq!(first.offset_bytes, prefix_len as u64);
+        assert!(first.length_bytes > 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn normalize_max_scan_bytes_does_not_cap_at_256mib() {
+        let requested = 1024_u64 * 1024_u64 * 1024_u64;
+        assert_eq!(normalize_max_scan_bytes(requested), requested);
+    }
+
+    #[test]
+    fn ffi_get_carve_signature_pack_metadata_returns_version_and_formats() {
+        let mut metadata = empty_carve_signature_pack_metadata();
+        let status = fr_get_carve_signature_pack_metadata(&mut metadata);
+        assert_eq!(status, 0);
+        assert_eq!(
+            c_string_bytes_to_string(&metadata.pack_name),
+            SIGNATURE_PACK_NAME
+        );
+        assert_eq!(
+            c_string_bytes_to_string(&metadata.pack_version),
+            SIGNATURE_PACK_VERSION
+        );
+        assert!(metadata.format_count >= 20);
+        assert_ne!(metadata.family_flags & CARVE_FAMILY_IMAGES, 0);
+        assert_ne!(metadata.family_flags & CARVE_FAMILY_ARCHIVES, 0);
+        let formats = c_string_bytes_to_string(&metadata.formats_csv);
+        assert!(formats.contains("webp"));
+        assert!(formats.contains("7z"));
+        assert!(formats.contains("mp4"));
+    }
+
+    #[test]
     fn encode_vss_snapshot_maps_all_fields() {
         let snapshot = fr_vss::VssSnapshot {
             snapshot_id: "{11111111-1111-1111-1111-111111111111}".to_string(),
@@ -7729,6 +7921,16 @@ mod tests {
             format: [0u8; 16],
             suggested_name: [0u8; 128],
             confidence_reason: [0u8; 256],
+        }
+    }
+
+    fn empty_carve_signature_pack_metadata() -> FrCarveSignaturePackMetadata {
+        FrCarveSignaturePackMetadata {
+            pack_name: [0u8; 64],
+            pack_version: [0u8; 32],
+            format_count: 0,
+            family_flags: 0,
+            formats_csv: [0u8; 512],
         }
     }
 

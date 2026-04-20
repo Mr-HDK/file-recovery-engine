@@ -20,6 +20,34 @@ pub fn descriptor() -> ModuleDescriptor {
     }
 }
 
+pub const SIGNATURE_PACK_NAME: &str = "core-signatures";
+pub const SIGNATURE_PACK_VERSION: &str = "2026.04-b1";
+
+pub fn signature_pack_formats() -> &'static [FileFormat] {
+    &[
+        FileFormat::Jpeg,
+        FileFormat::Png,
+        FileFormat::Gif,
+        FileFormat::Bmp,
+        FileFormat::Tiff,
+        FileFormat::Webp,
+        FileFormat::Pdf,
+        FileFormat::Utf8Text,
+        FileFormat::Zip,
+        FileFormat::Gzip,
+        FileFormat::SevenZip,
+        FileFormat::Rar,
+        FileFormat::Docx,
+        FileFormat::Xlsx,
+        FileFormat::Pptx,
+        FileFormat::Mp4,
+        FileFormat::Ogg,
+        FileFormat::Flac,
+        FileFormat::Mp3,
+        FileFormat::Wav,
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CarvingFamily {
     Images,
@@ -112,6 +140,37 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
         carve_png(bytes, &mut seen, &mut carved);
     }
 
+    if plan.format_enabled(FileFormat::Gif) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Gif,
+            b"GIF89a",
+            Some(&[0x3B]),
+            &mut seen,
+            &mut carved,
+        );
+        carve_header_footer(
+            bytes,
+            FileFormat::Gif,
+            b"GIF87a",
+            Some(&[0x3B]),
+            &mut seen,
+            &mut carved,
+        );
+    }
+
+    if plan.format_enabled(FileFormat::Bmp) {
+        carve_bmp(bytes, &mut seen, &mut carved);
+    }
+
+    if plan.format_enabled(FileFormat::Tiff) {
+        carve_tiff(bytes, &mut seen, &mut carved);
+    }
+
+    if plan.format_enabled(FileFormat::Webp) {
+        carve_webp(bytes, &mut seen, &mut carved);
+    }
+
     if plan.format_enabled(FileFormat::Pdf) {
         carve_header_footer(
             bytes,
@@ -129,6 +188,9 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
 
     let zip_related_enabled = [
         FileFormat::Zip,
+        FileFormat::Gzip,
+        FileFormat::SevenZip,
+        FileFormat::Rar,
         FileFormat::Docx,
         FileFormat::Xlsx,
         FileFormat::Pptx,
@@ -137,6 +199,73 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
     .any(|format| plan.format_enabled(format));
     if zip_related_enabled {
         carve_zip_and_office(bytes, plan, &mut seen, &mut carved);
+    }
+
+    if plan.format_enabled(FileFormat::Gzip) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Gzip,
+            &[0x1F, 0x8B, 0x08],
+            None,
+            &mut seen,
+            &mut carved,
+        );
+    }
+
+    if plan.format_enabled(FileFormat::SevenZip) {
+        carve_header_footer(
+            bytes,
+            FileFormat::SevenZip,
+            b"7z\xBC\xAF\x27\x1C",
+            None,
+            &mut seen,
+            &mut carved,
+        );
+    }
+
+    if plan.format_enabled(FileFormat::Rar) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Rar,
+            b"Rar!\x1A\x07\x00",
+            None,
+            &mut seen,
+            &mut carved,
+        );
+        carve_header_footer(
+            bytes,
+            FileFormat::Rar,
+            b"Rar!\x1A\x07\x01\x00",
+            None,
+            &mut seen,
+            &mut carved,
+        );
+    }
+
+    if plan.format_enabled(FileFormat::Mp4) {
+        carve_mp4(bytes, &mut seen, &mut carved);
+    }
+
+    if plan.format_enabled(FileFormat::Ogg) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Ogg,
+            b"OggS",
+            None,
+            &mut seen,
+            &mut carved,
+        );
+    }
+
+    if plan.format_enabled(FileFormat::Flac) {
+        carve_header_footer(
+            bytes,
+            FileFormat::Flac,
+            b"fLaC",
+            None,
+            &mut seen,
+            &mut carved,
+        );
     }
 
     if plan.format_enabled(FileFormat::Wav) {
@@ -203,6 +332,97 @@ fn carve_png(
             cursor = next;
         }
         push_candidate(bytes, FileFormat::Png, offset, end, seen, carved);
+    }
+}
+
+fn carve_bmp(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"BM") {
+        if offset + 6 > bytes.len() {
+            continue;
+        }
+
+        let declared_size = u32::from_le_bytes([
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+        ]) as usize;
+        if declared_size < 54 {
+            continue;
+        }
+
+        let end = bytes.len().min(offset.saturating_add(declared_size));
+        push_candidate(bytes, FileFormat::Bmp, offset, end, seen, carved);
+    }
+}
+
+fn carve_tiff(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for header in [b"II*\0".as_slice(), b"MM\0*".as_slice()] {
+        for offset in find_all_subsequences(bytes, header) {
+            let end = bytes.len().min(offset.saturating_add(8 * 1024 * 1024));
+            push_candidate(bytes, FileFormat::Tiff, offset, end, seen, carved);
+        }
+    }
+}
+
+fn carve_webp(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"RIFF") {
+        if offset + 12 > bytes.len() {
+            continue;
+        }
+        if &bytes[offset + 8..offset + 12] != b"WEBP" {
+            continue;
+        }
+
+        let declared_size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize
+            + 8;
+        let end = bytes
+            .len()
+            .min(offset.saturating_add(declared_size.max(16)));
+        push_candidate(bytes, FileFormat::Webp, offset, end, seen, carved);
+    }
+}
+
+fn carve_mp4(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"ftyp") {
+        if offset < 4 || offset + 8 > bytes.len() {
+            continue;
+        }
+
+        let start = offset - 4;
+        let declared_size = u32::from_be_bytes([
+            bytes[start],
+            bytes[start + 1],
+            bytes[start + 2],
+            bytes[start + 3],
+        ]) as usize;
+        if declared_size < 16 {
+            continue;
+        }
+
+        let end = bytes.len().min(start.saturating_add(declared_size));
+        push_candidate(bytes, FileFormat::Mp4, start, end, seen, carved);
     }
 }
 
@@ -366,11 +586,22 @@ fn find_last_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn family_for_format(format: FileFormat) -> CarvingFamily {
     match format {
-        FileFormat::Jpeg | FileFormat::Png => CarvingFamily::Images,
+        FileFormat::Jpeg
+        | FileFormat::Png
+        | FileFormat::Gif
+        | FileFormat::Bmp
+        | FileFormat::Tiff
+        | FileFormat::Webp => CarvingFamily::Images,
         FileFormat::Pdf | FileFormat::Utf8Text => CarvingFamily::Documents,
-        FileFormat::Zip => CarvingFamily::Archives,
+        FileFormat::Zip | FileFormat::Gzip | FileFormat::SevenZip | FileFormat::Rar => {
+            CarvingFamily::Archives
+        }
         FileFormat::Docx | FileFormat::Xlsx | FileFormat::Pptx => CarvingFamily::Office,
-        FileFormat::Mp3 | FileFormat::Wav => CarvingFamily::Media,
+        FileFormat::Mp3
+        | FileFormat::Wav
+        | FileFormat::Mp4
+        | FileFormat::Ogg
+        | FileFormat::Flac => CarvingFamily::Media,
     }
 }
 
@@ -385,6 +616,15 @@ mod tests {
         assert!(plan.format_enabled(FileFormat::Pdf));
         assert!(!plan.format_enabled(FileFormat::Zip));
         assert!(!plan.format_enabled(FileFormat::Mp3));
+    }
+
+    #[test]
+    fn signature_pack_declares_expected_batch_metadata() {
+        assert_eq!(SIGNATURE_PACK_NAME, "core-signatures");
+        assert_eq!(SIGNATURE_PACK_VERSION, "2026.04-b1");
+        assert!(signature_pack_formats().contains(&FileFormat::Webp));
+        assert!(signature_pack_formats().contains(&FileFormat::SevenZip));
+        assert!(signature_pack_formats().contains(&FileFormat::Mp4));
     }
 
     #[test]
@@ -441,6 +681,26 @@ mod tests {
             pdf.confidence,
             ConfidenceTier::Low | ConfidenceTier::VeryLow
         ));
+    }
+
+    #[test]
+    fn media_family_can_find_mp4_candidate() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(24u32).to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom");
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"isom");
+        bytes.extend_from_slice(b"mp41");
+
+        let plan = CarvingPlan::default()
+            .without_family(CarvingFamily::Images)
+            .without_family(CarvingFamily::Documents)
+            .with_family(CarvingFamily::Media);
+        let carved = carve_bytes(&plan, &bytes);
+        assert!(carved
+            .iter()
+            .any(|candidate| candidate.format == FileFormat::Mp4));
     }
 
     fn build_test_zip_blob(file_name: &str, payload: &[u8]) -> Vec<u8> {

@@ -44,6 +44,8 @@
 - Apply selected signatures by family/type.
 - Validate structures to minimize false positives.
 - Mark carved outputs with lower default confidence.
+- Full-scan mode now performs chunked window streaming with overlap and candidate deduplication, replacing the previous fixed-size prefix carve behavior.
+- Signature-pack provenance is surfaced in session logs (pack/version/count) and the active batch currently covers `20` validator-backed formats across image/document/archive/office/media families.
 
 8. Candidate consolidation
 - Cluster duplicate candidates from different evidence streams.

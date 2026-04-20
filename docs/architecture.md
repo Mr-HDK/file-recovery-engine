@@ -59,6 +59,8 @@
 - .NET uses a thin P/Invoke probe (`file_recovery_engine.dll`) and degrades safely if the engine is unavailable.
 - Contract versioning starts at `0.1.0` and will be semver-gated.
 - Read-only source sessions expose open/read/close operations with alignment metadata so UI orchestration can keep chunk reads bounded and cancellation-friendly.
+- Carving now supports windowed streaming scans over source sessions (offset + length windows with overlap) to avoid monolithic fixed-cap reads on large media.
+- Carving now exposes signature-pack metadata over FFI (`pack name`, `pack version`, `format count`) so UI/session logs can record scanning provenance.
 - Engine now includes NTFS boot sector parsing and MFT record parsing (including resident/non-resident attribute decoding and mapping-pairs data-run parsing) as standalone parser primitives for Phase 2 integration.
 - Engine now includes a ReFS boot-sector parser boundary (`fr-refs`) with FFI exposure for source classification/probing in Phase 8.
 - Engine now includes an ext superblock parser boundary (`fr-ext`) with FFI/UI candidate-listing wiring in Phase 9.
