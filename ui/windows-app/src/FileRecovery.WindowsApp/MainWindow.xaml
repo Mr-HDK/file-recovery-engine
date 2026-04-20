@@ -21,11 +21,19 @@
         <Border Grid.Row="0" BorderThickness="1" CornerRadius="6" Padding="12" BorderBrush="#CCD2DD">
             <DockPanel>
                 <TextBlock Text="Windows File Recovery" FontSize="20" FontWeight="SemiBold" />
-                <TextBlock x:Name="EngineStatusTextBlock"
-                           DockPanel.Dock="Right"
-                           FontSize="12"
-                           VerticalAlignment="Center"
-                           Foreground="#4B5563"/>
+                <StackPanel Orientation="Vertical" DockPanel.Dock="Right" HorizontalAlignment="Right">
+                    <TextBlock x:Name="RuntimeModeTextBlock"
+                               FontSize="12"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"
+                               Foreground="#0F766E"
+                               Text="Mode: Standard Windows"/>
+                    <TextBlock x:Name="EngineStatusTextBlock"
+                               FontSize="12"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"
+                               Foreground="#4B5563"/>
+                </StackPanel>
             </DockPanel>
         </Border>
 
@@ -67,8 +75,8 @@
                         <StackPanel Orientation="Horizontal">
                             <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
                             <Button Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
-                            <Button Content="Add Network Image" Width="140" Margin="0,0,8,0" Click="AddNetworkImageButton_Click"/>
-                            <Button Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
+                            <Button x:Name="AddNetworkImageButton" Content="Add Network Image" Width="140" Margin="0,0,8,0" Click="AddNetworkImageButton_Click"/>
+                            <Button x:Name="AcquireImageButton" Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
                         </StackPanel>
                         <WrapPanel Margin="0,6,0,0">
                             <TextBlock Margin="0,4,6,0" Text="Protocol"/>

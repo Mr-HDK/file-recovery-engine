@@ -148,6 +148,7 @@ public partial class MainWindow : Window
     private readonly SourceDestinationSafetyValidator _safetyValidator;
     private readonly IPrivilegeService _privilegeService;
     private readonly IImageAcquisitionService _imageAcquisitionService;
+    private readonly IWinPeRuntimeService _winPeRuntimeService;
     private readonly SqliteSessionStore _sessionStore;
     private readonly SessionLogWriter _sessionLogWriter;
     private readonly ReadPreviewScanner _previewScanner;
@@ -191,6 +192,13 @@ public partial class MainWindow : Window
     private DateTime? _filterDeletedToUtc;
     private int _candidateClusterCount;
     private int _candidateDedupedCount;
+    private RuntimeEnvironmentProfile _runtimeEnvironmentProfile =
+        new(
+            Mode: RuntimeEnvironmentMode.StandardWindows,
+            BootDrive: "C:",
+            MiniNtRegistryDetected: false,
+            WinPeOverrideDetected: false,
+            BootDriveLooksLikeWinPe: false);
 
     public MainWindow()
     {
@@ -201,6 +209,7 @@ public partial class MainWindow : Window
         _safetyValidator = new SourceDestinationSafetyValidator(topology);
         _privilegeService = new WindowsPrivilegeService();
         _imageAcquisitionService = new FileImageAcquisitionService();
+        _winPeRuntimeService = new WinPeRuntimeService(new WindowsWinPeRuntimeProbe());
         _sessionStore = new SqliteSessionStore();
         _sessionLogWriter = new SessionLogWriter();
         _previewScanner = new ReadPreviewScanner();
@@ -227,6 +236,8 @@ public partial class MainWindow : Window
         RemoteAgentModeComboBox.ItemsSource = Enum.GetValues<RemoteAgentMode>();
         RemoteAgentModeComboBox.SelectedItem = RemoteAgentMode.Disabled;
         ConstrainedNetworkChunkKiBTextBox.Text = DefaultNetworkChunkKiB.ToString(CultureInfo.InvariantCulture);
+        _runtimeEnvironmentProfile = _winPeRuntimeService.GetRuntimeProfile();
+        ApplyRuntimeModeUi();
         UpdateCandidateSummary();
 
         var version = NativeEngineProbe.GetVersionDisplay();
@@ -247,6 +258,8 @@ public partial class MainWindow : Window
             await LoadLatestPersistedCandidatesAsync(CancellationToken.None);
             AppendSessionMessage($"UI build: {UiBuildTag}");
             AppendSessionMessage($"Session DB: {_sessionStore.DatabasePath}");
+            AppendSessionMessage(
+                $"Runtime mode: {_runtimeEnvironmentProfile.Mode} (boot-drive={_runtimeEnvironmentProfile.BootDrive}, MiniNT={_runtimeEnvironmentProfile.MiniNtRegistryDetected}, override={_runtimeEnvironmentProfile.WinPeOverrideDetected}).");
             StatusTextBlock.Text = "Ready";
         }
         catch (Exception ex)
@@ -289,6 +302,7 @@ public partial class MainWindow : Window
             }
 
             AppendVssSnapshotSources();
+            AppendOfflineReadinessDiagnostics(result.Sources);
             StatusTextBlock.Text = $"Found {_sources.Count} sources";
         }
         catch (OperationCanceledException)
@@ -305,6 +319,12 @@ public partial class MainWindow : Window
 
     private void AppendVssSnapshotSources()
     {
+        if (_runtimeEnvironmentProfile.IsWinPe)
+        {
+            AppendSessionMessage("VSS snapshot enumeration skipped in WinPE offline mode.");
+            return;
+        }
+
         var vss = NativeEngineProbe.ListVssSnapshots(snapshotCapacity: 64);
         if (!vss.EngineAvailable)
         {
@@ -358,6 +378,50 @@ public partial class MainWindow : Window
         if (added > 0)
         {
             AppendSessionMessage($"VSS snapshots discovered: {added} source(s) added.");
+        }
+    }
+
+    private void ApplyRuntimeModeUi()
+    {
+        if (_runtimeEnvironmentProfile.IsWinPe)
+        {
+            RuntimeModeTextBlock.Text = "Mode: WinPE Offline";
+            AddNetworkImageButton.IsEnabled = false;
+            AppendSessionMessage("WinPE mode active: network source intake disabled; using offline scan/recovery flow.");
+            return;
+        }
+
+        RuntimeModeTextBlock.Text = "Mode: Standard Windows";
+        AddNetworkImageButton.IsEnabled = true;
+    }
+
+    private void AppendOfflineReadinessDiagnostics(IEnumerable<SourceCandidate> sources)
+    {
+        if (!_runtimeEnvironmentProfile.IsWinPe)
+        {
+            return;
+        }
+
+        var readiness = _winPeRuntimeService.BuildOfflineStorageReadiness(
+            sources,
+            DestinationPathTextBox.Text);
+        if (readiness.IsReady)
+        {
+            AppendSessionMessage(
+                $"WinPE offline readiness OK (sources={readiness.VisibleSourceCount}, destinations={readiness.VisibleDestinationVolumeCount}).");
+            return;
+        }
+
+        foreach (var issue in readiness.Issues)
+        {
+            _validationOutput.Add($"Error: {issue}");
+            AppendSessionMessage($"WinPE readiness issue: {issue}");
+        }
+
+        foreach (var warning in readiness.Warnings)
+        {
+            _validationOutput.Add($"Warning: {warning}");
+            AppendSessionMessage($"WinPE readiness warning: {warning}");
         }
     }
 

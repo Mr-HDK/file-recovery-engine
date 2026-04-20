@@ -19,7 +19,7 @@
 | 13 | Disk imaging/clone-first workflow | DONE | image acquisition, hash verification, resume, UI-first flow |
 | 14 | RAID virtual assembly + auto-detection | DONE | virtual RAID build + auto-params + manual override + tests |
 | 15 | NAS/network workflows | DONE | remote source support + resumable operations + audit logs |
-| 16 | Bootable `WinPE` mode | PENDING | bootable build, offline scan/recovery flow, docs/scripts |
+| 16 | Bootable `WinPE` mode | IN_PROGRESS | bootable build, offline scan/recovery flow, docs/scripts |
 | 17 | Carving expansion + streaming scan | PENDING | remove fixed scan cap, streaming scan engine, larger signatures |
 
 ## Phase completion checklist
