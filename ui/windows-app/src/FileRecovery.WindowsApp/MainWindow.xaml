@@ -47,7 +47,8 @@
                 Background="#FFFBEB"
                 Visibility="Collapsed">
             <DockPanel>
-                <Button Content="Restart Elevated"
+                <Button x:Name="RestartElevatedButton"
+                        Content="Restart Elevated"
                         Width="130"
                         DockPanel.Dock="Right"
                         Click="RestartElevatedButton_Click"/>
@@ -74,7 +75,7 @@
                     <StackPanel Margin="0,0,0,8">
                         <StackPanel Orientation="Horizontal">
                             <Button Content="Refresh Sources" Width="120" Margin="0,0,8,0" Click="RefreshSourcesButton_Click"/>
-                            <Button Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
+                            <Button x:Name="ImportImageButton" Content="Import Image" Width="110" Margin="0,0,8,0" Click="ImportImageButton_Click"/>
                             <Button x:Name="AddNetworkImageButton" Content="Add Network Image" Width="140" Margin="0,0,8,0" Click="AddNetworkImageButton_Click"/>
                             <Button x:Name="AcquireImageButton" Content="Acquire Image" Width="115" Click="AcquireImageButton_Click"/>
                         </StackPanel>
@@ -133,7 +134,7 @@
                     <TextBlock Text="Destination Folder" FontWeight="SemiBold"/>
                     <DockPanel Grid.Row="1" Margin="0,6,0,10">
                         <Button Content="Browse" Width="75" DockPanel.Dock="Right" Click="BrowseDestinationButton_Click"/>
-                        <TextBox x:Name="DestinationPathTextBox" Margin="0,0,8,0" MinWidth="220"/>
+                        <TextBox x:Name="DestinationPathTextBox" Margin="0,0,8,0" MinWidth="220" TextChanged="DestinationPathTextBox_TextChanged"/>
                     </DockPanel>
 
                     <TextBlock Grid.Row="2" Text="Scan Mode" FontWeight="SemiBold"/>
@@ -295,15 +296,15 @@
                                Foreground="#4B5563"/>
                 </DockPanel>
 
-                <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,6">
-                    <Button Content="Select All" Width="90" Margin="0,0,8,0" Click="SelectAllCandidatesButton_Click"/>
-                    <Button Content="Select Recoverable" Width="130" Margin="0,0,8,0" Click="SelectRecoverableCandidatesButton_Click"/>
-                    <Button Content="Clear Selection" Width="110" Margin="0,0,8,0" Click="ClearCandidateSelectionButton_Click"/>
-                    <Button Content="Recover Selected" Width="120" Margin="0,0,8,0" Click="RecoverSelectedCandidatesButton_Click"/>
-                    <Button Content="Export Selected" Width="120" Margin="0,0,8,0" Click="ExportSelectedCandidatesButton_Click"/>
-                    <Button Content="Resume Latest Session" Width="150" Margin="0,0,8,0" Click="ResumeLatestSessionButton_Click"/>
-                    <Button Content="Session DB Maintenance" Width="170" Click="SessionMaintenanceButton_Click"/>
-                </StackPanel>
+                    <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,6">
+                        <Button Content="Select All" Width="90" Margin="0,0,8,0" Click="SelectAllCandidatesButton_Click"/>
+                        <Button Content="Select Recoverable" Width="130" Margin="0,0,8,0" Click="SelectRecoverableCandidatesButton_Click"/>
+                        <Button Content="Clear Selection" Width="110" Margin="0,0,8,0" Click="ClearCandidateSelectionButton_Click"/>
+                        <Button Content="Recover Selected" Width="120" Margin="0,0,8,0" Click="RecoverSelectedCandidatesButton_Click"/>
+                        <Button Content="Export Selected" Width="120" Margin="0,0,8,0" Click="ExportSelectedCandidatesButton_Click"/>
+                        <Button x:Name="ResumeLatestSessionButton" Content="Resume Latest Session" Width="150" Margin="0,0,8,0" Click="ResumeLatestSessionButton_Click"/>
+                        <Button x:Name="SessionMaintenanceButton" Content="Session DB Maintenance" Width="170" Click="SessionMaintenanceButton_Click"/>
+                    </StackPanel>
 
                 <Border Grid.Row="5" Margin="0,0,0,6" Padding="8" BorderThickness="1" CornerRadius="4" BorderBrush="#D6DBE6" Background="#F8FAFC">
                     <Grid>

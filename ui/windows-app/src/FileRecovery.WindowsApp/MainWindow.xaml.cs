@@ -158,7 +158,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
-    private const string UiBuildTag = "phase15-network-workflows-20260410-0017";
+    private const string UiBuildTag = "phase16-winpe-offline-20260420-0011";
     private const int MaxUiActivityLogEntries = 400;
     private const int SessionRetentionMaxCount = 50;
     private const ulong FullScanCarveMaxBytes = 256UL * 1024UL * 1024UL;
@@ -192,6 +192,7 @@ public partial class MainWindow : Window
     private DateTime? _filterDeletedToUtc;
     private int _candidateClusterCount;
     private int _candidateDedupedCount;
+    private bool _winPeReadinessWarningLogged;
     private RuntimeEnvironmentProfile _runtimeEnvironmentProfile =
         new(
             Mode: RuntimeEnvironmentMode.StandardWindows,
@@ -386,20 +387,44 @@ public partial class MainWindow : Window
         if (_runtimeEnvironmentProfile.IsWinPe)
         {
             RuntimeModeTextBlock.Text = "Mode: WinPE Offline";
+            RuntimeModeTextBlock.Foreground = System.Windows.Media.Brushes.DarkOrange;
+            ElevationWarningBorder.Visibility = Visibility.Collapsed;
+            RestartElevatedButton.IsEnabled = false;
+            RestartElevatedButton.Visibility = Visibility.Collapsed;
+            ImportImageButton.IsEnabled = true;
             AddNetworkImageButton.IsEnabled = false;
+            NetworkProtocolComboBox.IsEnabled = false;
+            NetworkSourcePathTextBox.IsEnabled = false;
+            NetworkEndpointHintTextBox.IsEnabled = false;
+            ResumeLatestSessionButton.IsEnabled = false;
+            SessionMaintenanceButton.IsEnabled = false;
+            RemoteAgentModeComboBox.IsEnabled = false;
+            RemoteAgentEndpointTextBox.IsEnabled = false;
             AppendSessionMessage("WinPE mode active: network source intake disabled; using offline scan/recovery flow.");
             return;
         }
 
         RuntimeModeTextBlock.Text = "Mode: Standard Windows";
+        RuntimeModeTextBlock.Foreground = System.Windows.Media.Brushes.Teal;
+        RestartElevatedButton.IsEnabled = true;
+        RestartElevatedButton.Visibility = Visibility.Visible;
         AddNetworkImageButton.IsEnabled = true;
+        NetworkProtocolComboBox.IsEnabled = true;
+        NetworkSourcePathTextBox.IsEnabled = true;
+        NetworkEndpointHintTextBox.IsEnabled = true;
+        ResumeLatestSessionButton.IsEnabled = true;
+        SessionMaintenanceButton.IsEnabled = true;
+        RemoteAgentModeComboBox.IsEnabled = true;
+        RemoteAgentEndpointTextBox.IsEnabled = true;
     }
 
-    private void AppendOfflineReadinessDiagnostics(IEnumerable<SourceCandidate> sources)
+    private bool TryValidateWinPeOfflineReadiness(
+        IEnumerable<SourceCandidate> sources,
+        bool verbose)
     {
         if (!_runtimeEnvironmentProfile.IsWinPe)
         {
-            return;
+            return true;
         }
 
         var readiness = _winPeRuntimeService.BuildOfflineStorageReadiness(
@@ -407,22 +432,41 @@ public partial class MainWindow : Window
             DestinationPathTextBox.Text);
         if (readiness.IsReady)
         {
-            AppendSessionMessage(
-                $"WinPE offline readiness OK (sources={readiness.VisibleSourceCount}, destinations={readiness.VisibleDestinationVolumeCount}).");
-            return;
+            if (verbose)
+            {
+                AppendSessionMessage(
+                    $"WinPE offline readiness OK (sources={readiness.VisibleSourceCount}, destinations={readiness.VisibleDestinationVolumeCount}).");
+            }
+
+            _winPeReadinessWarningLogged = false;
+            return true;
         }
 
         foreach (var issue in readiness.Issues)
         {
             _validationOutput.Add($"Error: {issue}");
-            AppendSessionMessage($"WinPE readiness issue: {issue}");
+            if (verbose || !_winPeReadinessWarningLogged)
+            {
+                AppendSessionMessage($"WinPE readiness issue: {issue}");
+            }
         }
 
         foreach (var warning in readiness.Warnings)
         {
             _validationOutput.Add($"Warning: {warning}");
-            AppendSessionMessage($"WinPE readiness warning: {warning}");
+            if (verbose || !_winPeReadinessWarningLogged)
+            {
+                AppendSessionMessage($"WinPE readiness warning: {warning}");
+            }
         }
+
+        _winPeReadinessWarningLogged = true;
+        return false;
+    }
+
+    private void AppendOfflineReadinessDiagnostics(IEnumerable<SourceCandidate> sources)
+    {
+        _ = TryValidateWinPeOfflineReadiness(sources, verbose: true);
     }
 
     private static string FormatSnapshotTimestamp(string? installTimeUtc)
@@ -668,6 +712,18 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == WinForms.DialogResult.OK)
         {
             DestinationPathTextBox.Text = dialog.SelectedPath;
+            if (_runtimeEnvironmentProfile.IsWinPe)
+            {
+                AppendOfflineReadinessDiagnostics(_sources);
+            }
+        }
+    }
+
+    private void DestinationPathTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (_runtimeEnvironmentProfile.IsWinPe)
+        {
+            _ = TryValidateWinPeOfflineReadiness(_sources, verbose: false);
         }
     }
 
@@ -676,6 +732,10 @@ public partial class MainWindow : Window
         RefreshElevationState();
         var result = _safetyValidator.Validate(_selectedSource, DestinationPathTextBox.Text, _isElevated);
         RenderValidation(result);
+        if (_runtimeEnvironmentProfile.IsWinPe)
+        {
+            AppendOfflineReadinessDiagnostics(_sources);
+        }
     }
 
     private async void StartSessionButton_Click(object sender, RoutedEventArgs e)
@@ -692,6 +752,12 @@ public partial class MainWindow : Window
         if (!validation.IsValid || _selectedSource is null)
         {
             StatusTextBlock.Text = "Session blocked by safety validation";
+            return;
+        }
+
+        if (!TryValidateWinPeOfflineReadiness(_sources, verbose: true))
+        {
+            StatusTextBlock.Text = "Session blocked by WinPE offline readiness checks";
             return;
         }
 
@@ -4941,6 +5007,13 @@ public partial class MainWindow : Window
 
     private void RefreshElevationState()
     {
+        if (_runtimeEnvironmentProfile.IsWinPe)
+        {
+            _isElevated = true;
+            ElevationWarningBorder.Visibility = Visibility.Collapsed;
+            return;
+        }
+
         _isElevated = _privilegeService.IsElevated();
         ElevationWarningBorder.Visibility = _isElevated ? Visibility.Collapsed : Visibility.Visible;
 

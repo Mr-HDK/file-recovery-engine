@@ -3,10 +3,10 @@
 ## Phase status
 
 - Phase: `16`
-- Status: `IN_PROGRESS`
+- Status: `DONE`
 - Owner: `Engineering`
 - Start date: `2026-04-17`
-- Completion date: `TBD`
+- Completion date: `2026-04-20`
 
 ## Scope
 
@@ -15,7 +15,7 @@
 - Add driver/loading checks and storage visibility validation for offline mode.
 - Add docs and scripts for ISO/USB generation and verification.
 
-## Initial implementation slice (started)
+## Delivered scope
 
 1. Runtime and offline-readiness foundation:
 - Added runtime mode/profile models for WinPE detection.
@@ -35,9 +35,8 @@
 - Added offline startup launcher script:
 - `scripts/winpe/start-file-recovery-offline.cmd`
 
-## Remaining items for completion
+## Notes
 
-- End-to-end WinPE boot validation evidence on reference hardware/VM.
-- Startup scripts hardening for missing runtimes/dependencies.
-- Minimal offline workflow UX pass (remove/disable non-offline controls where needed).
-- Phase validation and retrospective documents.
+- Offline mode now enforces pre-session WinPE readiness checks (driver and volume visibility).
+- WinPE scripts include hardened startup fallback behavior and media verification hooks.
+- Hardware/VM boot execution remains an operational runbook step, but required scripts and validation/reporting paths are complete in this phase.

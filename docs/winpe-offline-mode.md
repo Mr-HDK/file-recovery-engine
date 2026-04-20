@@ -32,6 +32,23 @@ powershell -ExecutionPolicy Bypass -File scripts/winpe/build-winpe-media.ps1 `
   -UsbDriveLetter E
 ```
 
+## Verify built media
+
+After building media, run the verification script against the generated WinPE root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/winpe/verify-winpe-media.ps1 `
+  -WinPeRoot artifacts/winpe/amd64 `
+  -ReportPath artifacts/winpe/winpe-media-verification.json
+```
+
+The report validates:
+
+- `boot.wim` exists.
+- `startnet.cmd` calls the offline launcher.
+- `X:\RecoveryApp\start-file-recovery-offline.cmd` is present and sets `FR_WINPE_MODE=1`.
+- App payload exists (`FileRecovery.WindowsApp.exe` or `FileRecovery.WindowsApp.dll`).
+
 ## Offline startup behavior
 
 - The WinPE startup script sets `FR_WINPE_MODE=1`.
@@ -60,3 +77,4 @@ WinPE mode guardrails currently include:
 - Confirm runtime mode shows `WinPE Offline`.
 - Confirm at least one source and one destination volume are visible.
 - Run a quick scan session and export candidate list.
+- Archive `artifacts/winpe/winpe-media-verification.json` and the startup log as phase evidence.

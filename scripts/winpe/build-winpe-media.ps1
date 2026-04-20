@@ -4,7 +4,9 @@ param(
     [string]$WorkDirectory = (Join-Path $PSScriptRoot "..\..\artifacts\winpe"),
     [string]$OutputIsoPath = (Join-Path $PSScriptRoot "..\..\artifacts\winpe\file-recovery-winpe.iso"),
     [string]$UsbDriveLetter = "",
-    [switch]$SkipPublish
+    [switch]$SkipPublish,
+    [switch]$SelfContained,
+    [switch]$SkipMediaVerification
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +41,21 @@ function Invoke-External {
     }
 }
 
+function Assert-FileExists {
+    param(
+        [string]$Path,
+        [string]$Description
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "$Description not found: $Path"
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey("SelfContained")) {
+    $SelfContained = $true
+}
+
 Assert-Admin
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
@@ -50,6 +67,12 @@ $bootWimPath = Join-Path $winPeRoot "media\sources\boot.wim"
 $offlineScriptPath = Join-Path $PSScriptRoot "start-file-recovery-offline.cmd"
 $offlineScriptTarget = Join-Path $mountDirectory "RecoveryApp\start-file-recovery-offline.cmd"
 $startnetPath = Join-Path $mountDirectory "Windows\System32\startnet.cmd"
+$appExePath = Join-Path $publishRoot "FileRecovery.WindowsApp.exe"
+$appDllPath = Join-Path $publishRoot "FileRecovery.WindowsApp.dll"
+$dotnetHostPath = Join-Path $publishRoot "dotnet\dotnet.exe"
+$verificationScript = Join-Path $PSScriptRoot "verify-winpe-media.ps1"
+$verificationReportPath = Join-Path $WorkDirectory "winpe-media-verification.json"
+$buildReportPath = Join-Path $WorkDirectory "winpe-build-report.json"
 
 New-Item -Path $WorkDirectory -ItemType Directory -Force | Out-Null
 New-Item -Path $publishRoot -ItemType Directory -Force | Out-Null
@@ -57,14 +80,21 @@ New-Item -Path $mountDirectory -ItemType Directory -Force | Out-Null
 
 if (-not $SkipPublish) {
     Write-Host "Publishing Windows app for WinPE payload..."
-    dotnet publish $windowsAppProject -c Release -r win-x64 --self-contained false -o $publishRoot
+    dotnet publish $windowsAppProject -c Release -r win-x64 --self-contained $SelfContained -o $publishRoot
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet publish failed."
     }
 }
 
-if (-not (Test-Path $offlineScriptPath)) {
-    throw "Offline startup script not found: $offlineScriptPath"
+Assert-FileExists -Path $offlineScriptPath -Description "Offline startup script"
+Assert-FileExists -Path $publishRoot -Description "Publish output directory"
+
+if (-not (Test-Path $appExePath) -and -not (Test-Path $appDllPath)) {
+    throw "Publish output does not include FileRecovery.WindowsApp.exe or FileRecovery.WindowsApp.dll."
+}
+if (-not $SelfContained -and -not (Test-Path $dotnetHostPath)) {
+    Write-Warning "Framework-dependent publish selected and local dotnet host not found under publish output."
+    Write-Warning "WinPE startup will require dotnet host injection or self-contained publish."
 }
 
 $copype = Resolve-CommandPath "copype.cmd"
@@ -79,6 +109,7 @@ if (Test-Path $winPeRoot) {
 }
 
 Invoke-External -FilePath $copype -Arguments @($Architecture, $winPeRoot)
+Assert-FileExists -Path $bootWimPath -Description "WinPE boot.wim"
 
 Invoke-External -FilePath $dism -Arguments @(
     "/Mount-Image",
@@ -114,6 +145,7 @@ Invoke-External -FilePath $makeWinPeMedia -Arguments @(
     "/ISO",
     $winPeRoot,
     $OutputIsoPath)
+Assert-FileExists -Path $OutputIsoPath -Description "Generated WinPE ISO"
 
 if (-not [string]::IsNullOrWhiteSpace($UsbDriveLetter)) {
     $normalizedUsb = $UsbDriveLetter.Trim().TrimEnd(":")
@@ -123,5 +155,26 @@ if (-not [string]::IsNullOrWhiteSpace($UsbDriveLetter)) {
         "$normalizedUsb`:")
 }
 
+if ((Test-Path $verificationScript) -and -not $SkipMediaVerification) {
+    & $verificationScript -WinPeRoot $winPeRoot -ReportPath $verificationReportPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "WinPE media verification script reported failure."
+    }
+}
+
+$isoHash = (Get-FileHash -Path $OutputIsoPath -Algorithm SHA256).Hash
+$buildReport = [ordered]@{
+    generated_utc = [DateTimeOffset]::UtcNow.ToString("o")
+    architecture = $Architecture
+    self_contained = [bool]$SelfContained
+    work_directory = (Resolve-Path $WorkDirectory).Path
+    winpe_root = (Resolve-Path $winPeRoot).Path
+    output_iso = (Resolve-Path $OutputIsoPath).Path
+    output_iso_sha256 = $isoHash
+    verification_report = if (Test-Path $verificationReportPath) { (Resolve-Path $verificationReportPath).Path } else { $null }
+}
+$buildReport | ConvertTo-Json -Depth 5 | Set-Content -Path $buildReportPath -Encoding UTF8
+
 Write-Host "WinPE build complete."
 Write-Host "ISO: $OutputIsoPath"
+Write-Host "Build report: $buildReportPath"
