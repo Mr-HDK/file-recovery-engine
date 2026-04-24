@@ -154,9 +154,8 @@ pub fn map_logical_offset(
         RaidLevel::Raid1 => map_raid1(layout, logical_offset_bytes),
         RaidLevel::Raid4 => map_raid4(layout, logical_offset_bytes),
         RaidLevel::Raid5 => map_raid5(layout, logical_offset_bytes),
-        RaidLevel::Raid6 | RaidLevel::Raid10 | RaidLevel::Unknown => {
-            Err(RaidError::UnsupportedLayout)
-        }
+        RaidLevel::Raid10 => map_raid10(layout, logical_offset_bytes),
+        RaidLevel::Raid6 | RaidLevel::Unknown => Err(RaidError::UnsupportedLayout),
     }
 }
 
@@ -382,6 +381,49 @@ fn map_raid5(
         member_index: layout.disk_order[data_member_position as usize],
         member_offset_bytes,
         parity_member_index: Some(layout.disk_order[parity_position as usize]),
+    })
+}
+
+fn map_raid10(
+    layout: &RaidLayout,
+    logical_offset_bytes: u64,
+) -> Result<RaidLogicalMapping, RaidError> {
+    if layout.member_count < 4 || layout.member_count % 2 != 0 {
+        return Err(RaidError::UnsupportedLayout);
+    }
+
+    let stripe = layout.stripe_size_bytes as u64;
+    let mirror_pair_count = layout.member_count / 2;
+    if mirror_pair_count == 0 {
+        return Err(RaidError::UnsupportedLayout);
+    }
+
+    let stripe_number = logical_offset_bytes / stripe;
+    let stripe_offset = logical_offset_bytes % stripe;
+    let pair_position = (stripe_number % mirror_pair_count as u64) as u32;
+    let pair_stripe_index = stripe_number / mirror_pair_count as u64;
+
+    let primary_position = pair_position
+        .checked_mul(2)
+        .ok_or(RaidError::ArithmeticOverflow("raid10 primary position"))?;
+    let mirror_position = primary_position
+        .checked_add(1)
+        .ok_or(RaidError::ArithmeticOverflow("raid10 mirror position"))?;
+
+    let member_offset_bytes = layout
+        .data_offset_bytes
+        .checked_add(
+            pair_stripe_index
+                .checked_mul(stripe)
+                .ok_or(RaidError::ArithmeticOverflow("raid10 member stripe delta"))?,
+        )
+        .and_then(|value| value.checked_add(stripe_offset))
+        .ok_or(RaidError::ArithmeticOverflow("raid10 member offset"))?;
+
+    Ok(RaidLogicalMapping {
+        member_index: layout.disk_order[primary_position as usize],
+        member_offset_bytes,
+        parity_member_index: Some(layout.disk_order[mirror_position as usize]),
     })
 }
 
@@ -615,6 +657,30 @@ mod tests {
         assert_eq!(mapping.member_index, 0);
         assert_eq!(mapping.member_offset_bytes, 2_097_152);
         assert_eq!(mapping.parity_member_index, Some(3));
+    }
+
+    #[test]
+    fn maps_logical_offset_for_raid10_layout() {
+        let layout = RaidLayout {
+            metadata_family: RaidMetadataFamily::LinuxMd,
+            level: RaidLevel::Raid10,
+            member_count: 4,
+            stripe_size_bytes: 64 * 1024,
+            data_offset_bytes: 512 * 1024,
+            parity_rotation: ParityRotation::Unknown,
+            disk_order: vec![0, 1, 2, 3],
+            confidence_score: 82,
+        };
+
+        let first = map_logical_offset(&layout, 0).expect("map first stripe");
+        assert_eq!(first.member_index, 0);
+        assert_eq!(first.parity_member_index, Some(1));
+        assert_eq!(first.member_offset_bytes, 512 * 1024);
+
+        let second = map_logical_offset(&layout, 64 * 1024).expect("map second stripe");
+        assert_eq!(second.member_index, 2);
+        assert_eq!(second.parity_member_index, Some(3));
+        assert_eq!(second.member_offset_bytes, 512 * 1024);
     }
 
     #[test]

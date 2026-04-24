@@ -76,6 +76,7 @@
 - Rust unit coverage in `fr-raid` for metadata detection, manual override validation, and logical offset mapping seams.
 - Rust FFI integration coverage for FAT boot probe and deleted-entry candidate enumeration from image-backed source sessions (including nested directory paths).
 - Rust FFI integration coverage for RAID metadata probe and logical mapping ABI seams (`fr_probe_raid_layout_from_session`, `fr_map_raid_logical_offset`).
+- Rust unit/FFI coverage for virtual RAID assembled-session lifecycle (`fr_open_virtual_raid_session`, `fr_probe_virtual_raid_session`, `fr_close_virtual_raid_session`) including assembled byte-read verification for RAID0/RAID10 fixtures.
 - Rust FFI integration coverage for ext direct/single/double/triple-indirect recovery, extent-leaf recovery, sparse/uninitialized extent zero-fill semantics, inline/non-inline symlink export, and directory inode export plus partial/unsupported fallback status handling.
 
 ## Benchmarks

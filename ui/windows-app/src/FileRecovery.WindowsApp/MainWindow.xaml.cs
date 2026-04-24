@@ -1352,7 +1352,7 @@ public partial class MainWindow : Window
                         evidenceSources)
                     : RecoveryCandidateStatus.Invalid;
                 var confidenceReason = candidate.Deleted && hasObjectId
-                    ? "ReFS deleted candidate inferred from journal-style metadata records."
+                    ? "ReFS deleted candidate inferred from journal-style metadata records with byte-export attempt when payload descriptors are available."
                     : "ReFS candidate is missing required deleted/object-id metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
@@ -1367,7 +1367,7 @@ public partial class MainWindow : Window
                     IsEncrypted: false,
                     Name: name,
                     OriginalPath: path,
-                    ParentRecordNumber: null,
+                    ParentRecordNumber: candidate.ObjectId > 0 ? candidate.ObjectId : null,
                     DataSizeBytes: candidate.SizeBytes > 0 ? candidate.SizeBytes : null,
                     AllocatedSizeBytes: null,
                     FileAttributes: null,
@@ -1490,7 +1490,7 @@ public partial class MainWindow : Window
                         evidenceSources)
                     : RecoveryCandidateStatus.Invalid;
                 var confidenceReason = candidate.Deleted && hasInode
-                    ? $"{evidenceSources} deleted inode candidate supports metadata-manifest export; full content recovery requires extent parsing."
+                    ? $"{evidenceSources} deleted inode candidate attempts full byte export first and falls back to metadata-manifest export when layout is unsupported."
                     : $"{evidenceSources} candidate is missing deleted/inode metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
@@ -1559,7 +1559,7 @@ public partial class MainWindow : Window
                         evidenceSources)
                     : RecoveryCandidateStatus.Invalid;
                 var confidenceReason = candidate.Deleted && hasInode
-                    ? $"{evidenceSources} deleted inode candidate supports metadata-manifest export; full content recovery requires block mapping."
+                    ? $"{evidenceSources} deleted inode candidate attempts full byte export first and falls back to metadata-manifest export when layout is unsupported."
                     : $"{evidenceSources} candidate is missing deleted/inode metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
@@ -1628,7 +1628,7 @@ public partial class MainWindow : Window
                         evidenceSources)
                     : RecoveryCandidateStatus.Invalid;
                 var confidenceReason = candidate.Deleted && hasCnid
-                    ? $"{evidenceSources} deleted metadata tombstone candidate supports metadata-manifest export; full content recovery requires APFS extent parsing."
+                    ? $"{evidenceSources} deleted metadata tombstone candidate attempts full byte export first and falls back to metadata-manifest export when layout is unsupported."
                     : $"{evidenceSources} candidate is missing deleted/CNID metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
@@ -1697,7 +1697,7 @@ public partial class MainWindow : Window
                         evidenceSources)
                     : RecoveryCandidateStatus.Invalid;
                 var confidenceReason = candidate.Deleted && hasCnid
-                    ? $"{evidenceSources} deleted catalog tombstone candidate supports metadata-manifest export; full content recovery requires HFS+ extent parsing."
+                    ? $"{evidenceSources} deleted catalog tombstone candidate attempts full byte export first and falls back to metadata-manifest export when layout is unsupported."
                     : $"{evidenceSources} candidate is missing deleted/CNID metadata.";
                 return new QuickScanCandidateRecord(
                     Ordinal: index,
@@ -3804,47 +3804,121 @@ public partial class MainWindow : Window
 
                 if (IsMetadataOnlyEvidence(candidate.EvidenceSource))
                 {
-                    var metadataRelativePath = BuildMetadataManifestRecoveryRelativePath(candidate);
-                    var metadataTargetPath = Path.Combine(recoveryRoot, metadataRelativePath);
-                    var metadataTargetDirectory = Path.GetDirectoryName(metadataTargetPath);
-                    if (!string.IsNullOrWhiteSpace(metadataTargetDirectory))
-                    {
-                        Directory.CreateDirectory(metadataTargetDirectory);
-                    }
-
-                    var metadataResult = ExportMetadataOnlyCandidateToFile(
-                        candidate,
-                        metadataTargetPath,
-                        sourcePath,
-                        _selectedSource.Kind);
-
-                    if (metadataResult.Success)
-                    {
-                        candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
-                        candidate.LastRecoveryStatusCode = metadataResult.StatusCode;
-                        candidate.LastRecoveryDiagnosticsFlags = metadataResult.DiagnosticsFlags;
-                        candidate.LastRecoveredBytes = metadataResult.BytesWritten;
-                        candidate.LastRecoveryPartial = true;
-                        candidate.RecoveryDiagnostics = metadataResult.DiagnosticsSummary;
-                        candidate.RecoveredPath = metadataTargetPath;
-                        candidate.IsSelected = false;
-                        partial++;
-                        AppendSessionMessage(
-                            $"Exported metadata manifest for {candidate.Name} to {metadataTargetPath} ({metadataResult.BytesWritten} bytes).");
-                    }
-                    else
+                    if (!ulong.TryParse(candidate.ParentRecord, NumberStyles.Integer, CultureInfo.InvariantCulture, out var metadataId)
+                        || metadataId == 0)
                     {
                         candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
-                        candidate.LastRecoveryStatusCode = metadataResult.StatusCode;
-                        candidate.LastRecoveryDiagnosticsFlags = metadataResult.DiagnosticsFlags;
-                        candidate.LastRecoveredBytes = metadataResult.BytesWritten;
+                        candidate.LastRecoveryStatusCode = 170;
+                        candidate.LastRecoveryDiagnosticsFlags = null;
+                        candidate.LastRecoveredBytes = 0;
                         candidate.LastRecoveryPartial = null;
-                        candidate.RecoveryDiagnostics = metadataResult.DiagnosticsSummary;
+                        candidate.RecoveryDiagnostics = "Metadata candidate is missing a valid filesystem object identifier.";
                         failed++;
                         AppendSessionMessage(
-                            $"Metadata export failed for R{candidate.RecordNumber}: {metadataResult.Message} (status {metadataResult.StatusCode}).");
+                            $"Recovery failed for metadata candidate R{candidate.RecordNumber}: invalid object/inode identifier.");
+                        await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                        continue;
                     }
 
+                    var metadataContentRelativePath = BuildRecoveryRelativePath(candidate);
+                    var metadataContentTargetPath = Path.Combine(recoveryRoot, metadataContentRelativePath);
+                    var metadataContentTargetDirectory = Path.GetDirectoryName(metadataContentTargetPath);
+                    if (!string.IsNullOrWhiteSpace(metadataContentTargetDirectory))
+                    {
+                        Directory.CreateDirectory(metadataContentTargetDirectory);
+                    }
+
+                    var metadataFsResult = RecoverMetadataFilesystemCandidateToFile(
+                        sourcePath,
+                        _selectedSource.Kind,
+                        candidate,
+                        metadataId,
+                        metadataContentTargetPath);
+
+                    if (metadataFsResult.Success)
+                    {
+                        var metadataSummary = TryApplyRecoveredFileMetadata(metadataContentTargetPath, candidate);
+                        candidate.CandidateStatus = metadataFsResult.Partial ? RecoveryCandidateStatus.Partial : RecoveryCandidateStatus.Full;
+                        candidate.LastRecoveryStatusCode = metadataFsResult.StatusCode;
+                        candidate.LastRecoveryDiagnosticsFlags = metadataFsResult.DiagnosticsFlags;
+                        candidate.LastRecoveredBytes = metadataFsResult.BytesWritten;
+                        candidate.LastRecoveryPartial = metadataFsResult.Partial;
+                        candidate.RecoveryDiagnostics = CombineRecoveryDiagnostics(metadataFsResult.DiagnosticsSummary, metadataSummary);
+                        candidate.RecoveredPath = metadataContentTargetPath;
+                        candidate.IsSelected = false;
+                        if (metadataFsResult.Partial)
+                        {
+                            partial++;
+                        }
+                        else
+                        {
+                            recovered++;
+                        }
+
+                        AppendSessionMessage(
+                            $"Recovered metadata candidate R{candidate.RecordNumber} to {metadataContentTargetPath} ({(metadataFsResult.Partial ? "partial" : "full")}, {metadataFsResult.BytesWritten} bytes). Diagnostics: {candidate.RecoveryDiagnostics}");
+                        await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                        continue;
+                    }
+
+                    if (IsUnsupportedMetadataLayoutStatus(metadataFsResult.StatusCode))
+                    {
+                        var metadataRelativePath = BuildMetadataManifestRecoveryRelativePath(candidate);
+                        var metadataTargetPath = Path.Combine(recoveryRoot, metadataRelativePath);
+                        var metadataTargetDirectory = Path.GetDirectoryName(metadataTargetPath);
+                        if (!string.IsNullOrWhiteSpace(metadataTargetDirectory))
+                        {
+                            Directory.CreateDirectory(metadataTargetDirectory);
+                        }
+
+                        var metadataManifestResult = ExportMetadataOnlyCandidateToFile(
+                            candidate,
+                            metadataTargetPath,
+                            sourcePath,
+                            _selectedSource.Kind);
+
+                        if (metadataManifestResult.Success)
+                        {
+                            candidate.CandidateStatus = RecoveryCandidateStatus.Partial;
+                            candidate.LastRecoveryStatusCode = metadataManifestResult.StatusCode;
+                            candidate.LastRecoveryDiagnosticsFlags = metadataManifestResult.DiagnosticsFlags;
+                            candidate.LastRecoveredBytes = metadataManifestResult.BytesWritten;
+                            candidate.LastRecoveryPartial = true;
+                            candidate.RecoveryDiagnostics = CombineRecoveryDiagnostics(
+                                metadataManifestResult.DiagnosticsSummary,
+                                $"Engine byte export unavailable: {metadataFsResult.Message}");
+                            candidate.RecoveredPath = metadataTargetPath;
+                            candidate.IsSelected = false;
+                            partial++;
+                            AppendSessionMessage(
+                                $"Exported metadata fallback manifest for {candidate.Name} to {metadataTargetPath} ({metadataManifestResult.BytesWritten} bytes).");
+                        }
+                        else
+                        {
+                            candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                            candidate.LastRecoveryStatusCode = metadataManifestResult.StatusCode;
+                            candidate.LastRecoveryDiagnosticsFlags = metadataManifestResult.DiagnosticsFlags;
+                            candidate.LastRecoveredBytes = metadataManifestResult.BytesWritten;
+                            candidate.LastRecoveryPartial = null;
+                            candidate.RecoveryDiagnostics = metadataManifestResult.DiagnosticsSummary;
+                            failed++;
+                            AppendSessionMessage(
+                                $"Metadata export failed for R{candidate.RecordNumber}: {metadataManifestResult.Message} (status {metadataManifestResult.StatusCode}).");
+                        }
+
+                        await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
+                        continue;
+                    }
+
+                    candidate.CandidateStatus = RecoveryCandidateStatus.Invalid;
+                    candidate.LastRecoveryStatusCode = metadataFsResult.StatusCode;
+                    candidate.LastRecoveryDiagnosticsFlags = metadataFsResult.DiagnosticsFlags;
+                    candidate.LastRecoveredBytes = metadataFsResult.BytesWritten;
+                    candidate.LastRecoveryPartial = null;
+                    candidate.RecoveryDiagnostics = metadataFsResult.DiagnosticsSummary;
+                    failed++;
+                    AppendSessionMessage(
+                        $"Metadata recovery failed for R{candidate.RecordNumber}: {metadataFsResult.Message} (status {metadataFsResult.StatusCode}). Diagnostics: {metadataFsResult.DiagnosticsSummary}");
                     await PersistCandidateRecoveryDiagnosticsAsync(candidate, operationToken);
                     continue;
                 }
@@ -4352,6 +4426,54 @@ public partial class MainWindow : Window
         return baseRelativePath + ".metadata.json";
     }
 
+    private static bool IsUnsupportedMetadataLayoutStatus(int statusCode)
+    {
+        return statusCode == 170;
+    }
+
+    private static EngineRecoverCandidateResult RecoverMetadataFilesystemCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        QuickScanCandidateRow candidate,
+        ulong metadataId,
+        string outputPath)
+    {
+        if (IsRefsEvidence(candidate.EvidenceSource))
+        {
+            return NativeEngineProbe.RecoverRefsCandidateToFile(sourcePath, sourceKind, metadataId, outputPath);
+        }
+
+        if (IsApfsEvidence(candidate.EvidenceSource))
+        {
+            return NativeEngineProbe.RecoverApfsCandidateToFile(sourcePath, sourceKind, metadataId, outputPath);
+        }
+
+        if (IsHfsEvidence(candidate.EvidenceSource))
+        {
+            return NativeEngineProbe.RecoverHfsCandidateToFile(sourcePath, sourceKind, metadataId, outputPath);
+        }
+
+        if (IsXfsEvidence(candidate.EvidenceSource))
+        {
+            return NativeEngineProbe.RecoverXfsCandidateToFile(sourcePath, sourceKind, metadataId, outputPath);
+        }
+
+        if (IsUfsEvidence(candidate.EvidenceSource))
+        {
+            return NativeEngineProbe.RecoverUfsCandidateToFile(sourcePath, sourceKind, metadataId, outputPath);
+        }
+
+        return new EngineRecoverCandidateResult(
+            EngineAvailable: true,
+            Success: false,
+            Partial: false,
+            BytesWritten: 0,
+            DiagnosticsFlags: 0,
+            DiagnosticsSummary: "Unsupported metadata evidence source.",
+            Message: "No metadata filesystem recovery handler for this candidate.",
+            StatusCode: 170);
+    }
+
     private static EngineRecoverCandidateResult ExportMetadataOnlyCandidateToFile(
         QuickScanCandidateRow candidate,
         string outputPath,
@@ -4381,7 +4503,7 @@ public partial class MainWindow : Window
                 confidence_tier = candidate.ConfidenceTier,
                 confidence_score = candidate.ConfidenceScore,
                 note =
-                    "Metadata-manifest export only. Full file-content recovery for this filesystem is not available in the current parser.",
+                    "Metadata fallback export. Engine byte-export path reported unsupported layout for this candidate.",
             };
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web)
             {
@@ -4397,7 +4519,7 @@ public partial class MainWindow : Window
                 BytesWritten: bytesWritten,
                 DiagnosticsFlags: 0,
                 DiagnosticsSummary:
-                    "Metadata-manifest export completed. Full content recovery for this filesystem is pending parser support.",
+                    "Metadata-manifest fallback export completed after unsupported byte-layout response.",
                 Message: "Metadata manifest exported.",
                 StatusCode: 0);
         }

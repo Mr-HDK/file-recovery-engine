@@ -290,6 +290,16 @@ public sealed record EngineRaidLayoutProbeResult(
     int StatusCode
 );
 
+public sealed record EngineVirtualRaidSessionOpenResult(
+    bool EngineAvailable,
+    bool Success,
+    ulong SessionId,
+    ulong SizeBytes,
+    EngineRaidLayoutMetadata? Metadata,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineRaidManualOverride(
     bool OverrideLevel,
     string? Level,
@@ -1620,22 +1630,7 @@ public static class NativeEngineProbe
 
             if (status == 0)
             {
-                var diskOrder = new List<uint>((int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers));
-                var diskOrderCount = (int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers);
-                for (var index = 0; index < diskOrderCount; index++)
-                {
-                    diskOrder.Add(nativeLayout.DiskOrder[index]);
-                }
-
-                var metadata = new EngineRaidLayoutMetadata(
-                    MetadataFamily: MapRaidMetadataFamily(nativeLayout.MetadataFamily),
-                    Level: MapRaidLevel(nativeLayout.Level),
-                    MemberCount: nativeLayout.MemberCount,
-                    StripeSizeBytes: nativeLayout.StripeSizeBytes,
-                    DataOffsetBytes: nativeLayout.DataOffsetBytes,
-                    ParityRotation: MapRaidParityRotation(nativeLayout.ParityRotation),
-                    ConfidenceScore: nativeLayout.ConfidenceScore,
-                    DiskOrder: diskOrder);
+                var metadata = MapNativeRaidLayout(nativeLayout);
 
                 return new EngineRaidLayoutProbeResult(
                     true,
@@ -1659,6 +1654,151 @@ public static class NativeEngineProbe
         catch (EntryPointNotFoundException)
         {
             return new EngineRaidLayoutProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineVirtualRaidSessionOpenResult OpenVirtualRaidSession(
+        IReadOnlyList<ulong> memberSessionIds,
+        EngineRaidManualOverride? manualOverride = null)
+    {
+        if (memberSessionIds is null)
+        {
+            throw new ArgumentNullException(nameof(memberSessionIds));
+        }
+        if (memberSessionIds.Count < 2 || memberSessionIds.Count > RaidLayoutMaxMembers)
+        {
+            return new EngineVirtualRaidSessionOpenResult(
+                true,
+                false,
+                0,
+                0,
+                null,
+                "RAID virtual assembly requires between 2 and 32 member sessions.",
+                142);
+        }
+
+        var memberSessionIdBuffer = new ulong[memberSessionIds.Count];
+        for (var index = 0; index < memberSessionIds.Count; index++)
+        {
+            memberSessionIdBuffer[index] = memberSessionIds[index];
+        }
+
+        NativeRaidManualOverride? nativeOverride;
+        try
+        {
+            nativeOverride = BuildNativeRaidManualOverride(manualOverride);
+        }
+        catch (ArgumentException ex)
+        {
+            return new EngineVirtualRaidSessionOpenResult(true, false, 0, 0, null, ex.Message, 142);
+        }
+
+        try
+        {
+            var hasOverride = nativeOverride.HasValue;
+            int status;
+            NativeRaidLayout nativeLayout;
+            ulong virtualSessionId;
+            ulong sizeBytes;
+
+            if (hasOverride)
+            {
+                var overrideValue = nativeOverride.GetValueOrDefault();
+                status = fr_open_virtual_raid_session(
+                    memberSessionIdBuffer,
+                    (uint)memberSessionIdBuffer.Length,
+                    ref overrideValue,
+                    out virtualSessionId,
+                    out sizeBytes,
+                    out nativeLayout);
+            }
+            else
+            {
+                status = fr_open_virtual_raid_session(
+                    memberSessionIdBuffer,
+                    (uint)memberSessionIdBuffer.Length,
+                    IntPtr.Zero,
+                    out virtualSessionId,
+                    out sizeBytes,
+                    out nativeLayout);
+            }
+
+            if (status == 0)
+            {
+                return new EngineVirtualRaidSessionOpenResult(
+                    true,
+                    true,
+                    virtualSessionId,
+                    sizeBytes,
+                    MapNativeRaidLayout(nativeLayout),
+                    "Virtual RAID source assembled.",
+                    status);
+            }
+
+            return new EngineVirtualRaidSessionOpenResult(
+                true,
+                false,
+                0,
+                0,
+                null,
+                MapRaidStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineVirtualRaidSessionOpenResult(false, false, 0, 0, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineVirtualRaidSessionOpenResult(false, false, 0, 0, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineRaidLayoutProbeResult ProbeVirtualRaidSession(ulong virtualSessionId)
+    {
+        try
+        {
+            var status = fr_probe_virtual_raid_session(virtualSessionId, out var nativeLayout);
+            if (status == 0)
+            {
+                return new EngineRaidLayoutProbeResult(
+                    true,
+                    true,
+                    MapNativeRaidLayout(nativeLayout),
+                    "Virtual RAID layout metadata loaded.",
+                    status);
+            }
+
+            return new EngineRaidLayoutProbeResult(
+                true,
+                false,
+                null,
+                MapRaidStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRaidLayoutProbeResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRaidLayoutProbeResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static int CloseVirtualRaidSession(ulong virtualSessionId)
+    {
+        try
+        {
+            return fr_close_virtual_raid_session(virtualSessionId);
+        }
+        catch (DllNotFoundException)
+        {
+            return -100;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return -101;
         }
     }
 
@@ -2409,6 +2549,371 @@ public static class NativeEngineProbe
         }
     }
 
+    public static EngineRecoverCandidateResult RecoverRefsCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong objectId,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverRefsCandidateToFile(open.SessionId, objectId, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverRefsCandidateToFile(
+        ulong sessionId,
+        ulong objectId,
+        string outputPath)
+    {
+        try
+        {
+            var status = fr_recover_refs_candidate_to_file(
+                sessionId,
+                objectId,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverApfsCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong cnid,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverApfsCandidateToFile(open.SessionId, cnid, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverApfsCandidateToFile(
+        ulong sessionId,
+        ulong cnid,
+        string outputPath)
+    {
+        try
+        {
+            var status = fr_recover_apfs_candidate_to_file(
+                sessionId,
+                cnid,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverHfsCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong cnid,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverHfsCandidateToFile(open.SessionId, cnid, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverHfsCandidateToFile(
+        ulong sessionId,
+        ulong cnid,
+        string outputPath)
+    {
+        if (cnid == 0 || cnid > uint.MaxValue)
+        {
+            return BuildRecoverResult(170, 0, false, diagnosticsFlags: 0);
+        }
+
+        try
+        {
+            var status = fr_recover_hfs_candidate_to_file(
+                sessionId,
+                (uint)cnid,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverXfsCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverXfsCandidateToFile(open.SessionId, inodeNumber, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverXfsCandidateToFile(
+        ulong sessionId,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        try
+        {
+            var status = fr_recover_xfs_candidate_to_file(
+                sessionId,
+                inodeNumber,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverUfsCandidateToFile(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        var open = OpenSourceReadOnlySession(sourcePath, sourceKind);
+        if (!open.EngineAvailable || !open.Opened)
+        {
+            return new EngineRecoverCandidateResult(
+                open.EngineAvailable,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                open.Message,
+                open.StatusCode);
+        }
+
+        try
+        {
+            return RecoverUfsCandidateToFile(open.SessionId, inodeNumber, outputPath);
+        }
+        finally
+        {
+            CloseSourceSession(open.SessionId);
+        }
+    }
+
+    public static EngineRecoverCandidateResult RecoverUfsCandidateToFile(
+        ulong sessionId,
+        ulong inodeNumber,
+        string outputPath)
+    {
+        if (inodeNumber == 0 || inodeNumber > uint.MaxValue)
+        {
+            return BuildRecoverResult(170, 0, false, diagnosticsFlags: 0);
+        }
+
+        try
+        {
+            var status = fr_recover_ufs_candidate_to_file(
+                sessionId,
+                (uint)inodeNumber,
+                outputPath,
+                out var bytesWritten,
+                out var partial);
+            return BuildRecoverResult(status, bytesWritten, partial != 0, diagnosticsFlags: 0);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRecoverCandidateResult(
+                false,
+                false,
+                false,
+                0,
+                0,
+                "No diagnostics available.",
+                "Engine ABI mismatch",
+                -101);
+        }
+    }
+
     private static uint TryGetSourceSessionAlignment(ulong sessionId)
     {
         try
@@ -2587,6 +3092,26 @@ public static class NativeEngineProbe
         };
     }
 
+    private static EngineRaidLayoutMetadata MapNativeRaidLayout(NativeRaidLayout nativeLayout)
+    {
+        var diskOrder = new List<uint>((int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers));
+        var diskOrderCount = (int)Math.Min(nativeLayout.DiskOrderCount, RaidLayoutMaxMembers);
+        for (var index = 0; index < diskOrderCount; index++)
+        {
+            diskOrder.Add(nativeLayout.DiskOrder[index]);
+        }
+
+        return new EngineRaidLayoutMetadata(
+            MetadataFamily: MapRaidMetadataFamily(nativeLayout.MetadataFamily),
+            Level: MapRaidLevel(nativeLayout.Level),
+            MemberCount: nativeLayout.MemberCount,
+            StripeSizeBytes: nativeLayout.StripeSizeBytes,
+            DataOffsetBytes: nativeLayout.DataOffsetBytes,
+            ParityRotation: MapRaidParityRotation(nativeLayout.ParityRotation),
+            ConfidenceScore: nativeLayout.ConfidenceScore,
+            DiskOrder: diskOrder);
+    }
+
     private static string MapRaidStatusMessage(int statusCode)
     {
         return statusCode switch
@@ -2596,6 +3121,7 @@ public static class NativeEngineProbe
             140 => "No supported RAID metadata detected.",
             141 => "RAID metadata was detected but layout is unsupported or invalid.",
             142 => "Manual RAID override is invalid.",
+            44 => "Unable to write virtual RAID assembly output.",
             10 => "Invalid source path.",
             11 => "Unsupported platform.",
             12 => "Access denied.",
@@ -2901,6 +3427,9 @@ public static class NativeEngineProbe
             75 => "FAT/exFAT candidate start cluster is invalid.",
             76 => "No bytes were recoverable for the requested FAT/exFAT candidate.",
             91 => "ext recovery is unavailable for this candidate in the current build.",
+            170 => "Candidate metadata does not contain a supported byte-mapping layout for full-content export.",
+            171 => "Candidate bytes are locked by source encryption and require explicit unlock before recovery.",
+            172 => "Candidate payload range could not be read from the source.",
             10 => "Invalid source path.",
             11 => "Unsupported platform.",
             12 => "Access denied.",
@@ -2990,6 +3519,18 @@ public static class NativeEngineProbe
         if ((flags & RecoveryDiagNoDefaultDataStream) != 0)
         {
             details.Add("Default unnamed data stream not found");
+        }
+        if ((flags & RecoveryDiagUnreadableRange) != 0)
+        {
+            details.Add("Unreadable source range encountered");
+        }
+        if ((flags & RecoveryDiagEncryptedLocked) != 0)
+        {
+            details.Add("Encrypted source remains locked");
+        }
+        if ((flags & RecoveryDiagUnsupportedLayout) != 0)
+        {
+            details.Add("Unsupported metadata layout for byte export");
         }
         if (partial)
         {
@@ -3082,6 +3623,9 @@ public static class NativeEngineProbe
     private const uint RecoveryDiagSparseZeroFilled = 0x0080;
     private const uint RecoveryDiagNoDefaultDataStream = 0x0100;
     private const uint RecoveryDiagExportedNamedDataStreams = 0x0200;
+    private const uint RecoveryDiagUnreadableRange = 0x0400;
+    private const uint RecoveryDiagEncryptedLocked = 0x0800;
+    private const uint RecoveryDiagUnsupportedLayout = 0x1000;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeNtfsBootMetadata
@@ -3565,6 +4109,33 @@ public static class NativeEngineProbe
         out NativeRaidLayout layout);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_open_virtual_raid_session(
+        [In] ulong[] memberSessionIds,
+        uint memberCount,
+        IntPtr overrideConfig,
+        out ulong virtualSessionId,
+        out ulong sizeBytes,
+        out NativeRaidLayout layout);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_open_virtual_raid_session(
+        [In] ulong[] memberSessionIds,
+        uint memberCount,
+        ref NativeRaidManualOverride overrideConfig,
+        out ulong virtualSessionId,
+        out ulong sizeBytes,
+        out NativeRaidLayout layout);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_probe_virtual_raid_session(
+        ulong virtualSessionId,
+        out NativeRaidLayout layout);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_close_virtual_raid_session(
+        ulong virtualSessionId);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_map_raid_logical_offset(
         ref NativeRaidLayout layout,
         ulong logicalOffsetBytes,
@@ -3649,6 +4220,46 @@ public static class NativeEngineProbe
     private static extern int fr_recover_ext_candidate_to_file(
         ulong sessionId,
         ulong inodeNumber,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_refs_candidate_to_file(
+        ulong sessionId,
+        ulong objectId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_apfs_candidate_to_file(
+        ulong sessionId,
+        ulong cnid,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_hfs_candidate_to_file(
+        ulong sessionId,
+        uint cnid,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_xfs_candidate_to_file(
+        ulong sessionId,
+        ulong inodeNumber,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
+        out ulong bytesWritten,
+        out int partial);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_recover_ufs_candidate_to_file(
+        ulong sessionId,
+        uint inodeNumber,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string outputPath,
         out ulong bytesWritten,
         out int partial);

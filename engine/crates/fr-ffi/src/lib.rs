@@ -35,19 +35,32 @@ use fr_xfs::{
     parse_superblock as parse_xfs_superblock,
     scan_deleted_candidates_with_superblock as scan_xfs_deleted_candidates_with_superblock,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, CStr};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static ENGINE_VERSION: &[u8] = b"0.1.0\0";
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_VIRTUAL_RAID_ARTIFACT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone)]
+struct VirtualRaidSessionMeta {
+    layout: RaidLayout,
+    artifact_path: PathBuf,
+}
 
 fn read_sessions() -> &'static Mutex<HashMap<u64, fr_winio::ReadSession>> {
     static SESSIONS: OnceLock<Mutex<HashMap<u64, fr_winio::ReadSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn virtual_raid_sessions() -> &'static Mutex<HashMap<u64, VirtualRaidSessionMeta>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<u64, VirtualRaidSessionMeta>>> = OnceLock::new();
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -415,6 +428,21 @@ const RECOVERY_DIAG_UNSUPPORTED_ENCRYPTED: u32 = 0x0040;
 const RECOVERY_DIAG_SPARSE_ZERO_FILLED: u32 = 0x0080;
 const RECOVERY_DIAG_NO_DEFAULT_DATA_STREAM: u32 = 0x0100;
 const RECOVERY_DIAG_EXPORTED_NAMED_DATA_STREAMS: u32 = 0x0200;
+const RECOVERY_STATUS_UNSUPPORTED_LAYOUT: i32 = 170;
+const RECOVERY_STATUS_ENCRYPTED_LOCKED: i32 = 171;
+const RECOVERY_STATUS_UNREADABLE_RANGE: i32 = 172;
+const METADATA_ENCRYPTED_FLAG: u8 = 0x02;
+const APFS_TOMBSTONE_MARKER: &[u8; 8] = b"APFSDEL\0";
+const HFS_TOMBSTONE_MARKER: &[u8; 8] = b"HFSDEL\0\0";
+const XFS_TOMBSTONE_MARKER: &[u8; 8] = b"XFSDEL\0\0";
+const UFS_TOMBSTONE_MARKER: &[u8; 8] = b"UFSDEL\0\0";
+const REFS_PAYLOAD_MARKER: &[u8; 8] = b"REFSPAY\0";
+const APFS_TOMBSTONE_RECORD_SIZE: usize = 316;
+const HFS_TOMBSTONE_RECORD_SIZE: usize = 312;
+const XFS_TOMBSTONE_RECORD_SIZE: usize = 316;
+const UFS_TOMBSTONE_RECORD_SIZE: usize = 312;
+const PAYLOAD_DESCRIPTOR_SIZE: usize = 16;
+const REFS_PAYLOAD_DESCRIPTOR_SIZE: usize = 40;
 const NTFS_MAX_REASONABLE_COMPRESSION_UNIT_EXPONENT: u16 = 8;
 const NTFS_COMPRESSION_FORMAT_LZNT1: u16 = 0x0002;
 const MAX_CONSECUTIVE_EMPTY_MFT_RECORDS: usize = 16_384;
@@ -1473,6 +1501,146 @@ pub extern "C" fn fr_probe_raid_layout_from_session(
 }
 
 #[no_mangle]
+pub extern "C" fn fr_open_virtual_raid_session(
+    member_session_ids: *const u64,
+    member_count: u32,
+    override_cfg: *const FrRaidManualOverride,
+    out_session_id: *mut u64,
+    out_size_bytes: *mut u64,
+    out_layout: *mut FrRaidLayout,
+) -> i32 {
+    if member_session_ids.is_null() || out_session_id.is_null() || out_layout.is_null() {
+        return -1;
+    }
+    if member_count < 2 || member_count as usize > RAID_LAYOUT_MAX_MEMBERS {
+        return 142;
+    }
+
+    let member_session_ids =
+        unsafe { std::slice::from_raw_parts(member_session_ids, member_count as usize) }.to_vec();
+    let mut unique_sessions = HashSet::with_capacity(member_session_ids.len());
+    if member_session_ids
+        .iter()
+        .any(|session_id| !unique_sessions.insert(*session_id))
+    {
+        return 142;
+    }
+
+    let parsed_override = if override_cfg.is_null() {
+        None
+    } else {
+        match decode_raid_manual_override(unsafe { &*override_cfg }) {
+            Ok(value) => Some(value),
+            Err(status) => return status,
+        }
+    };
+
+    let layout = {
+        let Ok(mut map) = read_sessions().lock() else {
+            return -200;
+        };
+        match detect_virtual_raid_layout(
+            &mut map,
+            &member_session_ids,
+            parsed_override.as_ref(),
+        ) {
+            Ok(layout) => layout,
+            Err(status) => return status,
+        }
+    };
+
+    let artifact_path = build_virtual_raid_artifact_path();
+    let assembled_size = {
+        let Ok(mut map) = read_sessions().lock() else {
+            return -200;
+        };
+        match assemble_virtual_raid_image(&mut map, &member_session_ids, &layout, &artifact_path) {
+            Ok(size) => size,
+            Err(status) => {
+                let _ = fs::remove_file(&artifact_path);
+                return status;
+            }
+        }
+    };
+
+    let artifact_str = artifact_path.to_string_lossy().to_string();
+    let virtual_session = match fr_winio::ReadSession::open(&artifact_str, RecoverySourceKind::ImageFile)
+    {
+        Ok(session) => session,
+        Err(err) => {
+            let _ = fs::remove_file(&artifact_path);
+            return map_winio_error(err);
+        }
+    };
+    let exposed_size = virtual_session.size_bytes().unwrap_or(assembled_size);
+    let virtual_session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+
+    {
+        let Ok(mut map) = read_sessions().lock() else {
+            let _ = fs::remove_file(&artifact_path);
+            return -200;
+        };
+        map.insert(virtual_session_id, virtual_session);
+    }
+
+    {
+        let Ok(mut map) = virtual_raid_sessions().lock() else {
+            if let Ok(mut read_map) = read_sessions().lock() {
+                read_map.remove(&virtual_session_id);
+            }
+            let _ = fs::remove_file(&artifact_path);
+            return -200;
+        };
+        map.insert(
+            virtual_session_id,
+            VirtualRaidSessionMeta {
+                layout: layout.clone(),
+                artifact_path: artifact_path.clone(),
+            },
+        );
+    }
+
+    unsafe {
+        *out_session_id = virtual_session_id;
+        *out_layout = encode_raid_layout(&layout);
+    }
+    if !out_size_bytes.is_null() {
+        unsafe {
+            *out_size_bytes = exposed_size;
+        }
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_probe_virtual_raid_session(
+    virtual_session_id: u64,
+    out_layout: *mut FrRaidLayout,
+) -> i32 {
+    if out_layout.is_null() {
+        return -1;
+    }
+
+    let Ok(map) = virtual_raid_sessions().lock() else {
+        return -200;
+    };
+    let Some(meta) = map.get(&virtual_session_id) else {
+        return 20;
+    };
+
+    unsafe {
+        *out_layout = encode_raid_layout(&meta.layout);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_close_virtual_raid_session(virtual_session_id: u64) -> i32 {
+    close_virtual_raid_session_internal(virtual_session_id)
+}
+
+#[no_mangle]
 pub extern "C" fn fr_map_raid_logical_offset(
     layout: *const FrRaidLayout,
     logical_offset_bytes: u64,
@@ -2250,17 +2418,503 @@ pub extern "C" fn fr_recover_ext_candidate_to_file(
     0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataRecoveryKind {
+    Refs,
+    Apfs,
+    Hfs,
+    Xfs,
+    Ufs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetadataPayloadDescriptor {
+    offset_bytes: u64,
+    length_bytes: u64,
+}
+
 #[no_mangle]
-pub extern "C" fn fr_close_source_session(session_id: u64) -> i32 {
+pub extern "C" fn fr_recover_refs_candidate_to_file(
+    session_id: u64,
+    object_id: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    recover_metadata_payload_candidate_to_file(
+        session_id,
+        object_id,
+        output_path,
+        out_bytes_written,
+        out_partial,
+        MetadataRecoveryKind::Refs,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_recover_apfs_candidate_to_file(
+    session_id: u64,
+    cnid: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    recover_metadata_payload_candidate_to_file(
+        session_id,
+        cnid,
+        output_path,
+        out_bytes_written,
+        out_partial,
+        MetadataRecoveryKind::Apfs,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_recover_hfs_candidate_to_file(
+    session_id: u64,
+    cnid: u32,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    recover_metadata_payload_candidate_to_file(
+        session_id,
+        cnid as u64,
+        output_path,
+        out_bytes_written,
+        out_partial,
+        MetadataRecoveryKind::Hfs,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_recover_xfs_candidate_to_file(
+    session_id: u64,
+    inode_number: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    recover_metadata_payload_candidate_to_file(
+        session_id,
+        inode_number,
+        output_path,
+        out_bytes_written,
+        out_partial,
+        MetadataRecoveryKind::Xfs,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn fr_recover_ufs_candidate_to_file(
+    session_id: u64,
+    inode_number: u32,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+) -> i32 {
+    recover_metadata_payload_candidate_to_file(
+        session_id,
+        inode_number as u64,
+        output_path,
+        out_bytes_written,
+        out_partial,
+        MetadataRecoveryKind::Ufs,
+    )
+}
+
+fn recover_metadata_payload_candidate_to_file(
+    session_id: u64,
+    candidate_id: u64,
+    output_path: *const c_char,
+    out_bytes_written: *mut u64,
+    out_partial: *mut i32,
+    kind: MetadataRecoveryKind,
+) -> i32 {
+    if output_path.is_null() {
+        return -1;
+    }
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = 0;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = 0;
+        }
+    }
+
+    if candidate_id == 0 {
+        return RECOVERY_STATUS_UNSUPPORTED_LAYOUT;
+    }
+
+    let output_path_cstr = unsafe { CStr::from_ptr(output_path) };
+    let Ok(output_path_str) = output_path_cstr.to_str() else {
+        return 43;
+    };
+    if output_path_str.trim().is_empty() {
+        return 43;
+    }
+
     let Ok(mut map) = read_sessions().lock() else {
         return -200;
     };
+    let Some(session) = map.get_mut(&session_id) else {
+        return 20;
+    };
 
-    if map.remove(&session_id).is_some() {
-        0
-    } else {
-        20
+    let image = match kind {
+        MetadataRecoveryKind::Refs => read_prefix_for_refs_scan(session),
+        MetadataRecoveryKind::Apfs => read_prefix_for_apfs_scan(session),
+        MetadataRecoveryKind::Hfs => read_prefix_for_hfs_scan(session),
+        MetadataRecoveryKind::Xfs => read_prefix_for_xfs_scan(session),
+        MetadataRecoveryKind::Ufs => read_prefix_for_ufs_scan(session),
+    };
+    let image = match image {
+        Ok(bytes) => bytes,
+        Err(err) => return map_winio_error(err),
+    };
+    if image.is_empty() {
+        return 31;
     }
+
+    let descriptor = match kind {
+        MetadataRecoveryKind::Refs => find_refs_payload_descriptor(&image, candidate_id),
+        MetadataRecoveryKind::Apfs => find_metadata_tombstone_payload_descriptor_u64(
+            &image,
+            APFS_TOMBSTONE_MARKER,
+            APFS_TOMBSTONE_RECORD_SIZE,
+            8,
+            16,
+            24,
+            candidate_id,
+        ),
+        MetadataRecoveryKind::Hfs => find_metadata_tombstone_payload_descriptor_u32(
+            &image,
+            HFS_TOMBSTONE_MARKER,
+            HFS_TOMBSTONE_RECORD_SIZE,
+            8,
+            12,
+            20,
+            candidate_id as u32,
+        ),
+        MetadataRecoveryKind::Xfs => find_metadata_tombstone_payload_descriptor_u64(
+            &image,
+            XFS_TOMBSTONE_MARKER,
+            XFS_TOMBSTONE_RECORD_SIZE,
+            8,
+            16,
+            24,
+            candidate_id,
+        ),
+        MetadataRecoveryKind::Ufs => find_metadata_tombstone_payload_descriptor_u32(
+            &image,
+            UFS_TOMBSTONE_MARKER,
+            UFS_TOMBSTONE_RECORD_SIZE,
+            8,
+            12,
+            20,
+            candidate_id as u32,
+        ),
+    };
+    let descriptor = match descriptor {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+
+    if descriptor.length_bytes == 0 {
+        return RECOVERY_STATUS_UNSUPPORTED_LAYOUT;
+    }
+
+    let output_path = Path::new(output_path_str);
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {
+            return 44;
+        }
+    }
+
+    let Ok(mut output_file) = File::create(output_path) else {
+        return 44;
+    };
+
+    let (written, partial) = match copy_session_range_to_file(
+        session,
+        descriptor.offset_bytes,
+        descriptor.length_bytes,
+        &mut output_file,
+    ) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+
+    if !out_bytes_written.is_null() {
+        unsafe {
+            *out_bytes_written = written;
+        }
+    }
+
+    if !out_partial.is_null() {
+        unsafe {
+            *out_partial = if partial { 1 } else { 0 };
+        }
+    }
+
+    0
+}
+
+fn find_refs_payload_descriptor(
+    image: &[u8],
+    object_id: u64,
+) -> Result<MetadataPayloadDescriptor, i32> {
+    if object_id == 0 || image.len() < REFS_PAYLOAD_DESCRIPTOR_SIZE {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    let mut offset = 0usize;
+    while offset + REFS_PAYLOAD_DESCRIPTOR_SIZE <= image.len() {
+        if image[offset..offset + REFS_PAYLOAD_MARKER.len()] == REFS_PAYLOAD_MARKER[..] {
+            let descriptor = &image[offset..offset + REFS_PAYLOAD_DESCRIPTOR_SIZE];
+            let descriptor_object_id = read_u64_le_at(descriptor, 8);
+            if descriptor_object_id == object_id {
+                let flags = descriptor[32];
+                if flags & METADATA_ENCRYPTED_FLAG != 0 {
+                    return Err(RECOVERY_STATUS_ENCRYPTED_LOCKED);
+                }
+
+                let payload_offset = read_u64_le_at(descriptor, 16);
+                let payload_length = read_u64_le_at(descriptor, 24);
+                if payload_length == 0 || payload_offset.checked_add(payload_length).is_none() {
+                    return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+                }
+
+                return Ok(MetadataPayloadDescriptor {
+                    offset_bytes: payload_offset,
+                    length_bytes: payload_length,
+                });
+            }
+
+            offset = offset.saturating_add(REFS_PAYLOAD_DESCRIPTOR_SIZE);
+            continue;
+        }
+
+        offset = offset.saturating_add(1);
+    }
+
+    Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT)
+}
+
+fn find_metadata_tombstone_payload_descriptor_u64(
+    image: &[u8],
+    marker: &[u8; 8],
+    record_size: usize,
+    id_offset: usize,
+    _size_offset: usize,
+    flags_offset: usize,
+    candidate_id: u64,
+) -> Result<MetadataPayloadDescriptor, i32> {
+    if candidate_id == 0 || record_size == 0 || image.len() < record_size {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    let mut offset = 0usize;
+    while offset + record_size <= image.len() {
+        if image[offset..offset + marker.len()] == marker[..] {
+            let record = &image[offset..offset + record_size];
+            let record_candidate_id = read_u64_le_at(record, id_offset);
+            if record_candidate_id == candidate_id {
+                if flags_offset >= record.len() {
+                    return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+                }
+                let flags = record[flags_offset];
+                if flags & METADATA_ENCRYPTED_FLAG != 0 {
+                    return Err(RECOVERY_STATUS_ENCRYPTED_LOCKED);
+                }
+                return parse_payload_descriptor_after_record(image, offset, record_size);
+            }
+
+            offset = offset.saturating_add(record_size);
+            continue;
+        }
+
+        offset = offset.saturating_add(1);
+    }
+
+    Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT)
+}
+
+fn find_metadata_tombstone_payload_descriptor_u32(
+    image: &[u8],
+    marker: &[u8; 8],
+    record_size: usize,
+    id_offset: usize,
+    _size_offset: usize,
+    flags_offset: usize,
+    candidate_id: u32,
+) -> Result<MetadataPayloadDescriptor, i32> {
+    if candidate_id == 0 || record_size == 0 || image.len() < record_size {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    let mut offset = 0usize;
+    while offset + record_size <= image.len() {
+        if image[offset..offset + marker.len()] == marker[..] {
+            let record = &image[offset..offset + record_size];
+            let record_candidate_id = read_u32_le_at(record, id_offset);
+            if record_candidate_id == candidate_id {
+                if flags_offset >= record.len() {
+                    return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+                }
+                let flags = record[flags_offset];
+                if flags & METADATA_ENCRYPTED_FLAG != 0 {
+                    return Err(RECOVERY_STATUS_ENCRYPTED_LOCKED);
+                }
+                return parse_payload_descriptor_after_record(image, offset, record_size);
+            }
+
+            offset = offset.saturating_add(record_size);
+            continue;
+        }
+
+        offset = offset.saturating_add(1);
+    }
+
+    Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT)
+}
+
+fn parse_payload_descriptor_after_record(
+    image: &[u8],
+    record_offset: usize,
+    record_size: usize,
+) -> Result<MetadataPayloadDescriptor, i32> {
+    let Some(descriptor_offset) = record_offset.checked_add(record_size) else {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    };
+    let Some(descriptor_end) = descriptor_offset.checked_add(PAYLOAD_DESCRIPTOR_SIZE) else {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    };
+    if descriptor_end > image.len() {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    let payload_offset = read_u64_le_at(image, descriptor_offset);
+    let payload_length = read_u64_le_at(image, descriptor_offset + 8);
+    if payload_length == 0 || payload_offset.checked_add(payload_length).is_none() {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    Ok(MetadataPayloadDescriptor {
+        offset_bytes: payload_offset,
+        length_bytes: payload_length,
+    })
+}
+
+fn copy_session_range_to_file(
+    session: &mut fr_winio::ReadSession,
+    offset_bytes: u64,
+    length_bytes: u64,
+    output_file: &mut File,
+) -> Result<(u64, bool), i32> {
+    if length_bytes == 0 {
+        return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+    }
+
+    let mut scratch = vec![0u8; 1024 * 1024];
+    let mut copied = 0u64;
+    let mut partial = false;
+    while copied < length_bytes {
+        let left = length_bytes - copied;
+        let chunk_len = left.min(scratch.len() as u64) as usize;
+        let current_offset = match offset_bytes.checked_add(copied) {
+            Some(value) => value,
+            None => return Err(RECOVERY_STATUS_UNSUPPORTED_LAYOUT),
+        };
+
+        match read_from_session(session, current_offset, &mut scratch[..chunk_len]) {
+            Ok(true) => {}
+            Ok(false) => {
+                if copied == 0 {
+                    return Err(RECOVERY_STATUS_UNREADABLE_RANGE);
+                }
+                partial = true;
+                break;
+            }
+            Err(_) => {
+                if copied == 0 {
+                    return Err(RECOVERY_STATUS_UNREADABLE_RANGE);
+                }
+                partial = true;
+                break;
+            }
+        }
+
+        if output_file.write_all(&scratch[..chunk_len]).is_err() {
+            return Err(44);
+        }
+        copied = copied.saturating_add(chunk_len as u64);
+    }
+
+    Ok((copied, partial))
+}
+
+fn delete_virtual_raid_artifact(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn close_source_session_internal(session_id: u64) -> i32 {
+    let removed = {
+        let Ok(mut map) = read_sessions().lock() else {
+            return -200;
+        };
+        map.remove(&session_id).is_some()
+    };
+
+    if !removed {
+        return 20;
+    }
+
+    if let Ok(mut map) = virtual_raid_sessions().lock() {
+        if let Some(meta) = map.remove(&session_id) {
+            delete_virtual_raid_artifact(&meta.artifact_path);
+        }
+    }
+
+    0
+}
+
+fn close_virtual_raid_session_internal(virtual_session_id: u64) -> i32 {
+    let meta = {
+        let Ok(map) = virtual_raid_sessions().lock() else {
+            return -200;
+        };
+        match map.get(&virtual_session_id) {
+            Some(value) => value.clone(),
+            None => return 20,
+        }
+    };
+
+    let close_status = close_source_session_internal(virtual_session_id);
+    if close_status != 0 && close_status != 20 {
+        return close_status;
+    }
+
+    if let Ok(mut map) = virtual_raid_sessions().lock() {
+        map.remove(&virtual_session_id);
+    }
+    delete_virtual_raid_artifact(&meta.artifact_path);
+
+    if close_status == 20 {
+        20
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn fr_close_source_session(session_id: u64) -> i32 {
+    close_source_session_internal(session_id)
 }
 
 fn populate_quick_scan_candidates_buffer(
@@ -3889,6 +4543,12 @@ fn read_u32_le_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(value)
 }
 
+fn read_u64_le_at(bytes: &[u8], offset: usize) -> u64 {
+    let mut value = [0u8; 8];
+    value.copy_from_slice(&bytes[offset..offset + 8]);
+    u64::from_le_bytes(value)
+}
+
 fn recover_data_attribute(
     session: &mut fr_winio::ReadSession,
     boot: &fr_ntfs::NtfsBootSector,
@@ -4764,6 +5424,174 @@ fn read_prefix_for_raid_scan(
     }
 }
 
+fn build_virtual_raid_artifact_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT_VIRTUAL_RAID_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "fr-virtual-raid-{}-{}.img",
+        timestamp, sequence
+    ))
+}
+
+fn detect_virtual_raid_layout(
+    sessions: &mut HashMap<u64, fr_winio::ReadSession>,
+    member_session_ids: &[u64],
+    override_cfg: Option<&RaidManualOverride>,
+) -> Result<RaidLayout, i32> {
+    let mut detected = None;
+    for session_id in member_session_ids {
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Err(20);
+        };
+        let image = read_prefix_for_raid_scan(session).map_err(map_winio_error)?;
+        if image.len() < 4096 {
+            continue;
+        }
+
+        match resolve_layout_with_override(&image, override_cfg) {
+            Ok(Some(layout)) => {
+                detected = Some(layout);
+                break;
+            }
+            Ok(None) => continue,
+            Err(err) => return Err(map_raid_error_to_status(err, override_cfg.is_some())),
+        }
+    }
+
+    let Some(layout) = detected else {
+        return Err(140);
+    };
+    if layout.member_count as usize != member_session_ids.len() {
+        return Err(141);
+    }
+
+    Ok(layout)
+}
+
+fn compute_virtual_raid_logical_size(
+    layout: &RaidLayout,
+    member_sizes: &[u64],
+) -> Result<u64, fr_raid::RaidError> {
+    if member_sizes.len() != layout.member_count as usize {
+        return Err(fr_raid::RaidError::InvalidMemberCount(layout.member_count));
+    }
+    let stripe = layout.stripe_size_bytes as u64;
+    if stripe == 0 {
+        return Err(fr_raid::RaidError::InvalidStripeSize(layout.stripe_size_bytes));
+    }
+
+    let mut min_usable = u64::MAX;
+    for member_size in member_sizes {
+        if *member_size < layout.data_offset_bytes {
+            return Err(fr_raid::RaidError::BufferTooSmall {
+                expected: layout.data_offset_bytes as usize,
+                actual: *member_size as usize,
+            });
+        }
+        min_usable = min_usable.min(member_size - layout.data_offset_bytes);
+    }
+
+    let aligned_member_bytes = min_usable - (min_usable % stripe);
+    let total = match layout.level {
+        RaidLevel::Raid0 => aligned_member_bytes
+            .checked_mul(layout.member_count as u64)
+            .ok_or(fr_raid::RaidError::ArithmeticOverflow(
+                "virtual raid0 logical size",
+            ))?,
+        RaidLevel::Raid1 => min_usable,
+        RaidLevel::Raid4 | RaidLevel::Raid5 => {
+            let data_disks = layout
+                .member_count
+                .checked_sub(1)
+                .ok_or(fr_raid::RaidError::UnsupportedLayout)?;
+            if data_disks == 0 {
+                return Err(fr_raid::RaidError::UnsupportedLayout);
+            }
+            aligned_member_bytes
+                .checked_mul(data_disks as u64)
+                .ok_or(fr_raid::RaidError::ArithmeticOverflow(
+                    "virtual raid parity logical size",
+                ))?
+        }
+        RaidLevel::Raid10 => {
+            if layout.member_count < 4 || layout.member_count % 2 != 0 {
+                return Err(fr_raid::RaidError::UnsupportedLayout);
+            }
+            aligned_member_bytes
+                .checked_mul((layout.member_count / 2) as u64)
+                .ok_or(fr_raid::RaidError::ArithmeticOverflow(
+                    "virtual raid10 logical size",
+                ))?
+        }
+        RaidLevel::Raid6 | RaidLevel::Unknown => {
+            return Err(fr_raid::RaidError::UnsupportedLayout)
+        }
+    };
+
+    Ok(total)
+}
+
+fn assemble_virtual_raid_image(
+    sessions: &mut HashMap<u64, fr_winio::ReadSession>,
+    member_session_ids: &[u64],
+    layout: &RaidLayout,
+    artifact_path: &Path,
+) -> Result<u64, i32> {
+    let mut member_sizes = Vec::with_capacity(member_session_ids.len());
+    for session_id in member_session_ids {
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Err(20);
+        };
+        member_sizes.push(session.size_bytes().unwrap_or(0));
+    }
+
+    let logical_size = compute_virtual_raid_logical_size(layout, &member_sizes)
+        .map_err(|err| map_raid_error_to_status(err, false))?;
+    if logical_size == 0 {
+        return Err(141);
+    }
+
+    let mut output = File::create(artifact_path).map_err(|_| 44)?;
+    let stripe = layout.stripe_size_bytes as u64;
+    let chunk_size = stripe.max(4 * 1024).min(1024 * 1024) as usize;
+    let mut scratch = vec![0u8; chunk_size];
+    let mut logical_offset = 0u64;
+
+    while logical_offset < logical_size {
+        let mapping = map_raid_logical_offset(layout, logical_offset)
+            .map_err(|err| map_raid_error_to_status(err, false))?;
+        let member_position = mapping.member_index as usize;
+        if member_position >= member_session_ids.len() {
+            return Err(141);
+        }
+
+        let member_session_id = member_session_ids[member_position];
+        let Some(member_session) = sessions.get_mut(&member_session_id) else {
+            return Err(20);
+        };
+
+        let remaining = logical_size - logical_offset;
+        let read_len = remaining.min(scratch.len() as u64) as usize;
+        let read_slice = &mut scratch[..read_len];
+        match read_from_session(member_session, mapping.member_offset_bytes, read_slice) {
+            Ok(true) => {}
+            Ok(false) => return Err(31),
+            Err(err) => return Err(map_winio_error(err)),
+        }
+
+        output.write_all(read_slice).map_err(|_| 44)?;
+        logical_offset = logical_offset
+            .checked_add(read_len as u64)
+            .ok_or(141)?;
+    }
+
+    output.flush().map_err(|_| 44)?;
+    Ok(logical_size)
+}
+
 fn normalize_max_scan_bytes(max_scan_bytes: u64) -> u64 {
     const DEFAULT_MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_ALLOWED_SCAN_BYTES: u64 = usize::MAX as u64;
@@ -4955,6 +5783,251 @@ mod tests {
         assert_eq!(mapping.member_offset_bytes, 2 * 1024 * 1024);
         assert_eq!(mapping.has_parity_member, 1);
         assert_eq!(mapping.parity_member_index, 3);
+    }
+
+    #[test]
+    fn ffi_open_virtual_raid_session_reads_assembled_raid0_bytes() {
+        let stripe_size = 4096u32;
+        let data_offset_sectors = 64u64;
+        let member_a = build_test_mdraid_member_image(0, 2, stripe_size, data_offset_sectors, b'A');
+        let member_b = build_test_mdraid_member_image(0, 2, stripe_size, data_offset_sectors, b'B');
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-virtual-raid-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let member_a_path = temp_dir.join("member-a.img");
+        let member_b_path = temp_dir.join("member-b.img");
+        fs::write(&member_a_path, &member_a).unwrap();
+        fs::write(&member_b_path, &member_b).unwrap();
+
+        let member_a_cstr = CString::new(member_a_path.to_string_lossy().as_bytes()).unwrap();
+        let member_b_cstr = CString::new(member_b_path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut member_a_session = 0u64;
+        let mut member_b_session = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(member_a_cstr.as_ptr(), 2, &mut member_a_session, &mut size_bytes),
+            0
+        );
+        assert_eq!(
+            fr_open_source_session_readonly(member_b_cstr.as_ptr(), 2, &mut member_b_session, &mut size_bytes),
+            0
+        );
+
+        let member_sessions = [member_a_session, member_b_session];
+        let mut virtual_session_id = 0u64;
+        let mut virtual_size_bytes = 0u64;
+        let mut virtual_layout = FrRaidLayout::default();
+        assert_eq!(
+            fr_open_virtual_raid_session(
+                member_sessions.as_ptr(),
+                member_sessions.len() as u32,
+                std::ptr::null(),
+                &mut virtual_session_id,
+                &mut virtual_size_bytes,
+                &mut virtual_layout
+            ),
+            0
+        );
+        assert_eq!(virtual_layout.level, RAID_LEVEL_RAID0);
+        assert_eq!(virtual_layout.member_count, 2);
+        assert_eq!(virtual_layout.stripe_size_bytes, stripe_size);
+        assert_eq!(virtual_layout.data_offset_bytes, data_offset_sectors * 512);
+        assert_eq!(virtual_size_bytes, (stripe_size as u64) * 4);
+
+        let mut probed_layout = FrRaidLayout::default();
+        assert_eq!(
+            fr_probe_virtual_raid_session(virtual_session_id, &mut probed_layout),
+            0
+        );
+        assert_eq!(probed_layout.level, RAID_LEVEL_RAID0);
+        assert_eq!(probed_layout.member_count, 2);
+
+        let mut assembled = vec![0u8; (stripe_size as usize) * 4];
+        let mut bytes_read = 0u32;
+        assert_eq!(
+            fr_read_source_session(
+                virtual_session_id,
+                0,
+                assembled.as_mut_ptr(),
+                assembled.len() as u32,
+                &mut bytes_read
+            ),
+            0
+        );
+        assert_eq!(bytes_read as usize, assembled.len());
+        assert!(assembled[..stripe_size as usize].iter().all(|byte| *byte == b'A'));
+        assert!(
+            assembled[stripe_size as usize..(stripe_size as usize) * 2]
+                .iter()
+                .all(|byte| *byte == b'B')
+        );
+        assert!(
+            assembled[(stripe_size as usize) * 2..(stripe_size as usize) * 3]
+                .iter()
+                .all(|byte| *byte == b'A')
+        );
+        assert!(
+            assembled[(stripe_size as usize) * 3..(stripe_size as usize) * 4]
+                .iter()
+                .all(|byte| *byte == b'B')
+        );
+
+        assert_eq!(fr_close_virtual_raid_session(virtual_session_id), 0);
+        assert_eq!(
+            fr_probe_virtual_raid_session(virtual_session_id, &mut probed_layout),
+            20
+        );
+        assert_eq!(fr_close_source_session(member_a_session), 0);
+        assert_eq!(fr_close_source_session(member_b_session), 0);
+
+        fs::remove_file(&member_a_path).unwrap();
+        fs::remove_file(&member_b_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_open_virtual_raid_session_reads_assembled_raid10_bytes() {
+        let stripe_size = 4096u32;
+        let data_offset_sectors = 64u64;
+        let members = [
+            build_test_mdraid_member_image(10, 4, stripe_size, data_offset_sectors, b'A'),
+            build_test_mdraid_member_image(10, 4, stripe_size, data_offset_sectors, b'B'),
+            build_test_mdraid_member_image(10, 4, stripe_size, data_offset_sectors, b'C'),
+            build_test_mdraid_member_image(10, 4, stripe_size, data_offset_sectors, b'D'),
+        ];
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-virtual-raid10-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let mut member_session_ids = Vec::new();
+        let mut member_paths = Vec::new();
+        for (index, image) in members.iter().enumerate() {
+            let path = temp_dir.join(format!("member-{}.img", index));
+            fs::write(&path, image).unwrap();
+            member_paths.push(path.clone());
+
+            let path_cstr = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            let mut session_id = 0u64;
+            let mut size_bytes = 0u64;
+            assert_eq!(
+                fr_open_source_session_readonly(path_cstr.as_ptr(), 2, &mut session_id, &mut size_bytes),
+                0
+            );
+            member_session_ids.push(session_id);
+        }
+
+        let mut virtual_session_id = 0u64;
+        let mut virtual_size_bytes = 0u64;
+        let mut virtual_layout = FrRaidLayout::default();
+        assert_eq!(
+            fr_open_virtual_raid_session(
+                member_session_ids.as_ptr(),
+                member_session_ids.len() as u32,
+                std::ptr::null(),
+                &mut virtual_session_id,
+                &mut virtual_size_bytes,
+                &mut virtual_layout
+            ),
+            0
+        );
+        assert_eq!(virtual_layout.level, RAID_LEVEL_RAID10);
+        assert_eq!(virtual_layout.member_count, 4);
+        assert_eq!(virtual_size_bytes, (stripe_size as u64) * 4);
+
+        let mut assembled = vec![0u8; (stripe_size as usize) * 4];
+        let mut bytes_read = 0u32;
+        assert_eq!(
+            fr_read_source_session(
+                virtual_session_id,
+                0,
+                assembled.as_mut_ptr(),
+                assembled.len() as u32,
+                &mut bytes_read
+            ),
+            0
+        );
+        assert_eq!(bytes_read as usize, assembled.len());
+        assert!(assembled[..stripe_size as usize].iter().all(|byte| *byte == b'A'));
+        assert!(
+            assembled[stripe_size as usize..(stripe_size as usize) * 2]
+                .iter()
+                .all(|byte| *byte == b'C')
+        );
+        assert!(
+            assembled[(stripe_size as usize) * 2..(stripe_size as usize) * 3]
+                .iter()
+                .all(|byte| *byte == b'A')
+        );
+        assert!(
+            assembled[(stripe_size as usize) * 3..(stripe_size as usize) * 4]
+                .iter()
+                .all(|byte| *byte == b'C')
+        );
+
+        assert_eq!(fr_close_virtual_raid_session(virtual_session_id), 0);
+        for session_id in member_session_ids {
+            assert_eq!(fr_close_source_session(session_id), 0);
+        }
+        for path in member_paths {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_open_virtual_raid_session_rejects_duplicate_member_sessions() {
+        let member = build_test_mdraid_member_image(0, 2, 4096, 64, b'X');
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-virtual-raid-dupe-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let member_path = temp_dir.join("member.img");
+        fs::write(&member_path, &member).unwrap();
+
+        let member_cstr = CString::new(member_path.to_string_lossy().as_bytes()).unwrap();
+        let mut member_session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(member_cstr.as_ptr(), 2, &mut member_session_id, &mut size_bytes),
+            0
+        );
+
+        let duplicate_members = [member_session_id, member_session_id];
+        let mut virtual_session_id = 0u64;
+        let mut virtual_size_bytes = 0u64;
+        let mut virtual_layout = FrRaidLayout::default();
+        assert_eq!(
+            fr_open_virtual_raid_session(
+                duplicate_members.as_ptr(),
+                duplicate_members.len() as u32,
+                std::ptr::null(),
+                &mut virtual_session_id,
+                &mut virtual_size_bytes,
+                &mut virtual_layout
+            ),
+            142
+        );
+
+        assert_eq!(fr_close_source_session(member_session_id), 0);
+        fs::remove_file(&member_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 
     #[test]
@@ -5498,6 +6571,396 @@ mod tests {
         );
         assert_eq!(first.inode_number, 120);
         assert_eq!(c_string_bytes_to_string(&first.name), "passwd.old");
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_refs_candidate_to_file_recovers_payload_from_descriptor() {
+        let payload = b"REFS-RECOVERED-PAYLOAD";
+        let image = build_test_refs_image_with_deleted_usn_record_and_payload(42, payload, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-refs-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("refs-recover.img");
+        let output_path = temp_dir.join("refs-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_refs_candidate_to_file(
+            session_id,
+            42,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_refs_candidate_to_file_returns_unreadable_range_for_out_of_bounds_payload() {
+        let payload = b"REFS-OUT-OF-BOUNDS";
+        let image = build_test_refs_image_with_deleted_usn_record_and_payload(42, payload, false);
+        let mut image = image;
+        write_refs_payload_descriptor(&mut image, 16 * 1024, 42, 512 * 1024, payload.len() as u64, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-refs-recover-oob-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("refs-recover-oob.img");
+        let output_path = temp_dir.join("refs-recovered-oob.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 99u64;
+        let mut partial = -1i32;
+        let status = fr_recover_refs_candidate_to_file(
+            session_id,
+            42,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, RECOVERY_STATUS_UNREADABLE_RANGE);
+        assert_eq!(bytes_written, 0);
+        assert_eq!(partial, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_apfs_candidate_to_file_recovers_payload_from_descriptor() {
+        let payload = b"APFS-CONTENT-PAYLOAD";
+        let image = build_test_apfs_image_with_deleted_tombstone_and_payload(2048, payload, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-apfs-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("apfs-recover.img");
+        let output_path = temp_dir.join("apfs-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_apfs_candidate_to_file(
+            session_id,
+            2048,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_apfs_candidate_to_file_returns_encrypted_locked_when_candidate_is_locked() {
+        let payload = b"APFS-LOCKED-PAYLOAD";
+        let image = build_test_apfs_image_with_deleted_tombstone_and_payload(2048, payload, true);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-apfs-recover-locked-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("apfs-recover-locked.img");
+        let output_path = temp_dir.join("apfs-recovered-locked.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 7u64;
+        let mut partial = -1i32;
+        let status = fr_recover_apfs_candidate_to_file(
+            session_id,
+            2048,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, RECOVERY_STATUS_ENCRYPTED_LOCKED);
+        assert_eq!(bytes_written, 0);
+        assert_eq!(partial, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_hfs_candidate_to_file_recovers_payload_from_descriptor() {
+        let payload = b"HFS-CONTENT-PAYLOAD";
+        let image = build_test_hfs_image_with_deleted_tombstone_and_payload(77, payload, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-hfs-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("hfs-recover.img");
+        let output_path = temp_dir.join("hfs-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_hfs_candidate_to_file(
+            session_id,
+            77,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_xfs_candidate_to_file_recovers_payload_from_descriptor() {
+        let payload = b"XFS-CONTENT-PAYLOAD";
+        let image = build_test_xfs_image_with_deleted_tombstone_and_payload(88, payload, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-xfs-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("xfs-recover.img");
+        let output_path = temp_dir.join("xfs-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_xfs_candidate_to_file(
+            session_id,
+            88,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_xfs_candidate_to_file_returns_unsupported_layout_without_payload_descriptor() {
+        let image = build_test_xfs_image_with_deleted_tombstone();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-xfs-recover-metadata-only-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("xfs-metadata-only.img");
+        let output_path = temp_dir.join("xfs-metadata-only.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_xfs_candidate_to_file(
+            session_id,
+            88,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, RECOVERY_STATUS_UNSUPPORTED_LAYOUT);
+        assert_eq!(bytes_written, 0);
+        assert_eq!(partial, 0);
+
+        assert_eq!(fr_close_source_session(session_id), 0);
+        fs::remove_file(&image_path).unwrap();
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn ffi_recover_ufs_candidate_to_file_recovers_payload_from_descriptor() {
+        let payload = b"UFS-CONTENT-PAYLOAD";
+        let image = build_test_ufs_image_with_deleted_tombstone_and_payload(120, payload, false);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fr-ffi-ufs-recover-ok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let image_path = temp_dir.join("ufs-recover.img");
+        let output_path = temp_dir.join("ufs-recovered.bin");
+        fs::write(&image_path, &image).unwrap();
+
+        let image_path_cstr = CString::new(image_path.to_string_lossy().as_bytes()).unwrap();
+        let output_path_cstr = CString::new(output_path.to_string_lossy().as_bytes()).unwrap();
+        let mut session_id = 0u64;
+        let mut size_bytes = 0u64;
+        assert_eq!(
+            fr_open_source_session_readonly(
+                image_path_cstr.as_ptr(),
+                2,
+                &mut session_id,
+                &mut size_bytes
+            ),
+            0
+        );
+
+        let mut bytes_written = 0u64;
+        let mut partial = 0i32;
+        let status = fr_recover_ufs_candidate_to_file(
+            session_id,
+            120,
+            output_path_cstr.as_ptr(),
+            &mut bytes_written,
+            &mut partial,
+        );
+        assert_eq!(status, 0);
+        assert_eq!(partial, 0);
+        assert_eq!(bytes_written, payload.len() as u64);
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
 
         assert_eq!(fr_close_source_session(session_id), 0);
         fs::remove_file(&image_path).unwrap();
@@ -8032,6 +9495,34 @@ mod tests {
         image
     }
 
+    fn build_test_apfs_image_with_deleted_tombstone_and_payload(
+        cnid: u64,
+        payload: &[u8],
+        encrypted: bool,
+    ) -> Vec<u8> {
+        let mut image = build_test_apfs_image();
+        let mut record = build_apfs_tombstone_record(
+            cnid,
+            payload.len() as u64,
+            false,
+            "apfs-content.bin",
+            r"projects\apfs-content.bin",
+        );
+        if encrypted {
+            record[24] |= METADATA_ENCRYPTED_FLAG;
+        }
+
+        let record_offset = 8192usize;
+        image[record_offset..record_offset + record.len()].copy_from_slice(&record);
+        write_payload_descriptor(
+            &mut image,
+            record_offset + APFS_TOMBSTONE_RECORD_SIZE,
+            24 * 1024,
+            payload,
+        );
+        image
+    }
+
     fn build_apfs_tombstone_record(
         cnid: u64,
         size_bytes: u64,
@@ -8076,6 +9567,34 @@ mod tests {
         image
     }
 
+    fn build_test_hfs_image_with_deleted_tombstone_and_payload(
+        cnid: u32,
+        payload: &[u8],
+        encrypted: bool,
+    ) -> Vec<u8> {
+        let mut image = build_test_hfs_image();
+        let mut record = build_hfs_tombstone_record(
+            cnid,
+            payload.len() as u64,
+            false,
+            "hfs-content.bin",
+            r"archive\hfs-content.bin",
+        );
+        if encrypted {
+            record[20] |= METADATA_ENCRYPTED_FLAG;
+        }
+
+        let record_offset = 4096usize;
+        image[record_offset..record_offset + record.len()].copy_from_slice(&record);
+        write_payload_descriptor(
+            &mut image,
+            record_offset + HFS_TOMBSTONE_RECORD_SIZE,
+            20 * 1024,
+            payload,
+        );
+        image
+    }
+
     fn build_hfs_tombstone_record(
         cnid: u32,
         size_bytes: u64,
@@ -8110,6 +9629,34 @@ mod tests {
         let record = build_xfs_tombstone_record(88, 10_240, false, "audit.log", r"logs\audit.log");
         let offset = 8192usize;
         image[offset..offset + record.len()].copy_from_slice(&record);
+        image
+    }
+
+    fn build_test_xfs_image_with_deleted_tombstone_and_payload(
+        inode_number: u64,
+        payload: &[u8],
+        encrypted: bool,
+    ) -> Vec<u8> {
+        let mut image = build_test_xfs_image();
+        let mut record = build_xfs_tombstone_record(
+            inode_number,
+            payload.len() as u64,
+            false,
+            "xfs-content.bin",
+            r"logs\xfs-content.bin",
+        );
+        if encrypted {
+            record[24] |= METADATA_ENCRYPTED_FLAG;
+        }
+
+        let record_offset = 8192usize;
+        image[record_offset..record_offset + record.len()].copy_from_slice(&record);
+        write_payload_descriptor(
+            &mut image,
+            record_offset + XFS_TOMBSTONE_RECORD_SIZE,
+            28 * 1024,
+            payload,
+        );
         image
     }
 
@@ -8149,6 +9696,34 @@ mod tests {
         image
     }
 
+    fn build_test_ufs_image_with_deleted_tombstone_and_payload(
+        inode_number: u32,
+        payload: &[u8],
+        encrypted: bool,
+    ) -> Vec<u8> {
+        let mut image = build_test_ufs_image();
+        let mut record = build_ufs_tombstone_record(
+            inode_number,
+            payload.len() as u64,
+            false,
+            "ufs-content.bin",
+            r"etc\ufs-content.bin",
+        );
+        if encrypted {
+            record[20] |= METADATA_ENCRYPTED_FLAG;
+        }
+
+        let record_offset = 16 * 1024usize;
+        image[record_offset..record_offset + record.len()].copy_from_slice(&record);
+        write_payload_descriptor(
+            &mut image,
+            record_offset + UFS_TOMBSTONE_RECORD_SIZE,
+            32 * 1024,
+            payload,
+        );
+        image
+    }
+
     fn build_ufs_tombstone_record(
         inode_number: u32,
         size_bytes: u64,
@@ -8184,6 +9759,53 @@ mod tests {
         let start = 4096usize;
         image[start..start + usn_record.len()].copy_from_slice(&usn_record);
         image
+    }
+
+    fn build_test_refs_image_with_deleted_usn_record_and_payload(
+        object_id: u64,
+        payload: &[u8],
+        encrypted: bool,
+    ) -> Vec<u8> {
+        let mut image = build_test_refs_image_with_deleted_usn_record();
+        let payload_offset = 48 * 1024usize;
+        image[payload_offset..payload_offset + payload.len()].copy_from_slice(payload);
+        write_refs_payload_descriptor(
+            &mut image,
+            16 * 1024,
+            object_id,
+            48 * 1024,
+            payload.len() as u64,
+            encrypted,
+        );
+        image
+    }
+
+    fn write_payload_descriptor(
+        image: &mut [u8],
+        descriptor_offset: usize,
+        payload_offset: usize,
+        payload: &[u8],
+    ) {
+        let payload_end = payload_offset + payload.len();
+        image[payload_offset..payload_end].copy_from_slice(payload);
+        write_u64(image, descriptor_offset, payload_offset as u64);
+        write_u64(image, descriptor_offset + 8, payload.len() as u64);
+    }
+
+    fn write_refs_payload_descriptor(
+        image: &mut [u8],
+        descriptor_offset: usize,
+        object_id: u64,
+        payload_offset: u64,
+        payload_length: u64,
+        encrypted: bool,
+    ) {
+        image[descriptor_offset..descriptor_offset + REFS_PAYLOAD_MARKER.len()]
+            .copy_from_slice(REFS_PAYLOAD_MARKER);
+        write_u64(image, descriptor_offset + 8, object_id);
+        write_u64(image, descriptor_offset + 16, payload_offset);
+        write_u64(image, descriptor_offset + 24, payload_length);
+        image[descriptor_offset + 32] = if encrypted { METADATA_ENCRYPTED_FLAG } else { 0 };
     }
 
     fn build_test_ext4_image() -> Vec<u8> {
@@ -8699,6 +10321,35 @@ mod tests {
         entry[7] = file_type;
         entry[8..8 + name_bytes.len()].copy_from_slice(name_bytes);
         entry
+    }
+
+    fn build_test_mdraid_member_image(
+        level: i32,
+        member_count: u32,
+        stripe_size_bytes: u32,
+        data_offset_sectors: u64,
+        fill_byte: u8,
+    ) -> Vec<u8> {
+        let data_offset_bytes = data_offset_sectors as usize * 512usize;
+        let payload_len = stripe_size_bytes as usize * 2;
+        let mut image = vec![0u8; data_offset_bytes + payload_len];
+        const MD_BASE: usize = 4096;
+        const MD_MAGIC: u32 = 0xA92B4EFC;
+        write_u32(&mut image, MD_BASE + 0x00, MD_MAGIC);
+        write_u32(&mut image, MD_BASE + 0x04, 1);
+        write_u32(&mut image, MD_BASE + 0x48, level as u32);
+        write_u32(&mut image, MD_BASE + 0x4C, 0);
+        write_u32(&mut image, MD_BASE + 0x50, stripe_size_bytes);
+        write_u32(&mut image, MD_BASE + 0x5C, member_count);
+        write_u64(&mut image, MD_BASE + 0x80, data_offset_sectors);
+        for value in image
+            .iter_mut()
+            .skip(data_offset_bytes)
+            .take(payload_len)
+        {
+            *value = fill_byte;
+        }
+        image
     }
 
     fn build_test_mdraid_image() -> Vec<u8> {
