@@ -1539,11 +1539,7 @@ pub extern "C" fn fr_open_virtual_raid_session(
         let Ok(mut map) = read_sessions().lock() else {
             return -200;
         };
-        match detect_virtual_raid_layout(
-            &mut map,
-            &member_session_ids,
-            parsed_override.as_ref(),
-        ) {
+        match detect_virtual_raid_layout(&mut map, &member_session_ids, parsed_override.as_ref()) {
             Ok(layout) => layout,
             Err(status) => return status,
         }
@@ -1564,14 +1560,14 @@ pub extern "C" fn fr_open_virtual_raid_session(
     };
 
     let artifact_str = artifact_path.to_string_lossy().to_string();
-    let virtual_session = match fr_winio::ReadSession::open(&artifact_str, RecoverySourceKind::ImageFile)
-    {
-        Ok(session) => session,
-        Err(err) => {
-            let _ = fs::remove_file(&artifact_path);
-            return map_winio_error(err);
-        }
-    };
+    let virtual_session =
+        match fr_winio::ReadSession::open(&artifact_str, RecoverySourceKind::ImageFile) {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = fs::remove_file(&artifact_path);
+                return map_winio_error(err);
+            }
+        };
     let exposed_size = virtual_session.size_bytes().unwrap_or(assembled_size);
     let virtual_session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
 
@@ -5430,10 +5426,7 @@ fn build_virtual_raid_artifact_path() -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     let sequence = NEXT_VIRTUAL_RAID_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "fr-virtual-raid-{}-{}.img",
-        timestamp, sequence
-    ))
+    std::env::temp_dir().join(format!("fr-virtual-raid-{}-{}.img", timestamp, sequence))
 }
 
 fn detect_virtual_raid_layout(
@@ -5480,7 +5473,9 @@ fn compute_virtual_raid_logical_size(
     }
     let stripe = layout.stripe_size_bytes as u64;
     if stripe == 0 {
-        return Err(fr_raid::RaidError::InvalidStripeSize(layout.stripe_size_bytes));
+        return Err(fr_raid::RaidError::InvalidStripeSize(
+            layout.stripe_size_bytes,
+        ));
     }
 
     let mut min_usable = u64::MAX;
@@ -5510,11 +5505,9 @@ fn compute_virtual_raid_logical_size(
             if data_disks == 0 {
                 return Err(fr_raid::RaidError::UnsupportedLayout);
             }
-            aligned_member_bytes
-                .checked_mul(data_disks as u64)
-                .ok_or(fr_raid::RaidError::ArithmeticOverflow(
-                    "virtual raid parity logical size",
-                ))?
+            aligned_member_bytes.checked_mul(data_disks as u64).ok_or(
+                fr_raid::RaidError::ArithmeticOverflow("virtual raid parity logical size"),
+            )?
         }
         RaidLevel::Raid10 => {
             if layout.member_count < 4 || layout.member_count % 2 != 0 {
@@ -5526,9 +5519,7 @@ fn compute_virtual_raid_logical_size(
                     "virtual raid10 logical size",
                 ))?
         }
-        RaidLevel::Raid6 | RaidLevel::Unknown => {
-            return Err(fr_raid::RaidError::UnsupportedLayout)
-        }
+        RaidLevel::Raid6 | RaidLevel::Unknown => return Err(fr_raid::RaidError::UnsupportedLayout),
     };
 
     Ok(total)
@@ -5583,9 +5574,7 @@ fn assemble_virtual_raid_image(
         }
 
         output.write_all(read_slice).map_err(|_| 44)?;
-        logical_offset = logical_offset
-            .checked_add(read_len as u64)
-            .ok_or(141)?;
+        logical_offset = logical_offset.checked_add(read_len as u64).ok_or(141)?;
     }
 
     output.flush().map_err(|_| 44)?;
@@ -5812,11 +5801,21 @@ mod tests {
         let mut member_b_session = 0u64;
         let mut size_bytes = 0u64;
         assert_eq!(
-            fr_open_source_session_readonly(member_a_cstr.as_ptr(), 2, &mut member_a_session, &mut size_bytes),
+            fr_open_source_session_readonly(
+                member_a_cstr.as_ptr(),
+                2,
+                &mut member_a_session,
+                &mut size_bytes
+            ),
             0
         );
         assert_eq!(
-            fr_open_source_session_readonly(member_b_cstr.as_ptr(), 2, &mut member_b_session, &mut size_bytes),
+            fr_open_source_session_readonly(
+                member_b_cstr.as_ptr(),
+                2,
+                &mut member_b_session,
+                &mut size_bytes
+            ),
             0
         );
 
@@ -5862,12 +5861,12 @@ mod tests {
             0
         );
         assert_eq!(bytes_read as usize, assembled.len());
-        assert!(assembled[..stripe_size as usize].iter().all(|byte| *byte == b'A'));
-        assert!(
-            assembled[stripe_size as usize..(stripe_size as usize) * 2]
-                .iter()
-                .all(|byte| *byte == b'B')
-        );
+        assert!(assembled[..stripe_size as usize]
+            .iter()
+            .all(|byte| *byte == b'A'));
+        assert!(assembled[stripe_size as usize..(stripe_size as usize) * 2]
+            .iter()
+            .all(|byte| *byte == b'B'));
         assert!(
             assembled[(stripe_size as usize) * 2..(stripe_size as usize) * 3]
                 .iter()
@@ -5923,7 +5922,12 @@ mod tests {
             let mut session_id = 0u64;
             let mut size_bytes = 0u64;
             assert_eq!(
-                fr_open_source_session_readonly(path_cstr.as_ptr(), 2, &mut session_id, &mut size_bytes),
+                fr_open_source_session_readonly(
+                    path_cstr.as_ptr(),
+                    2,
+                    &mut session_id,
+                    &mut size_bytes
+                ),
                 0
             );
             member_session_ids.push(session_id);
@@ -5960,12 +5964,12 @@ mod tests {
             0
         );
         assert_eq!(bytes_read as usize, assembled.len());
-        assert!(assembled[..stripe_size as usize].iter().all(|byte| *byte == b'A'));
-        assert!(
-            assembled[stripe_size as usize..(stripe_size as usize) * 2]
-                .iter()
-                .all(|byte| *byte == b'C')
-        );
+        assert!(assembled[..stripe_size as usize]
+            .iter()
+            .all(|byte| *byte == b'A'));
+        assert!(assembled[stripe_size as usize..(stripe_size as usize) * 2]
+            .iter()
+            .all(|byte| *byte == b'C'));
         assert!(
             assembled[(stripe_size as usize) * 2..(stripe_size as usize) * 3]
                 .iter()
@@ -6005,7 +6009,12 @@ mod tests {
         let mut member_session_id = 0u64;
         let mut size_bytes = 0u64;
         assert_eq!(
-            fr_open_source_session_readonly(member_cstr.as_ptr(), 2, &mut member_session_id, &mut size_bytes),
+            fr_open_source_session_readonly(
+                member_cstr.as_ptr(),
+                2,
+                &mut member_session_id,
+                &mut size_bytes
+            ),
             0
         );
 
@@ -6631,7 +6640,14 @@ mod tests {
         let payload = b"REFS-OUT-OF-BOUNDS";
         let image = build_test_refs_image_with_deleted_usn_record_and_payload(42, payload, false);
         let mut image = image;
-        write_refs_payload_descriptor(&mut image, 16 * 1024, 42, 512 * 1024, payload.len() as u64, false);
+        write_refs_payload_descriptor(
+            &mut image,
+            16 * 1024,
+            42,
+            512 * 1024,
+            payload.len() as u64,
+            false,
+        );
         let temp_dir = std::env::temp_dir().join(format!(
             "fr-ffi-refs-recover-oob-{}",
             SystemTime::now()
@@ -9805,7 +9821,11 @@ mod tests {
         write_u64(image, descriptor_offset + 8, object_id);
         write_u64(image, descriptor_offset + 16, payload_offset);
         write_u64(image, descriptor_offset + 24, payload_length);
-        image[descriptor_offset + 32] = if encrypted { METADATA_ENCRYPTED_FLAG } else { 0 };
+        image[descriptor_offset + 32] = if encrypted {
+            METADATA_ENCRYPTED_FLAG
+        } else {
+            0
+        };
     }
 
     fn build_test_ext4_image() -> Vec<u8> {
@@ -10342,11 +10362,7 @@ mod tests {
         write_u32(&mut image, MD_BASE + 0x50, stripe_size_bytes);
         write_u32(&mut image, MD_BASE + 0x5C, member_count);
         write_u64(&mut image, MD_BASE + 0x80, data_offset_sectors);
-        for value in image
-            .iter_mut()
-            .skip(data_offset_bytes)
-            .take(payload_len)
-        {
+        for value in image.iter_mut().skip(data_offset_bytes).take(payload_len) {
             *value = fill_byte;
         }
         image
