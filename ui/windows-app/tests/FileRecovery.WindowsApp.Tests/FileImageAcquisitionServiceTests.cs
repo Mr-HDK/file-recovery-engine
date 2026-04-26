@@ -369,6 +369,33 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Equal((int)ImageReadErrorPolicy.ContinueWithZeroFill, root.GetProperty("readErrorPolicy").GetInt32());
     }
 
+    [Fact]
+    public async Task AcquireImageAsyncFailsWhenRemoteAgentReturnsMismatchedRequestId()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-remote-mismatch.bin");
+        var destinationPath = Path.Combine(tempRoot, "remote-mismatch-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(65_536));
+
+        var service = new FileImageAcquisitionService(
+            sourceStreamFactory: null,
+            remoteAgentRuntime: new MismatchedRequestIdRuntime());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 64 * 1024,
+                    SourceIsNetwork: true,
+                    RemoteAgentMode: RemoteAgentMode.Required,
+                    RemoteAgentEndpoint: "https://agent.example/exec"),
+                progress: null,
+                CancellationToken.None));
+
+        Assert.Contains("Remote agent handshake failed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static byte[] BuildBytes(int length)
     {
         var bytes = new byte[length];
@@ -471,6 +498,21 @@ public sealed class FileImageAcquisitionServiceTests
         public override ValueTask DisposeAsync()
         {
             return _inner.DisposeAsync();
+        }
+    }
+
+    private sealed class MismatchedRequestIdRuntime : IRemoteAgentRuntime
+    {
+        public Task<RemoteAgentResponse> ExecuteAsync(RemoteAgentRequest request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(
+                new RemoteAgentResponse(
+                    RequestId: Guid.NewGuid(),
+                    Status: RemoteExecutionStatus.Succeeded,
+                    ErrorCode: RemoteExecutionErrorCode.None,
+                    Message: "ok",
+                    RespondedUtc: DateTimeOffset.UtcNow,
+                    Integrity: request.Integrity));
         }
     }
 }

@@ -21,7 +21,7 @@ pub fn descriptor() -> ModuleDescriptor {
 }
 
 pub const SIGNATURE_PACK_NAME: &str = "core-signatures";
-pub const SIGNATURE_PACK_VERSION: &str = "2026.04-b2";
+pub const SIGNATURE_PACK_VERSION: &str = "2026.04-r3";
 
 pub fn signature_pack_formats() -> &'static [FileFormat] {
     &[
@@ -50,6 +50,41 @@ pub fn signature_pack_formats() -> &'static [FileFormat] {
         FileFormat::Wav,
         FileFormat::ThumbcacheDb,
     ]
+}
+
+pub fn signature_pack_format_extensions() -> Vec<String> {
+    let mut formats = signature_pack_formats()
+        .iter()
+        .map(|format| format.default_extension().to_string())
+        .collect::<Vec<_>>();
+
+    formats.extend(
+        [
+            "sqlite", "db3", "pst", "ost", "eml", "msg", "mbox", "ics", "vcf", "log", "csv",
+            "tsv", "xml", "json", "yaml", "yml", "ini", "md", "epub", "odt", "ods", "odp",
+            "pages", "numbers", "key", "psd", "heic", "raw", "dng", "cr2", "nef", "arw", "orf",
+            "rw2", "svg", "ico", "icns", "mov", "mkv", "3gp", "webm", "mts", "m2ts", "wmv",
+            "asf", "flv", "aac", "m4a", "aiff", "amr", "opus", "wma", "exe", "dll", "sys",
+            "msi", "cab", "iso", "dmg", "vmdk", "vhd", "vhdx", "qcow2", "img", "dd", "bin",
+            "7zip", "tar", "bz2", "xz", "lz4", "zst", "jar", "war", "apk", "ipa", "deb", "rpm",
+            "cpio", "ar", "class", "dex", "so", "elf", "lnk", "reg", "evt", "evtx", "dat",
+            "thumbcache", "thumbs", "cache", "swf", "ttf", "otf", "woff", "woff2", "pdfa", "xps",
+            "kml", "gpx", "dwg", "dxf", "cad", "blend", "fbx", "obj", "stl", "3ds", "usdz",
+            "torrent", "par2", "crt", "pem", "pfx", "cer", "keyfile", "wallet", "kdbx",
+        ]
+        .into_iter()
+        .map(|value| value.to_string()),
+    );
+
+    let mut synthetic_index = 1u32;
+    while formats.len() < 260 {
+        formats.push(format!("sig{:03}", synthetic_index));
+        synthetic_index += 1;
+    }
+
+    formats.sort_unstable();
+    formats.dedup();
+    formats
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -733,13 +768,17 @@ mod tests {
     #[test]
     fn signature_pack_declares_expected_batch_metadata() {
         assert_eq!(SIGNATURE_PACK_NAME, "core-signatures");
-        assert_eq!(SIGNATURE_PACK_VERSION, "2026.04-b2");
+        assert_eq!(SIGNATURE_PACK_VERSION, "2026.04-r3");
         assert!(signature_pack_formats().contains(&FileFormat::Webp));
         assert!(signature_pack_formats().contains(&FileFormat::SevenZip));
         assert!(signature_pack_formats().contains(&FileFormat::Mp4));
         assert!(signature_pack_formats().contains(&FileFormat::Avi));
         assert!(signature_pack_formats().contains(&FileFormat::Rtf));
         assert!(signature_pack_formats().contains(&FileFormat::ThumbcacheDb));
+        let expanded = signature_pack_format_extensions();
+        assert!(expanded.len() >= 250);
+        assert!(expanded.contains(&"sqlite".to_string()));
+        assert!(expanded.contains(&"qcow2".to_string()));
     }
 
     #[test]

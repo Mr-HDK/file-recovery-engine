@@ -547,7 +547,7 @@ public static class NativeEngineProbe
             {
                 PackName = new byte[64],
                 PackVersion = new byte[32],
-                FormatsCsv = new byte[512]
+                FormatsCsv = new byte[4096]
             };
 
             var status = fr_get_carve_signature_pack_metadata(out native);
@@ -4322,7 +4322,7 @@ public static class NativeEngineProbe
         public uint FormatCount;
         public uint FamilyFlags;
 
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 512)]
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4096)]
         public byte[] FormatsCsv;
     }
 

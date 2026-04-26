@@ -975,6 +975,7 @@ public partial class MainWindow : Window
                             if (RaidReverseAssistantCheckBox.IsChecked == true)
                             {
                                 var missingMembers = ParseRaidMissingMembers(RaidMissingMembersTextBox.Text);
+                                EngineRaidDegradedAssessment? baselineAssessment = null;
                                 if (missingMembers is null)
                                 {
                                     AppendSessionMessage("RAID degraded assessment skipped: missing-member list is invalid.");
@@ -984,7 +985,8 @@ public partial class MainWindow : Window
                                     var degraded = NativeEngineProbe.AssessRaidDegradedLayout(metadata, missingMembers, sampleCount: 96);
                                     if (degraded.Success && degraded.Assessment is not null)
                                     {
-                                        var assessment = degraded.Assessment;
+                                        baselineAssessment = degraded.Assessment;
+                                        var assessment = baselineAssessment;
                                         AppendSessionMessage(
                                             $"RAID degraded assessment: missing={assessment.MissingMemberCount}, recoverable={assessment.RecoverableSampleCount}/{assessment.SampleCount} ({assessment.RecoverabilityPercent}%), confidence-penalty={assessment.ConfidencePenalty}. {assessment.Recommendation}");
                                     }
@@ -1002,17 +1004,38 @@ public partial class MainWindow : Window
                                 }
                                 else
                                 {
+                                    var normalizedMissingMembers = missingMembers ?? Array.Empty<uint>();
+                                    var rankedSuggestions = RankRaidAssistantOverrides(
+                                        activeEngineSessionId,
+                                        suggestions,
+                                        normalizedMissingMembers);
                                     AppendSessionMessage(
-                                        $"RAID reverse-layout assistant generated {suggestions.Count} candidate override profiles for degraded/reversed scenarios.");
-                                    for (var index = 0; index < suggestions.Count; index++)
+                                        $"RAID reverse-layout assistant generated {rankedSuggestions.Count} candidate override profiles for degraded/reversed scenarios.");
+                                    for (var index = 0; index < rankedSuggestions.Count; index++)
                                     {
-                                        var suggestion = suggestions[index];
-                                        var probe = NativeEngineProbe.ProbeRaidLayoutFromSession(activeEngineSessionId, suggestion.Override);
-                                        var probeSummary = probe.Success && probe.Metadata is not null
-                                            ? $"success family={probe.Metadata.MetadataFamily}, level={probe.Metadata.Level}, parity={probe.Metadata.ParityRotation}"
-                                            : $"status {probe.StatusCode}";
+                                        var ranked = rankedSuggestions[index];
+                                        var probeSummary = ranked.Probe.Success && ranked.Probe.Metadata is not null
+                                            ? $"success family={ranked.Probe.Metadata.MetadataFamily}, level={ranked.Probe.Metadata.Level}, parity={ranked.Probe.Metadata.ParityRotation}, confidence={ranked.Probe.Metadata.ConfidenceScore}"
+                                            : $"status {ranked.Probe.StatusCode}";
+                                        var degradedSummary = ranked.Degraded.Success && ranked.Degraded.Assessment is not null
+                                            ? $"recoverability={ranked.Degraded.Assessment.RecoverabilityPercent}%, penalty={ranked.Degraded.Assessment.ConfidencePenalty}"
+                                            : "recoverability=n/a";
                                         AppendSessionMessage(
-                                            $"RAID assistant profile {index + 1}: {suggestion.Description} -> {probeSummary} ({probe.Message}).");
+                                            $"RAID assistant profile {index + 1} [score {ranked.Score}]: {ranked.Suggestion.Description} -> {probeSummary}; {degradedSummary} ({ranked.Probe.Message}).");
+                                    }
+
+                                    if (baselineAssessment is not null && rankedSuggestions.Count > 0)
+                                    {
+                                        var best = rankedSuggestions[0];
+                                        if (best.Degraded.Success && best.Degraded.Assessment is not null)
+                                        {
+                                            var delta = best.Degraded.Assessment.RecoverabilityPercent - baselineAssessment.RecoverabilityPercent;
+                                            if (delta >= 10)
+                                            {
+                                                AppendSessionMessage(
+                                                    $"RAID degraded export workflow hint: best assistant override improves recoverability by +{delta}% compared to baseline. Re-run assembly with profile 1 before exporting critical files.");
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2807,6 +2830,12 @@ public partial class MainWindow : Window
         string Description,
         EngineRaidManualOverride Override);
 
+    private sealed record RaidAssistantRankedResult(
+        RaidAssistantOverride Suggestion,
+        EngineRaidLayoutProbeResult Probe,
+        EngineRaidDegradedAssessmentResult Degraded,
+        int Score);
+
     private static IReadOnlyList<RaidAssistantOverride> BuildRaidReverseAssistantOverrides(
         EngineRaidLayoutMetadata metadata)
     {
@@ -2864,6 +2893,66 @@ public partial class MainWindow : Window
         }
 
         return suggestions;
+    }
+
+    private static IReadOnlyList<RaidAssistantRankedResult> RankRaidAssistantOverrides(
+        ulong sessionId,
+        IReadOnlyList<RaidAssistantOverride> suggestions,
+        IReadOnlyList<uint> missingMembers)
+    {
+        var ranked = new List<RaidAssistantRankedResult>(suggestions.Count);
+        foreach (var suggestion in suggestions)
+        {
+            var probe = NativeEngineProbe.ProbeRaidLayoutFromSession(sessionId, suggestion.Override);
+            var degraded = probe.Success && probe.Metadata is not null
+                ? NativeEngineProbe.AssessRaidDegradedLayout(probe.Metadata, missingMembers, sampleCount: 96)
+                : new EngineRaidDegradedAssessmentResult(
+                    EngineAvailable: probe.EngineAvailable,
+                    Success: false,
+                    Assessment: null,
+                    Message: "Skipped degraded scoring due to probe failure.",
+                    StatusCode: probe.StatusCode);
+            var score = ComputeRaidAssistantScore(probe, degraded);
+            ranked.Add(new RaidAssistantRankedResult(suggestion, probe, degraded, score));
+        }
+
+        return ranked
+            .OrderByDescending(item => item.Score)
+            .ThenBy(item => item.Suggestion.Description, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static int ComputeRaidAssistantScore(
+        EngineRaidLayoutProbeResult probe,
+        EngineRaidDegradedAssessmentResult degraded)
+    {
+        if (!probe.Success || probe.Metadata is null)
+        {
+            return -1000;
+        }
+
+        var score = (int)probe.Metadata.ConfidenceScore;
+        if (!string.Equals(probe.Metadata.Level, "Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 8;
+        }
+
+        if (!string.Equals(probe.Metadata.ParityRotation, "Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 6;
+        }
+
+        if (degraded.Success && degraded.Assessment is not null)
+        {
+            score += degraded.Assessment.RecoverabilityPercent * 2;
+            score -= degraded.Assessment.ConfidencePenalty;
+        }
+        else
+        {
+            score -= 24;
+        }
+
+        return score;
     }
 
     private static DateTime? ToUtcStartOfDay(DateTime? date)

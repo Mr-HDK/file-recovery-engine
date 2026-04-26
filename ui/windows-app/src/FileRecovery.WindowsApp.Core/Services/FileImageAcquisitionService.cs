@@ -642,10 +642,22 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
 
         var response = await _remoteAgentRuntime.ExecuteAsync(agentRequest, cancellationToken);
         if (response.Status == RemoteExecutionStatus.Succeeded
-            && !string.Equals(
-                response.Integrity.RequestHashHex,
-                requestHash,
-                StringComparison.OrdinalIgnoreCase))
+            && response.RequestId != agentRequest.RequestId)
+        {
+            return response with
+            {
+                Status = RemoteExecutionStatus.IntegrityFailure,
+                ErrorCode = RemoteExecutionErrorCode.InvalidResponse,
+                Message = "Remote execution request id mismatch.",
+            };
+        }
+
+        if (response.Status == RemoteExecutionStatus.Succeeded
+            && (response.Integrity is null
+                || !string.Equals(
+                    response.Integrity.RequestHashHex,
+                    requestHash,
+                    StringComparison.OrdinalIgnoreCase)))
         {
             return response with
             {

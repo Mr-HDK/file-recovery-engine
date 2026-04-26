@@ -10,6 +10,67 @@ namespace FileRecovery.WindowsApp.Tests;
 public sealed class HybridRemoteAgentRuntimeTests
 {
     [Fact]
+    public async Task HttpRuntimeRejectsInsecureNonLoopbackHttpEndpoint()
+    {
+        var runtime = new HttpRemoteAgentRuntime(new HttpClient(new StubHttpMessageHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)))));
+
+        var request = new RemoteAgentRequest(
+            RequestId: Guid.NewGuid(),
+            Endpoint: "http://agent.example/api/run",
+            Operation: RemoteAgentOperationKind.Acquisition,
+            RequestedUtc: DateTimeOffset.UtcNow,
+            Integrity: new RemoteAgentIntegrityMetadata("abc", "def", null));
+
+        var response = await runtime.ExecuteAsync(request, CancellationToken.None);
+        Assert.Equal(RemoteExecutionStatus.Failed, response.Status);
+        Assert.Equal(RemoteExecutionErrorCode.OperationRejected, response.ErrorCode);
+    }
+
+    [Fact]
+    public async Task HttpRuntimeRetriesTransientFailureThenSucceeds()
+    {
+        var callCount = 0;
+        var expected = new RemoteAgentResponse(
+            RequestId: Guid.NewGuid(),
+            Status: RemoteExecutionStatus.Succeeded,
+            ErrorCode: RemoteExecutionErrorCode.None,
+            Message: "ok-after-retry",
+            RespondedUtc: DateTimeOffset.UtcNow,
+            Integrity: new RemoteAgentIntegrityMetadata("abc", "def", null));
+
+        var handler = new StubHttpMessageHandler(_ =>
+        {
+            callCount++;
+            if (callCount == 1)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            }
+
+            var json = JsonSerializer.Serialize(expected, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            };
+            return Task.FromResult(response);
+        });
+
+        using var httpClient = new HttpClient(handler);
+        var runtime = new HttpRemoteAgentRuntime(httpClient);
+        var request = new RemoteAgentRequest(
+            RequestId: expected.RequestId,
+            Endpoint: "https://agent.example/api/run",
+            Operation: RemoteAgentOperationKind.Acquisition,
+            RequestedUtc: DateTimeOffset.UtcNow,
+            Integrity: expected.Integrity);
+
+        var response = await runtime.ExecuteAsync(request, CancellationToken.None);
+        Assert.Equal(RemoteExecutionStatus.Succeeded, response.Status);
+        Assert.Equal("ok-after-retry", response.Message);
+        Assert.Equal(2, callCount);
+    }
+
+    [Fact]
     public async Task HybridRuntimeUsesHttpPathForHttpsEndpoint()
     {
         var expected = new RemoteAgentResponse(
@@ -82,4 +143,3 @@ public sealed class HybridRemoteAgentRuntimeTests
         }
     }
 }
-

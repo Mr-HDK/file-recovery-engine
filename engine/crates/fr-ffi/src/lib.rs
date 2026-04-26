@@ -3,8 +3,8 @@ use fr_apfs::{
     scan_deleted_candidates_with_container as scan_apfs_deleted_candidates_with_container,
 };
 use fr_carving::{
-    carve_bytes, signature_pack_formats, CarvingFamily, CarvingPlan, SIGNATURE_PACK_NAME,
-    SIGNATURE_PACK_VERSION,
+    carve_bytes, signature_pack_format_extensions, CarvingFamily, CarvingPlan,
+    SIGNATURE_PACK_NAME, SIGNATURE_PACK_VERSION,
 };
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
@@ -354,7 +354,7 @@ pub struct FrCarveSignaturePackMetadata {
     pub pack_version: [u8; 32],
     pub format_count: u32,
     pub family_flags: u32,
-    pub formats_csv: [u8; 512],
+    pub formats_csv: [u8; 4096],
 }
 
 #[repr(C)]
@@ -3256,21 +3256,18 @@ fn encode_carve_signature_pack_metadata() -> FrCarveSignaturePackMetadata {
         pack_version: [0u8; 32],
         format_count: 0,
         family_flags: 0,
-        formats_csv: [0u8; 512],
+        formats_csv: [0u8; 4096],
     };
 
     write_utf8(SIGNATURE_PACK_NAME, &mut out.pack_name);
     write_utf8(SIGNATURE_PACK_VERSION, &mut out.pack_version);
 
-    let formats = signature_pack_formats();
-    out.format_count = usize_to_u32_saturating(formats.len());
+    let mut extensions = signature_pack_format_extensions();
+    out.format_count = usize_to_u32_saturating(extensions.len());
 
     let mut family_flags = 0u32;
-    let mut extensions = Vec::with_capacity(formats.len());
-    for format in formats {
-        let extension = format.default_extension();
+    for extension in &extensions {
         family_flags |= carve_family_flag_for_extension(extension);
-        extensions.push(extension);
     }
     out.family_flags = family_flags;
 
@@ -3290,7 +3287,7 @@ fn carve_family_flag_for_extension(extension: &str) -> u32 {
         "docx" | "xlsx" | "pptx" => CARVE_FAMILY_OFFICE,
         "mp4" | "avi" | "mid" | "ogg" | "flac" | "mp3" | "wav" => CARVE_FAMILY_MEDIA,
         "db" => CARVE_FAMILY_ARTIFACTS,
-        _ => 0,
+        _ => CARVE_FAMILY_DOCUMENTS,
     }
 }
 
@@ -8227,7 +8224,7 @@ mod tests {
             c_string_bytes_to_string(&metadata.pack_version),
             SIGNATURE_PACK_VERSION
         );
-        assert!(metadata.format_count >= 20);
+        assert!(metadata.format_count >= 250);
         assert_ne!(metadata.family_flags & CARVE_FAMILY_IMAGES, 0);
         assert_ne!(metadata.family_flags & CARVE_FAMILY_ARCHIVES, 0);
         assert_ne!(metadata.family_flags & CARVE_FAMILY_ARTIFACTS, 0);
@@ -8236,6 +8233,7 @@ mod tests {
         assert!(formats.contains("7z"));
         assert!(formats.contains("mp4"));
         assert!(formats.contains("db"));
+        assert!(formats.contains("sqlite"));
     }
 
     #[test]
@@ -9541,7 +9539,7 @@ mod tests {
             pack_version: [0u8; 32],
             format_count: 0,
             family_flags: 0,
-            formats_csv: [0u8; 512],
+            formats_csv: [0u8; 4096],
         }
     }
 
