@@ -10,6 +10,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -144,6 +145,11 @@ public partial class MainWindow : Window
         QuickScanCandidateRow Directory,
         IReadOnlyList<QuickScanCandidateRow> Children);
 
+    private sealed record EncryptedUnlockRequest(
+        string Provider,
+        string CredentialKind,
+        string CredentialMaterial);
+
     private readonly IDeviceEnumerationService _deviceEnumerationService;
     private readonly SourceDestinationSafetyValidator _safetyValidator;
     private readonly IPrivilegeService _privilegeService;
@@ -175,6 +181,13 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _refreshCts;
     private CancellationTokenSource? _operationCts;
     private Guid? _activeSessionId;
+    private string _activeSessionSourceClass = SessionSourceClass.Local;
+    private string? _activeSignaturePackSet;
+    private string? _activeCustodyHashChainRef;
+    private RemoteExecutionStatus _lastRemoteExecutionStatus = RemoteExecutionStatus.NotRequested;
+    private RemoteExecutionErrorCode _lastRemoteExecutionErrorCode = RemoteExecutionErrorCode.None;
+    private string? _lastRemoteExecutionMessage;
+    private string? _lastRemoteExecutionIntegrityHash;
     private bool _isElevated;
     private bool _elevationWarningLogged;
     private bool _filterDeletedOnly;
@@ -401,6 +414,7 @@ public partial class MainWindow : Window
             SessionMaintenanceButton.IsEnabled = false;
             RemoteAgentModeComboBox.IsEnabled = false;
             RemoteAgentEndpointTextBox.IsEnabled = false;
+            RaidMemberSourcesTextBox.IsEnabled = false;
             AppendSessionMessage("WinPE mode active: network source intake disabled; using offline scan/recovery flow.");
             return;
         }
@@ -417,6 +431,7 @@ public partial class MainWindow : Window
         SessionMaintenanceButton.IsEnabled = true;
         RemoteAgentModeComboBox.IsEnabled = true;
         RemoteAgentEndpointTextBox.IsEnabled = true;
+        RaidMemberSourcesTextBox.IsEnabled = true;
     }
 
     private bool TryValidateWinPeOfflineReadiness(
@@ -665,6 +680,10 @@ public partial class MainWindow : Window
             AppendSessionMessage(
                 $"Image acquisition completed ({result.BytesWritten:N0} bytes, SHA256 {result.SourceSha256Hex[..16]}..., resumed={result.Resumed}, read-errors={result.ReadErrorChunks}, zero-filled={result.ZeroFilledBytes:N0} bytes, policy={result.ReadErrorPolicy}).");
             AppendSessionMessage($"Image acquisition state log: {result.StateLogPath}");
+            _lastRemoteExecutionStatus = result.RemoteExecutionStatus;
+            _lastRemoteExecutionErrorCode = result.RemoteExecutionErrorCode;
+            _lastRemoteExecutionMessage = result.RemoteExecutionMessage;
+            _lastRemoteExecutionIntegrityHash = result.RemoteExecutionIntegrityHash;
             if (result.SourceIsNetwork)
             {
                 var throughputCap = result.MaxNetworkThroughputBytesPerSecond.HasValue
@@ -672,6 +691,11 @@ public partial class MainWindow : Window
                     : "none";
                 AppendSessionMessage(
                     $"Network acquisition details: constrained={result.ConstrainedNetworkIo}, cap={throughputCap}, remote-agent={result.RemoteAgentMode}, endpoint={result.RemoteAgentEndpoint ?? "n/a"}, checkpoints={result.NetworkCheckpointCount}.");
+                if (result.RemoteAgentMode != RemoteAgentMode.Disabled)
+                {
+                    AppendSessionMessage(
+                        $"Remote execution: status={result.RemoteExecutionStatus}, error={result.RemoteExecutionErrorCode}, message={result.RemoteExecutionMessage ?? "n/a"}, integrity={result.RemoteExecutionIntegrityHash ?? "n/a"}.");
+                }
                 if (!string.IsNullOrWhiteSpace(result.ChainOfCustodyLogPath))
                 {
                     AppendSessionMessage($"Network chain-of-custody log: {result.ChainOfCustodyLogPath}");
@@ -770,6 +794,8 @@ public partial class MainWindow : Window
         var scanMode = ScanModeComboBox.SelectedItem is ScanMode mode ? mode : ScanMode.Quick;
         var quickScanMaxRecords = GetQuickScanMaxRecords();
         var candidateCapacity = GetCandidateCapacity();
+        var remoteAgentRequested = (RemoteAgentModeComboBox.SelectedItem is RemoteAgentMode remoteMode)
+            && remoteMode != RemoteAgentMode.Disabled;
         if (!TryBuildRaidManualOverride(out var raidManualOverride, out var raidOverrideMessage))
         {
             StatusTextBlock.Text = "Session blocked by invalid RAID override settings";
@@ -777,7 +803,19 @@ public partial class MainWindow : Window
             AppendSessionMessage($"RAID override parse error: {raidOverrideMessage}");
             return;
         }
+        if (!TryParseRaidMemberSourcePaths(out var raidMemberSourcePaths, out var raidMemberSourceMessage))
+        {
+            StatusTextBlock.Text = "Session blocked by invalid RAID member source list";
+            _validationOutput.Add($"Error: {raidMemberSourceMessage}");
+            AppendSessionMessage($"RAID member source parse error: {raidMemberSourceMessage}");
+            return;
+        }
         Guid? sessionId = null;
+        var openedRaidMemberSessionIds = new List<ulong>();
+        var activeEngineSessionId = 0UL;
+        var activeEngineSessionSizeBytes = 0UL;
+        var usingVirtualRaidSession = false;
+        var encryptedSourceUnlocked = false;
 
         if (!ConfirmImageFirstRecommendation(selectedSource, "session initialization"))
         {
@@ -797,6 +835,14 @@ public partial class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(probePath))
             {
                 operationToken.ThrowIfCancellationRequested();
+                var encryptedPreparation = PrepareEncryptedSourceForSession(selectedSource, probePath);
+                if (!encryptedPreparation.ContinueSession)
+                {
+                    StatusTextBlock.Text = "Session blocked by encrypted-source unlock requirements";
+                    return;
+                }
+
+                encryptedSourceUnlocked = encryptedPreparation.Unlocked;
                 var open = NativeEngineProbe.OpenSourceReadOnlySession(probePath, selectedSource.Kind);
                 AppendSessionMessage(
                     $"Engine session open: {open.Message} (status {open.StatusCode}, alignment {open.AlignmentBytes}).");
@@ -816,10 +862,59 @@ public partial class MainWindow : Window
                 {
                     try
                     {
+                        activeEngineSessionId = open.SessionId;
+                        activeEngineSessionSizeBytes = open.SizeBytes;
+
+                        if (raidMemberSourcePaths.Count > 0)
+                        {
+                            AppendSessionMessage(
+                                $"RAID member source override enabled: assembling from {raidMemberSourcePaths.Count} member source(s).");
+
+                            foreach (var memberPath in raidMemberSourcePaths)
+                            {
+                                operationToken.ThrowIfCancellationRequested();
+                                var memberKind = InferSourceKindFromPath(memberPath);
+                                var memberOpen = NativeEngineProbe.OpenSourceReadOnlySession(memberPath, memberKind);
+                                AppendSessionMessage(
+                                    $"RAID member session open: path={memberPath}, kind={memberKind}, message={memberOpen.Message} (status {memberOpen.StatusCode}).");
+
+                                if (!memberOpen.EngineAvailable || !memberOpen.Opened)
+                                {
+                                    _validationOutput.Add($"Error: RAID member open failed for '{memberPath}' ({memberOpen.Message}).");
+                                    StatusTextBlock.Text = "Session blocked by RAID member open failure";
+                                    return;
+                                }
+
+                                openedRaidMemberSessionIds.Add(memberOpen.SessionId);
+                            }
+
+                            operationToken.ThrowIfCancellationRequested();
+                            var virtualOpen = NativeEngineProbe.OpenVirtualRaidSession(openedRaidMemberSessionIds, raidManualOverride);
+                            AppendSessionMessage(
+                                $"Virtual RAID assembly: {virtualOpen.Message} (status {virtualOpen.StatusCode}).");
+
+                            if (!virtualOpen.EngineAvailable || !virtualOpen.Success || virtualOpen.Metadata is null)
+                            {
+                                _validationOutput.Add($"Error: Virtual RAID assembly failed ({virtualOpen.Message}).");
+                                StatusTextBlock.Text = "Session blocked by RAID virtual assembly";
+                                return;
+                            }
+
+                            usingVirtualRaidSession = true;
+                            activeEngineSessionId = virtualOpen.SessionId;
+                            activeEngineSessionSizeBytes = virtualOpen.SizeBytes;
+                            var metadata = virtualOpen.Metadata;
+                            var orderSummary = metadata.DiskOrder.Count == 0
+                                ? "(none)"
+                                : string.Join(",", metadata.DiskOrder.Select(value => value.ToString(CultureInfo.InvariantCulture)));
+                            AppendSessionMessage(
+                                $"Virtual RAID layout details: family={metadata.MetadataFamily}, level={metadata.Level}, members={metadata.MemberCount}, stripe={metadata.StripeSizeBytes}, offset={metadata.DataOffsetBytes}, parity={metadata.ParityRotation}, confidence={metadata.ConfidenceScore}, order={orderSummary}.");
+                        }
+
                         operationToken.ThrowIfCancellationRequested();
                         var preflightBufferSize = GetAlignedBufferLength(open.AlignmentBytes, 4096);
                         var preflightBuffer = new byte[preflightBufferSize];
-                        var read = NativeEngineProbe.ReadSourceSessionChunk(open.SessionId, 0, preflightBuffer);
+                        var read = NativeEngineProbe.ReadSourceSessionChunk(activeEngineSessionId, 0, preflightBuffer);
                         AppendSessionMessage($"Engine preflight read: {read.Message} (status {read.StatusCode}, bytes {read.BytesRead}).");
 
                         if (!read.Success)
@@ -830,8 +925,18 @@ public partial class MainWindow : Window
                         }
 
                         operationToken.ThrowIfCancellationRequested();
-                        var raidProbe = NativeEngineProbe.ProbeRaidLayoutFromSession(open.SessionId, raidManualOverride);
-                        AppendSessionMessage($"RAID layout probe: {raidProbe.Message} (status {raidProbe.StatusCode}).");
+                        EngineRaidLayoutProbeResult raidProbe;
+                        if (usingVirtualRaidSession)
+                        {
+                            raidProbe = NativeEngineProbe.ProbeVirtualRaidSession(activeEngineSessionId);
+                            AppendSessionMessage($"Virtual RAID layout probe: {raidProbe.Message} (status {raidProbe.StatusCode}).");
+                        }
+                        else
+                        {
+                            raidProbe = NativeEngineProbe.ProbeRaidLayoutFromSession(activeEngineSessionId, raidManualOverride);
+                            AppendSessionMessage($"RAID layout probe: {raidProbe.Message} (status {raidProbe.StatusCode}).");
+                        }
+
                         if (raidProbe.Success && raidProbe.Metadata is not null)
                         {
                             var metadata = raidProbe.Metadata;
@@ -865,7 +970,7 @@ public partial class MainWindow : Window
 
                         operationToken.ThrowIfCancellationRequested();
                         var quickScanLoaded = false;
-                        var ntfsBoot = NativeEngineProbe.ProbeNtfsBootFromSession(open.SessionId);
+                        var ntfsBoot = NativeEngineProbe.ProbeNtfsBootFromSession(activeEngineSessionId);
                         AppendSessionMessage($"NTFS boot probe: {ntfsBoot.Message} (status {ntfsBoot.StatusCode}).");
 
                         if (ntfsBoot.Success && ntfsBoot.Metadata is not null)
@@ -875,7 +980,7 @@ public partial class MainWindow : Window
                                 $"NTFS boot details: sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, MFT offset={metadata.MftOffsetBytes}.");
 
                             operationToken.ThrowIfCancellationRequested();
-                            var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(open.SessionId, maxRecords: checked((uint)quickScanMaxRecords));
+                            var quickScan = NativeEngineProbe.QuickScanNtfsFromSession(activeEngineSessionId, maxRecords: checked((uint)quickScanMaxRecords));
                             AppendSessionMessage(
                 $"NTFS quick scan: {quickScan.Message} (status {quickScan.StatusCode}, parsed={quickScan.ParsedRecords}, failures={quickScan.ParseFailures}, deleted={quickScan.DeletedRecords}, dirs={quickScan.DirectoryRecords}, named={quickScan.NamedRecords}, resident={quickScan.ResidentAttributeCount}, nonresident={quickScan.NonResidentAttributeCount}, nonresident-data={quickScan.RecordsWithNonResidentData}).");
                             AppendSessionMessage(
@@ -885,7 +990,7 @@ public partial class MainWindow : Window
                             {
                                 operationToken.ThrowIfCancellationRequested();
                                 var candidateResult = NativeEngineProbe.GetNtfsQuickScanCandidatesFromSession(
-                                    open.SessionId,
+                                    activeEngineSessionId,
                                     maxRecords: checked((uint)quickScanMaxRecords),
                                     candidateCapacity: candidateCapacity);
 
@@ -898,7 +1003,7 @@ public partial class MainWindow : Window
                         else
                         {
                             operationToken.ThrowIfCancellationRequested();
-                            var refsBoot = NativeEngineProbe.ProbeRefsBootFromSession(open.SessionId);
+                            var refsBoot = NativeEngineProbe.ProbeRefsBootFromSession(activeEngineSessionId);
                             AppendSessionMessage($"ReFS boot probe: {refsBoot.Message} (status {refsBoot.StatusCode}).");
                             if (refsBoot.Success && refsBoot.Metadata is not null)
                             {
@@ -906,7 +1011,7 @@ public partial class MainWindow : Window
                                 AppendSessionMessage(
                                     $"ReFS boot details: sector={metadata.BytesPerSector}, cluster={metadata.ClusterSizeBytes}, total-sectors={metadata.TotalSectors}, volume-bytes={metadata.VolumeSizeBytes}, serial=0x{metadata.VolumeSerial:X16}.");
                                 var refsCandidates = NativeEngineProbe.GetRefsDeletedCandidatesFromSession(
-                                    open.SessionId,
+                                    activeEngineSessionId,
                                     maxEntries: checked((uint)quickScanMaxRecords),
                                     candidateCapacity: candidateCapacity);
                                 AppendSessionMessage(
@@ -919,7 +1024,7 @@ public partial class MainWindow : Window
                             else
                             {
                                 operationToken.ThrowIfCancellationRequested();
-                                var extSuperblock = NativeEngineProbe.ProbeExtSuperblockFromSession(open.SessionId);
+                                var extSuperblock = NativeEngineProbe.ProbeExtSuperblockFromSession(activeEngineSessionId);
                                 AppendSessionMessage($"ext superblock probe: {extSuperblock.Message} (status {extSuperblock.StatusCode}).");
                                 if (extSuperblock.Success && extSuperblock.Metadata is not null)
                                 {
@@ -929,7 +1034,7 @@ public partial class MainWindow : Window
 
                                     operationToken.ThrowIfCancellationRequested();
                                     var extCandidates = NativeEngineProbe.GetExtDeletedCandidatesFromSession(
-                                        open.SessionId,
+                                        activeEngineSessionId,
                                         maxEntries: checked((uint)quickScanMaxRecords),
                                         candidateCapacity: candidateCapacity);
                                     AppendSessionMessage(
@@ -940,7 +1045,7 @@ public partial class MainWindow : Window
                                 else
                                 {
                                     operationToken.ThrowIfCancellationRequested();
-                                    var xfsSuperblock = NativeEngineProbe.ProbeXfsSuperblockFromSession(open.SessionId);
+                                    var xfsSuperblock = NativeEngineProbe.ProbeXfsSuperblockFromSession(activeEngineSessionId);
                                     AppendSessionMessage($"XFS superblock probe: {xfsSuperblock.Message} (status {xfsSuperblock.StatusCode}).");
                                     if (xfsSuperblock.Success && xfsSuperblock.Metadata is not null)
                                     {
@@ -950,7 +1055,7 @@ public partial class MainWindow : Window
 
                                         operationToken.ThrowIfCancellationRequested();
                                         var xfsCandidates = NativeEngineProbe.GetXfsDeletedCandidatesFromSession(
-                                            open.SessionId,
+                                            activeEngineSessionId,
                                             maxEntries: checked((uint)quickScanMaxRecords),
                                             candidateCapacity: candidateCapacity);
                                         AppendSessionMessage(
@@ -961,7 +1066,7 @@ public partial class MainWindow : Window
                                     else
                                     {
                                         operationToken.ThrowIfCancellationRequested();
-                                        var ufsSuperblock = NativeEngineProbe.ProbeUfsSuperblockFromSession(open.SessionId);
+                                        var ufsSuperblock = NativeEngineProbe.ProbeUfsSuperblockFromSession(activeEngineSessionId);
                                         AppendSessionMessage($"UFS superblock probe: {ufsSuperblock.Message} (status {ufsSuperblock.StatusCode}).");
                                         if (ufsSuperblock.Success && ufsSuperblock.Metadata is not null)
                                         {
@@ -971,7 +1076,7 @@ public partial class MainWindow : Window
 
                                             operationToken.ThrowIfCancellationRequested();
                                             var ufsCandidates = NativeEngineProbe.GetUfsDeletedCandidatesFromSession(
-                                                open.SessionId,
+                                                activeEngineSessionId,
                                                 maxEntries: checked((uint)quickScanMaxRecords),
                                                 candidateCapacity: candidateCapacity);
                                             AppendSessionMessage(
@@ -982,7 +1087,7 @@ public partial class MainWindow : Window
                                         else
                                         {
                                             operationToken.ThrowIfCancellationRequested();
-                                            var apfsContainer = NativeEngineProbe.ProbeApfsContainerFromSession(open.SessionId);
+                                            var apfsContainer = NativeEngineProbe.ProbeApfsContainerFromSession(activeEngineSessionId);
                                             AppendSessionMessage($"APFS container probe: {apfsContainer.Message} (status {apfsContainer.StatusCode}).");
                                             if (apfsContainer.Success && apfsContainer.Metadata is not null)
                                             {
@@ -992,7 +1097,7 @@ public partial class MainWindow : Window
 
                                                 operationToken.ThrowIfCancellationRequested();
                                                 var apfsCandidates = NativeEngineProbe.GetApfsDeletedCandidatesFromSession(
-                                                    open.SessionId,
+                                                    activeEngineSessionId,
                                                     maxEntries: checked((uint)quickScanMaxRecords),
                                                     candidateCapacity: candidateCapacity);
                                                 AppendSessionMessage(
@@ -1003,7 +1108,7 @@ public partial class MainWindow : Window
                                             else
                                             {
                                                 operationToken.ThrowIfCancellationRequested();
-                                                var hfsVolume = NativeEngineProbe.ProbeHfsVolumeHeaderFromSession(open.SessionId);
+                                                var hfsVolume = NativeEngineProbe.ProbeHfsVolumeHeaderFromSession(activeEngineSessionId);
                                                 AppendSessionMessage($"HFS+ volume probe: {hfsVolume.Message} (status {hfsVolume.StatusCode}).");
                                                 if (hfsVolume.Success && hfsVolume.Metadata is not null)
                                                 {
@@ -1013,7 +1118,7 @@ public partial class MainWindow : Window
 
                                                     operationToken.ThrowIfCancellationRequested();
                                                     var hfsCandidates = NativeEngineProbe.GetHfsDeletedCandidatesFromSession(
-                                                        open.SessionId,
+                                                        activeEngineSessionId,
                                                         maxEntries: checked((uint)quickScanMaxRecords),
                                                         candidateCapacity: candidateCapacity);
                                                     AppendSessionMessage(
@@ -1024,7 +1129,7 @@ public partial class MainWindow : Window
                                                 else
                                                 {
                                                     operationToken.ThrowIfCancellationRequested();
-                                                    var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(open.SessionId);
+                                                    var fatBoot = NativeEngineProbe.ProbeFatBootFromSession(activeEngineSessionId);
                                                     AppendSessionMessage($"FAT boot probe: {fatBoot.Message} (status {fatBoot.StatusCode}).");
                                                     if (fatBoot.Success && fatBoot.Metadata is not null)
                                                     {
@@ -1034,7 +1139,7 @@ public partial class MainWindow : Window
 
                                                         operationToken.ThrowIfCancellationRequested();
                                                         var fatCandidates = NativeEngineProbe.GetFatDeletedCandidatesFromSession(
-                                                            open.SessionId,
+                                                            activeEngineSessionId,
                                                             maxEntries: checked((uint)quickScanMaxRecords),
                                                             candidateCapacity: candidateCapacity);
                                                         AppendSessionMessage(
@@ -1067,8 +1172,8 @@ public partial class MainWindow : Window
                             }
 
                             var carveResult = RunStreamingCarveScan(
-                                open.SessionId,
-                                open.SizeBytes,
+                                activeEngineSessionId,
+                                activeEngineSessionSizeBytes,
                                 familyFlags,
                                 candidateCapacity: Math.Max(candidateCapacity, 256),
                                 operationToken);
@@ -1084,6 +1189,19 @@ public partial class MainWindow : Window
                     }
                     finally
                     {
+                        if (usingVirtualRaidSession)
+                        {
+                            var closeVirtualStatus = NativeEngineProbe.CloseVirtualRaidSession(activeEngineSessionId);
+                            AppendSessionMessage($"Virtual RAID session close status: {closeVirtualStatus}");
+                        }
+
+                        foreach (var memberSessionId in openedRaidMemberSessionIds.Distinct())
+                        {
+                            var memberCloseStatus = NativeEngineProbe.CloseSourceSession(memberSessionId);
+                            AppendSessionMessage(
+                                $"RAID member session close status: id={memberSessionId}, status={memberCloseStatus}");
+                        }
+
                         var closeStatus = NativeEngineProbe.CloseSourceSession(open.SessionId);
                         AppendSessionMessage($"Engine session close status: {closeStatus}");
                     }
@@ -1091,17 +1209,32 @@ public partial class MainWindow : Window
             }
 
             operationToken.ThrowIfCancellationRequested();
+            var sessionSourceClass = ResolveSessionSourceClass(
+                usingVirtualRaidSession,
+                encryptedSourceUnlocked,
+                remoteAgentRequested);
+            var signaturePackSet = BuildSessionSignaturePackSet(scanMode);
+            var custodyHashChainRef = await BuildSessionCustodyHashChainReferenceAsync(operationToken);
             sessionId = await _sessionStore.CreateSessionAsync(
                 selectedSource,
                 DestinationPathTextBox.Text,
                 scanMode,
+                sessionSourceClass,
+                signaturePackSet,
+                custodyHashChainRef,
                 operationToken);
             _activeSessionId = sessionId.Value;
+            _activeSessionSourceClass = sessionSourceClass;
+            _activeSignaturePackSet = signaturePackSet;
+            _activeCustodyHashChainRef = custodyHashChainRef;
 
             await _sessionLogWriter.CreateSessionLogsAsync(sessionId.Value, operationToken);
             await _sessionLogWriter.LogEventAsync(sessionId.Value, "session_initialized", new
             {
                 source_id = selectedSource.Id,
+                source_class = sessionSourceClass,
+                signature_pack_set = signaturePackSet,
+                custody_hash_chain_ref = custodyHashChainRef,
                 source_kind = selectedSource.Kind.ToString(),
                 source_is_network = selectedSource.IsNetworkSource,
                 source_network_protocol = selectedSource.NetworkProtocol,
@@ -1834,6 +1967,92 @@ public partial class MainWindow : Window
         return flags;
     }
 
+    private string BuildSessionSignaturePackSet(ScanMode scanMode)
+    {
+        if (scanMode != ScanMode.Full)
+        {
+            return "pack=none;families=none";
+        }
+
+        var signaturePack = NativeEngineProbe.GetCarveSignaturePackMetadata();
+        var packName = "core-signatures";
+        var packVersion = "unknown";
+        if (signaturePack.Success && signaturePack.Metadata is not null)
+        {
+            packName = string.IsNullOrWhiteSpace(signaturePack.Metadata.PackName)
+                ? packName
+                : signaturePack.Metadata.PackName;
+            packVersion = string.IsNullOrWhiteSpace(signaturePack.Metadata.PackVersion)
+                ? packVersion
+                : signaturePack.Metadata.PackVersion;
+        }
+
+        var families = string.Join("|", DescribeCarveFamilies(BuildSelectedCarveFamilyFlags()));
+        return $"pack={packName}@{packVersion};families={families}";
+    }
+
+    private static IReadOnlyList<string> DescribeCarveFamilies(uint flags)
+    {
+        var labels = new List<string>();
+        if ((flags & NativeEngineProbe.CarveFamilyImages) != 0)
+        {
+            labels.Add("images");
+        }
+        if ((flags & NativeEngineProbe.CarveFamilyDocuments) != 0)
+        {
+            labels.Add("documents");
+        }
+        if ((flags & NativeEngineProbe.CarveFamilyArchives) != 0)
+        {
+            labels.Add("archives");
+        }
+        if ((flags & NativeEngineProbe.CarveFamilyOffice) != 0)
+        {
+            labels.Add("office");
+        }
+        if ((flags & NativeEngineProbe.CarveFamilyMedia) != 0)
+        {
+            labels.Add("media");
+        }
+
+        return labels.Count == 0 ? ["none"] : labels;
+    }
+
+    private async Task<string?> BuildSessionCustodyHashChainReferenceAsync(CancellationToken cancellationToken)
+    {
+        var chainPath = ChainOfCustodyLogPathTextBox.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(chainPath))
+        {
+            return null;
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(chainPath);
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            return $"jsonl-path:{fullPath}";
+        }
+
+        await using var stream = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            bufferSize: 128 * 1024,
+            useAsync: true);
+        var hashBytes = await SHA256.HashDataAsync(stream, cancellationToken);
+        var hashHex = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        return $"jsonl-sha256:{hashHex};path={fullPath}";
+    }
+
     private static EngineCarveCandidatesResult RunStreamingCarveScan(
         ulong sessionId,
         ulong sourceSizeBytes,
@@ -2369,6 +2588,77 @@ public partial class MainWindow : Window
             ParityRotation: parityValue,
             DiskOrder: diskOrder);
         return true;
+    }
+
+    private bool TryParseRaidMemberSourcePaths(
+        out IReadOnlyList<string> paths,
+        out string errorMessage)
+    {
+        paths = Array.Empty<string>();
+        errorMessage = string.Empty;
+
+        var raw = RaidMemberSourcesTextBox.Text;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return true;
+        }
+
+        var tokens = raw
+            .Split(new[] { '\r', '\n', ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => value.Trim())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+
+        if (tokens.Count < 2)
+        {
+            errorMessage = "RAID member sources must include at least 2 paths.";
+            return false;
+        }
+
+        var normalized = new List<string>(tokens.Count);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in tokens)
+        {
+            try
+            {
+                var fullPath = Path.GetFullPath(token);
+                if (!seen.Add(fullPath))
+                {
+                    continue;
+                }
+
+                normalized.Add(fullPath);
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"Invalid RAID member source path '{token}': {ex.Message}";
+                return false;
+            }
+        }
+
+        if (normalized.Count < 2)
+        {
+            errorMessage = "RAID member sources must resolve to at least 2 unique paths.";
+            return false;
+        }
+
+        paths = normalized;
+        return true;
+    }
+
+    private static RecoverySourceKind InferSourceKindFromPath(string sourcePath)
+    {
+        if (sourcePath.StartsWith(@"\\.\PHYSICALDRIVE", StringComparison.OrdinalIgnoreCase))
+        {
+            return RecoverySourceKind.PhysicalDisk;
+        }
+
+        if (sourcePath.StartsWith(@"\\?\Volume{", StringComparison.OrdinalIgnoreCase))
+        {
+            return RecoverySourceKind.Volume;
+        }
+
+        return RecoverySourceKind.ImageFile;
     }
 
     private static string? NormalizeRaidLevel(string? value)
@@ -3069,6 +3359,13 @@ public partial class MainWindow : Window
         }
 
         _activeSessionId = latest.SessionId;
+        _activeSessionSourceClass = latest.SourceClass;
+        _activeSignaturePackSet = latest.SignaturePackSet;
+        _activeCustodyHashChainRef = latest.CustodyHashChainRef;
+        _lastRemoteExecutionStatus = RemoteExecutionStatus.NotRequested;
+        _lastRemoteExecutionErrorCode = RemoteExecutionErrorCode.None;
+        _lastRemoteExecutionMessage = null;
+        _lastRemoteExecutionIntegrityHash = null;
         RenderQuickScanCandidates(persisted);
         AppendSessionMessage($"Loaded {persisted.Count} persisted quick-scan candidates from session {latest.SessionId:D}.");
     }
@@ -3092,6 +3389,13 @@ public partial class MainWindow : Window
             }
 
             _activeSessionId = latest.SessionId;
+            _activeSessionSourceClass = latest.SourceClass;
+            _activeSignaturePackSet = latest.SignaturePackSet;
+            _activeCustodyHashChainRef = latest.CustodyHashChainRef;
+            _lastRemoteExecutionStatus = RemoteExecutionStatus.NotRequested;
+            _lastRemoteExecutionErrorCode = RemoteExecutionErrorCode.None;
+            _lastRemoteExecutionMessage = null;
+            _lastRemoteExecutionIntegrityHash = null;
             DestinationPathTextBox.Text = latest.DestinationPath;
             ScanModeComboBox.SelectedItem = latest.ScanMode;
 
@@ -4189,6 +4493,13 @@ public partial class MainWindow : Window
         builder.AppendLine($"- Session ID: `{sessionId:D}`");
         builder.AppendLine($"- Generated UTC: `{DateTimeOffset.UtcNow:O}`");
         builder.AppendLine($"- Source: `{_selectedSource?.DisplayName ?? "(unknown)"}`");
+        builder.AppendLine($"- Source Class: `{_activeSessionSourceClass}`");
+        builder.AppendLine($"- Signature Packs: `{_activeSignaturePackSet ?? "unknown"}`");
+        builder.AppendLine($"- Custody Hash Chain Ref: `{_activeCustodyHashChainRef ?? "none"}`");
+        builder.AppendLine($"- Remote Execution Status: `{_lastRemoteExecutionStatus}`");
+        builder.AppendLine($"- Remote Execution Error: `{_lastRemoteExecutionErrorCode}`");
+        builder.AppendLine($"- Remote Execution Message: `{_lastRemoteExecutionMessage ?? "n/a"}`");
+        builder.AppendLine($"- Remote Execution Integrity: `{_lastRemoteExecutionIntegrityHash ?? "n/a"}`");
         builder.AppendLine($"- Destination Root: `{recoveryRoot}`");
         builder.AppendLine($"- Selected Candidates: `{selected.Count}`");
         builder.AppendLine($"- Clusters: `{selected.Select(candidate => candidate.ClusterId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).Count()}`");
@@ -5522,6 +5833,260 @@ public partial class MainWindow : Window
         _validationOutput.Add($"Warning: {warningMessage}");
         AppendSessionMessage($"Safety warning: {warningMessage}");
         _elevationWarningLogged = true;
+    }
+
+    private (bool ContinueSession, bool Unlocked) PrepareEncryptedSourceForSession(
+        SourceCandidate source,
+        string probePath)
+    {
+        var encryptedSources = NativeEngineProbe.ListEncryptedSources(probePath, source.Kind);
+        if (encryptedSources.EngineAvailable && encryptedSources.Success)
+        {
+            var locked = encryptedSources.Sources.Where(item => item.Locked).ToArray();
+            if (locked.Length == 0)
+            {
+                return (true, false);
+            }
+
+            var providers = string.Join(
+                ", ",
+                locked.Select(item => item.Provider).Distinct(StringComparer.OrdinalIgnoreCase));
+            AppendSessionMessage(
+                $"Encrypted source detected and locked (providers: {providers}). Explicit unlock required before scan.");
+
+            var defaultProvider = locked.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Provider))?.Provider ?? GuessEncryptedProvider(source);
+            var request = PromptEncryptedUnlockRequest(source, defaultProvider);
+            if (request is null)
+            {
+                _validationOutput.Add("Error: Encrypted source remains locked. Unlock flow was canceled.");
+                AppendSessionMessage("Encrypted unlock flow canceled by operator.");
+                return (false, false);
+            }
+
+            var unlockResult = NativeEngineProbe.UnlockEncryptedSource(
+                probePath,
+                source.Kind,
+                request.Provider,
+                request.CredentialKind,
+                request.CredentialMaterial);
+            AppendSessionMessage(
+                $"Encrypted source unlock: {unlockResult.Message} (status {unlockResult.StatusCode}, provider={unlockResult.Provider}).");
+
+            if (!unlockResult.EngineAvailable || !unlockResult.Success || !unlockResult.Unlocked)
+            {
+                _validationOutput.Add("Error: Encrypted source unlock failed. Verify provider and credential material.");
+                return (false, false);
+            }
+
+            return (true, true);
+        }
+
+        if (LooksLikeEncryptedSource(source))
+        {
+            var warning = encryptedSources.EngineAvailable
+                ? $"Encrypted source hint detected ({source.FileSystem ?? "unknown"}), but engine did not expose lock metadata ({encryptedSources.Message})."
+                : $"Encrypted source hint detected ({source.FileSystem ?? "unknown"}), but encrypted-source API is unavailable ({encryptedSources.Message}).";
+            _validationOutput.Add($"Warning: {warning}");
+            AppendSessionMessage($"Encryption warning: {warning}");
+        }
+
+        return (true, false);
+    }
+
+    private EncryptedUnlockRequest? PromptEncryptedUnlockRequest(SourceCandidate source, string defaultProvider)
+    {
+        var dialog = new Window
+        {
+            Title = "Unlock Encrypted Source",
+            Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            MinWidth = 520,
+            MinHeight = 280,
+        };
+
+        var root = new System.Windows.Controls.Grid
+        {
+            Margin = new System.Windows.Thickness(14),
+        };
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+        root.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(170) });
+        root.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(320) });
+
+        var sourceLabel = new System.Windows.Controls.TextBlock
+        {
+            Text = $"Source: {source.DisplayName}",
+            FontWeight = System.Windows.FontWeights.SemiBold,
+            Margin = new System.Windows.Thickness(0, 0, 0, 8),
+            TextWrapping = System.Windows.TextWrapping.Wrap,
+        };
+        System.Windows.Controls.Grid.SetRow(sourceLabel, 0);
+        System.Windows.Controls.Grid.SetColumnSpan(sourceLabel, 2);
+        root.Children.Add(sourceLabel);
+
+        var help = new System.Windows.Controls.TextBlock
+        {
+            Text = "Provide unlock material for encrypted source access. Credentials are used in-memory only and not written to logs or session database.",
+            Margin = new System.Windows.Thickness(0, 0, 0, 10),
+            TextWrapping = System.Windows.TextWrapping.Wrap,
+        };
+        System.Windows.Controls.Grid.SetRow(help, 1);
+        System.Windows.Controls.Grid.SetColumnSpan(help, 2);
+        root.Children.Add(help);
+
+        var providerLabel = new System.Windows.Controls.TextBlock { Text = "Provider", VerticalAlignment = System.Windows.VerticalAlignment.Center };
+        System.Windows.Controls.Grid.SetRow(providerLabel, 2);
+        root.Children.Add(providerLabel);
+
+        var providerBox = new System.Windows.Controls.ComboBox { Margin = new System.Windows.Thickness(8, 0, 0, 8) };
+        providerBox.ItemsSource = new[] { "auto", "bitlocker", "filevault", "luks" };
+        providerBox.SelectedItem = MapProviderForPrompt(defaultProvider);
+        System.Windows.Controls.Grid.SetRow(providerBox, 2);
+        System.Windows.Controls.Grid.SetColumn(providerBox, 1);
+        root.Children.Add(providerBox);
+
+        var kindLabel = new System.Windows.Controls.TextBlock { Text = "Credential Type", VerticalAlignment = System.Windows.VerticalAlignment.Center };
+        System.Windows.Controls.Grid.SetRow(kindLabel, 3);
+        root.Children.Add(kindLabel);
+
+        var kindBox = new System.Windows.Controls.ComboBox { Margin = new System.Windows.Thickness(8, 0, 0, 8) };
+        kindBox.ItemsSource = new[] { "password", "recovery_key", "key_file" };
+        kindBox.SelectedItem = "password";
+        System.Windows.Controls.Grid.SetRow(kindBox, 3);
+        System.Windows.Controls.Grid.SetColumn(kindBox, 1);
+        root.Children.Add(kindBox);
+
+        var materialLabel = new System.Windows.Controls.TextBlock { Text = "Credential Material", VerticalAlignment = System.Windows.VerticalAlignment.Center };
+        System.Windows.Controls.Grid.SetRow(materialLabel, 4);
+        root.Children.Add(materialLabel);
+
+        var materialBox = new System.Windows.Controls.PasswordBox { Margin = new System.Windows.Thickness(8, 0, 0, 12) };
+        System.Windows.Controls.Grid.SetRow(materialBox, 4);
+        System.Windows.Controls.Grid.SetColumn(materialBox, 1);
+        root.Children.Add(materialBox);
+
+        EncryptedUnlockRequest? request = null;
+
+        var buttonPanel = new System.Windows.Controls.StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+        };
+        var cancelButton = new System.Windows.Controls.Button
+        {
+            Content = "Cancel",
+            Width = 90,
+            Margin = new System.Windows.Thickness(0, 0, 8, 0),
+            IsCancel = true,
+        };
+        var unlockButton = new System.Windows.Controls.Button
+        {
+            Content = "Unlock",
+            Width = 90,
+            IsDefault = true,
+        };
+        unlockButton.Click += (_, _) =>
+        {
+            var provider = (providerBox.SelectedItem as string ?? "auto").Trim().ToLowerInvariant();
+            var credentialKind = (kindBox.SelectedItem as string ?? "password").Trim().ToLowerInvariant();
+            var credentialMaterial = materialBox.Password?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(credentialMaterial))
+            {
+                System.Windows.MessageBox.Show(
+                    dialog,
+                    "Credential material is required to unlock encrypted sources.",
+                    "Unlock Required",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            request = new EncryptedUnlockRequest(provider, credentialKind, credentialMaterial);
+            dialog.DialogResult = true;
+            dialog.Close();
+        };
+
+        buttonPanel.Children.Add(cancelButton);
+        buttonPanel.Children.Add(unlockButton);
+        System.Windows.Controls.Grid.SetRow(buttonPanel, 5);
+        System.Windows.Controls.Grid.SetColumnSpan(buttonPanel, 2);
+        root.Children.Add(buttonPanel);
+
+        dialog.Content = root;
+        var accepted = dialog.ShowDialog();
+        return accepted == true ? request : null;
+    }
+
+    private static string MapProviderForPrompt(string provider)
+    {
+        return provider.Trim().ToLowerInvariant() switch
+        {
+            "bitlocker" => "bitlocker",
+            "filevault" => "filevault",
+            "luks" => "luks",
+            _ => "auto",
+        };
+    }
+
+    private static bool LooksLikeEncryptedSource(SourceCandidate source)
+    {
+        var hint = $"{source.FileSystem} {source.DisplayName}";
+        return hint.Contains("bitlocker", StringComparison.OrdinalIgnoreCase)
+            || hint.Contains("filevault", StringComparison.OrdinalIgnoreCase)
+            || hint.Contains("apfs encrypted", StringComparison.OrdinalIgnoreCase)
+            || hint.Contains("luks", StringComparison.OrdinalIgnoreCase)
+            || hint.Contains("encrypted", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GuessEncryptedProvider(SourceCandidate source)
+    {
+        var hint = $"{source.FileSystem} {source.DisplayName}";
+        if (hint.Contains("bitlocker", StringComparison.OrdinalIgnoreCase))
+        {
+            return "bitlocker";
+        }
+
+        if (hint.Contains("filevault", StringComparison.OrdinalIgnoreCase)
+            || hint.Contains("apfs", StringComparison.OrdinalIgnoreCase))
+        {
+            return "filevault";
+        }
+
+        if (hint.Contains("luks", StringComparison.OrdinalIgnoreCase))
+        {
+            return "luks";
+        }
+
+        return "auto";
+    }
+
+    private static string ResolveSessionSourceClass(
+        bool usingVirtualRaidSession,
+        bool encryptedSourceUnlocked,
+        bool remoteAgentRequested)
+    {
+        if (usingVirtualRaidSession)
+        {
+            return SessionSourceClass.AssembledRaid;
+        }
+
+        if (remoteAgentRequested)
+        {
+            return SessionSourceClass.RemoteAgent;
+        }
+
+        if (encryptedSourceUnlocked)
+        {
+            return SessionSourceClass.EncryptedUnlocked;
+        }
+
+        return SessionSourceClass.Local;
     }
 
     private static string? ResolveProbePath(SourceCandidate source)

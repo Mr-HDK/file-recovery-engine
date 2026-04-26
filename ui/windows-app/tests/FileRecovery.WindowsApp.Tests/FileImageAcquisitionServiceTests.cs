@@ -41,6 +41,10 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.False(result.ConstrainedNetworkIo);
         Assert.Equal(RemoteAgentMode.Disabled, result.RemoteAgentMode);
         Assert.Null(result.RemoteAgentEndpoint);
+        Assert.Equal(RemoteExecutionStatus.NotRequested, result.RemoteExecutionStatus);
+        Assert.Equal(RemoteExecutionErrorCode.None, result.RemoteExecutionErrorCode);
+        Assert.Null(result.RemoteExecutionMessage);
+        Assert.Null(result.RemoteExecutionIntegrityHash);
         Assert.Null(result.ChainOfCustodyLogPath);
         Assert.Equal(0, result.NetworkCheckpointCount);
         Assert.Null(result.UnreadableRangesManifestPath);
@@ -232,6 +236,9 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.True(result.ConstrainedNetworkIo);
         Assert.Equal(RemoteAgentMode.Optional, result.RemoteAgentMode);
         Assert.Equal("agent://nas-sidecar", result.RemoteAgentEndpoint);
+        Assert.Equal(RemoteExecutionStatus.Succeeded, result.RemoteExecutionStatus);
+        Assert.Equal(RemoteExecutionErrorCode.None, result.RemoteExecutionErrorCode);
+        Assert.False(string.IsNullOrWhiteSpace(result.RemoteExecutionIntegrityHash));
         Assert.Equal(custodyPath, result.ChainOfCustodyLogPath);
         Assert.Null(result.UnreadableRangesManifestPath);
         Assert.True(File.Exists(custodyPath));
@@ -248,6 +255,9 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.True(state.RootElement.GetProperty("constrainedNetworkIo").GetBoolean());
         Assert.Equal((int)RemoteAgentMode.Optional, state.RootElement.GetProperty("remoteAgentMode").GetInt32());
         Assert.Equal("agent://nas-sidecar", state.RootElement.GetProperty("remoteAgentEndpoint").GetString());
+        Assert.Equal((int)RemoteExecutionStatus.Succeeded, state.RootElement.GetProperty("remoteExecutionStatus").GetInt32());
+        Assert.Equal((int)RemoteExecutionErrorCode.None, state.RootElement.GetProperty("remoteExecutionErrorCode").GetInt32());
+        Assert.False(string.IsNullOrWhiteSpace(state.RootElement.GetProperty("remoteExecutionIntegrityHash").GetString()));
     }
 
     [Fact]
@@ -290,6 +300,30 @@ public sealed class FileImageAcquisitionServiceTests
                     MaxNetworkThroughputBytesPerSecond: 0),
                 progress: null,
                 CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncThrowsWhenRemoteAgentEndpointIsUnreachable()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-remote-unreachable.bin");
+        var destinationPath = Path.Combine(tempRoot, "remote-unreachable-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(65_536));
+
+        var service = new FileImageAcquisitionService();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 64 * 1024,
+                    SourceIsNetwork: true,
+                    RemoteAgentMode: RemoteAgentMode.Optional,
+                    RemoteAgentEndpoint: "nas-sidecar"),
+                progress: null,
+                CancellationToken.None));
+
+        Assert.Contains("Remote agent handshake failed", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

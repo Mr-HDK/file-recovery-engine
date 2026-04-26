@@ -32,7 +32,14 @@ public sealed class SqliteSessionStoreTests
         var destination = Path.Combine(dbDirectory, "destination");
         Directory.CreateDirectory(destination);
 
-        var sessionId = await store.CreateSessionAsync(source, destination, ScanMode.Quick, CancellationToken.None);
+        var sessionId = await store.CreateSessionAsync(
+            source,
+            destination,
+            ScanMode.Quick,
+            SessionSourceClass.Local,
+            signaturePackSet: "pack=core-signatures@2026.04;families=images|documents",
+            custodyHashChainRef: "jsonl-sha256:abcd1234;path=C:\\custody\\chain.jsonl",
+            CancellationToken.None);
         await store.UpdateStatusAsync(sessionId, "running", "Started", CancellationToken.None);
 
         var candidates = new[]
@@ -84,6 +91,9 @@ public sealed class SqliteSessionStoreTests
         var record = Assert.Single(sessions);
 
         Assert.Equal(sessionId, record.SessionId);
+        Assert.Equal(SessionSourceClass.Local, record.SourceClass);
+        Assert.Equal("pack=core-signatures@2026.04;families=images|documents", record.SignaturePackSet);
+        Assert.Equal("jsonl-sha256:abcd1234;path=C:\\custody\\chain.jsonl", record.CustodyHashChainRef);
         Assert.Equal("running", record.Status);
         Assert.Equal("Started", record.Notes);
 
@@ -185,7 +195,14 @@ public sealed class SqliteSessionStoreTests
         var sessionIds = new List<Guid>();
         for (var i = 0; i < 5; i++)
         {
-            var sessionId = await store.CreateSessionAsync(source, destination, ScanMode.Quick, CancellationToken.None);
+            var sessionId = await store.CreateSessionAsync(
+                source,
+                destination,
+                ScanMode.Quick,
+                SessionSourceClass.Local,
+                signaturePackSet: null,
+                custodyHashChainRef: null,
+                CancellationToken.None);
             sessionIds.Add(sessionId);
             await store.ReplaceQuickScanCandidatesAsync(
                 sessionId,
@@ -224,6 +241,69 @@ public sealed class SqliteSessionStoreTests
         Assert.Empty(removedCandidatesByAge);
         var removedCandidatesByCount = await store.GetQuickScanCandidatesAsync(sessionIds[2], 10, CancellationToken.None);
         Assert.Empty(removedCandidatesByCount);
+    }
+
+    [Fact]
+    public async Task EnsureCreatedMigratesLegacySessionsTableWithSourceClass()
+    {
+        var dbDirectory = Path.Combine(Path.GetTempPath(), "fr-tests-db", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dbDirectory);
+        var dbPath = Path.Combine(dbDirectory, "sessions.db");
+
+        await using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(CancellationToken.None);
+            var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                CREATE TABLE sessions (
+                  session_id TEXT PRIMARY KEY,
+                  created_utc TEXT NOT NULL,
+                  updated_utc TEXT NOT NULL,
+                  source_id TEXT NOT NULL,
+                  source_kind INTEGER NOT NULL,
+                  destination_path TEXT NOT NULL,
+                  scan_mode INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  notes TEXT NULL
+                );
+                """;
+            await command.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+
+        var store = new SqliteSessionStore(dbPath);
+        await store.EnsureCreatedAsync(CancellationToken.None);
+
+        var source = new SourceCandidate(
+            Id: "legacy-volume",
+            Kind: RecoverySourceKind.Volume,
+            DisplayName: "Legacy Volume",
+            DevicePath: "\\\\.\\E:",
+            FileSystem: "NTFS",
+            SizeBytes: 100,
+            SectorSizeBytes: 512,
+            DiskIndex: 2,
+            VolumeIdentity: "VOL-E",
+            SourcePath: "E:\\",
+            ReadOnlyEnforced: true);
+
+        var destination = Path.Combine(dbDirectory, "destination");
+        Directory.CreateDirectory(destination);
+
+        await store.CreateSessionAsync(
+            source,
+            destination,
+            ScanMode.Quick,
+            SessionSourceClass.AssembledRaid,
+            signaturePackSet: "pack=core-signatures@2026.04;families=all",
+            custodyHashChainRef: "jsonl-sha256:efef;path=C:\\legacy\\custody.jsonl",
+            CancellationToken.None);
+
+        var sessions = await store.GetRecentSessionsAsync(10, CancellationToken.None);
+        var record = Assert.Single(sessions);
+        Assert.Equal(SessionSourceClass.AssembledRaid, record.SourceClass);
+        Assert.Equal("pack=core-signatures@2026.04;families=all", record.SignaturePackSet);
+        Assert.Equal("jsonl-sha256:efef;path=C:\\legacy\\custody.jsonl", record.CustodyHashChainRef);
     }
 
     private static QuickScanCandidateRecord BuildCandidate(int ordinal, uint recordNumber)

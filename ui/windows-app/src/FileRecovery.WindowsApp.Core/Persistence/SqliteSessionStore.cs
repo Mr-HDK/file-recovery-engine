@@ -27,6 +27,9 @@ public sealed class SqliteSessionStore
               created_utc TEXT NOT NULL,
               updated_utc TEXT NOT NULL,
               source_id TEXT NOT NULL,
+              source_class TEXT NOT NULL DEFAULT 'local',
+              signature_pack_set TEXT NULL,
+              custody_hash_chain_ref TEXT NULL,
               source_kind INTEGER NOT NULL,
               destination_path TEXT NOT NULL,
               scan_mode INTEGER NOT NULL,
@@ -80,6 +83,7 @@ public sealed class SqliteSessionStore
             """;
 
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureSessionSchemaAsync(connection, cancellationToken);
         await EnsureQuickScanCandidateSchemaAsync(connection, cancellationToken);
     }
 
@@ -258,6 +262,9 @@ public sealed class SqliteSessionStore
         SourceCandidate source,
         string destinationPath,
         ScanMode scanMode,
+        string sourceClass,
+        string? signaturePackSet,
+        string? custodyHashChainRef,
         CancellationToken cancellationToken)
     {
         var sessionId = Guid.NewGuid();
@@ -274,6 +281,9 @@ public sealed class SqliteSessionStore
               created_utc,
               updated_utc,
               source_id,
+              source_class,
+              signature_pack_set,
+              custody_hash_chain_ref,
               source_kind,
               destination_path,
               scan_mode,
@@ -284,6 +294,9 @@ public sealed class SqliteSessionStore
               $created_utc,
               $updated_utc,
               $source_id,
+              $source_class,
+              $signature_pack_set,
+              $custody_hash_chain_ref,
               $source_kind,
               $destination_path,
               $scan_mode,
@@ -296,6 +309,13 @@ public sealed class SqliteSessionStore
         command.Parameters.AddWithValue("$created_utc", now.ToString("O"));
         command.Parameters.AddWithValue("$updated_utc", now.ToString("O"));
         command.Parameters.AddWithValue("$source_id", source.Id);
+        command.Parameters.AddWithValue("$source_class", SessionSourceClass.Normalize(sourceClass));
+        command.Parameters.AddWithValue(
+            "$signature_pack_set",
+            string.IsNullOrWhiteSpace(signaturePackSet) ? DBNull.Value : signaturePackSet.Trim());
+        command.Parameters.AddWithValue(
+            "$custody_hash_chain_ref",
+            string.IsNullOrWhiteSpace(custodyHashChainRef) ? DBNull.Value : custodyHashChainRef.Trim());
         command.Parameters.AddWithValue("$source_kind", (int)source.Kind);
         command.Parameters.AddWithValue("$destination_path", Path.GetFullPath(destinationPath));
         command.Parameters.AddWithValue("$scan_mode", (int)scanMode);
@@ -348,6 +368,9 @@ public sealed class SqliteSessionStore
               created_utc,
               updated_utc,
               source_id,
+              source_class,
+              signature_pack_set,
+              custody_hash_chain_ref,
               source_kind,
               destination_path,
               scan_mode,
@@ -366,17 +389,23 @@ public sealed class SqliteSessionStore
             var createdUtc = DateTimeOffset.Parse(reader.GetString(1));
             var updatedUtc = DateTimeOffset.Parse(reader.GetString(2));
             var sourceId = reader.GetString(3);
-            var sourceKind = (RecoverySourceKind)reader.GetInt32(4);
-            var destinationPath = reader.GetString(5);
-            var scanMode = (ScanMode)reader.GetInt32(6);
-            var recordStatus = reader.GetString(7);
-            var recordNotes = reader.IsDBNull(8) ? null : reader.GetString(8);
+            var sourceClass = SessionSourceClass.Normalize(reader.GetString(4));
+            var signaturePackSet = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var custodyHashChainRef = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var sourceKind = (RecoverySourceKind)reader.GetInt32(7);
+            var destinationPath = reader.GetString(8);
+            var scanMode = (ScanMode)reader.GetInt32(9);
+            var recordStatus = reader.GetString(10);
+            var recordNotes = reader.IsDBNull(11) ? null : reader.GetString(11);
 
             records.Add(new SessionRecord(
                 SessionId: sessionId,
                 CreatedUtc: createdUtc,
                 UpdatedUtc: updatedUtc,
                 SourceId: sourceId,
+                SourceClass: sourceClass,
+                SignaturePackSet: signaturePackSet,
+                CustodyHashChainRef: custodyHashChainRef,
                 SourceKind: sourceKind,
                 DestinationPath: destinationPath,
                 ScanMode: scanMode,
@@ -768,6 +797,62 @@ public sealed class SqliteSessionStore
             "last_recovery_utc",
             "TEXT NULL",
             cancellationToken);
+    }
+
+    private static async Task EnsureSessionSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await EnsureSessionColumnAsync(
+            connection,
+            "source_class",
+            "TEXT NOT NULL DEFAULT 'local'",
+            cancellationToken);
+        await EnsureSessionColumnAsync(
+            connection,
+            "signature_pack_set",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureSessionColumnAsync(
+            connection,
+            "custody_hash_chain_ref",
+            "TEXT NULL",
+            cancellationToken);
+    }
+
+    private static async Task EnsureSessionColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string columnDefinition,
+        CancellationToken cancellationToken)
+    {
+        if (await HasSessionColumnAsync(connection, columnName, cancellationToken))
+        {
+            return;
+        }
+
+        var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE sessions ADD COLUMN {columnName} {columnDefinition};";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<bool> HasSessionColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT 1
+            FROM pragma_table_info('sessions')
+            WHERE name = $name
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$name", columnName);
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is not null;
     }
 
     private static async Task EnsureQuickScanCandidateColumnAsync(

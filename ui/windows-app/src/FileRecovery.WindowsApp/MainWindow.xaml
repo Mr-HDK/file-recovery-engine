@@ -168,6 +168,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="220"/>
@@ -226,6 +227,14 @@
 
                             <TextBlock Grid.Row="14" Grid.Column="0" VerticalAlignment="Center" Text="Chain-of-custody log path"/>
                             <TextBox x:Name="ChainOfCustodyLogPathTextBox" Grid.Row="14" Grid.Column="1" Margin="8,0,0,0"/>
+
+                            <TextBlock Grid.Row="15" Grid.Column="0" VerticalAlignment="Center" Text="RAID member sources (optional)"/>
+                            <TextBox x:Name="RaidMemberSourcesTextBox"
+                                     Grid.Row="15"
+                                     Grid.Column="1"
+                                     Margin="8,0,0,0"
+                                     TextWrapping="Wrap"
+                                     AcceptsReturn="True"/>
                         </Grid>
                     </Expander>
 

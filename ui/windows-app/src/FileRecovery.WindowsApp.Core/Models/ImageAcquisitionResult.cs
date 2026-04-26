@@ -18,5 +18,9 @@ public sealed record ImageAcquisitionResult(
     string? RemoteAgentEndpoint,
     string? ChainOfCustodyLogPath,
     int NetworkCheckpointCount,
-    string? UnreadableRangesManifestPath
+    string? UnreadableRangesManifestPath,
+    RemoteExecutionStatus RemoteExecutionStatus,
+    RemoteExecutionErrorCode RemoteExecutionErrorCode,
+    string? RemoteExecutionMessage,
+    string? RemoteExecutionIntegrityHash
 );

@@ -455,6 +455,42 @@ public sealed record EngineRecoverCandidateResult(
     int StatusCode
 );
 
+public sealed record EngineEncryptedSource(
+    string Provider,
+    string Identifier,
+    string DisplayName,
+    bool Locked,
+    bool SupportsPassword,
+    bool SupportsRecoveryKey,
+    bool SupportsKeyFile
+);
+
+public sealed record EngineEncryptedSourceListResult(
+    bool EngineAvailable,
+    bool Success,
+    IReadOnlyList<EngineEncryptedSource> Sources,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineEncryptedSourceUnlockResult(
+    bool EngineAvailable,
+    bool Success,
+    bool Unlocked,
+    string Provider,
+    string Message,
+    int StatusCode
+);
+
+public sealed record EngineEncryptedSourceLockResult(
+    bool EngineAvailable,
+    bool Success,
+    bool Locked,
+    string Provider,
+    string Message,
+    int StatusCode
+);
+
 public static class NativeEngineProbe
 {
     public const uint CarveFamilyImages = 0x0001;
@@ -968,6 +1004,194 @@ public static class NativeEngineProbe
                 Array.Empty<EngineExtDeletedCandidate>(),
                 "Engine ABI mismatch",
                 -101);
+        }
+    }
+
+    public static EngineEncryptedSourceListResult ListEncryptedSources(
+        string sourcePath,
+        RecoverySourceKind sourceKind)
+    {
+        try
+        {
+            var normalizedKind = NormalizeSourceKindForEngine(sourceKind);
+            var entries = new NativeEncryptedSourceInfo[8];
+            for (var i = 0; i < entries.Length; i++)
+            {
+                entries[i].Identifier = new byte[96];
+                entries[i].DisplayName = new byte[160];
+            }
+
+            var status = fr_list_encrypted_sources(
+                sourcePath,
+                (int)normalizedKind,
+                entries,
+                (uint)entries.Length,
+                out var written);
+
+            if (status == 0)
+            {
+                var sources = new List<EngineEncryptedSource>(capacity: (int)written);
+                for (var i = 0; i < written && i < entries.Length; i++)
+                {
+                    var item = entries[i];
+                    var provider = MapEncryptedProvider(item.ProviderCode);
+                    var identifier = DecodeUtf8(item.Identifier) ?? string.Empty;
+                    var displayName = DecodeUtf8(item.DisplayName) ?? identifier;
+                    var flags = item.Flags;
+                    sources.Add(new EngineEncryptedSource(
+                        Provider: provider,
+                        Identifier: identifier,
+                        DisplayName: string.IsNullOrWhiteSpace(displayName) ? provider : displayName,
+                        Locked: (flags & EncryptedSourceFlagLocked) != 0,
+                        SupportsPassword: (flags & EncryptedSourceFlagSupportsPassword) != 0,
+                        SupportsRecoveryKey: (flags & EncryptedSourceFlagSupportsRecoveryKey) != 0,
+                        SupportsKeyFile: (flags & EncryptedSourceFlagSupportsKeyFile) != 0));
+                }
+
+                return new EngineEncryptedSourceListResult(
+                    true,
+                    true,
+                    sources,
+                    sources.Count == 0 ? "No encrypted sources reported." : "Encrypted source metadata loaded.",
+                    status);
+            }
+
+            return new EngineEncryptedSourceListResult(
+                true,
+                false,
+                Array.Empty<EngineEncryptedSource>(),
+                MapEncryptedSourceStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineEncryptedSourceListResult(
+                false,
+                false,
+                Array.Empty<EngineEncryptedSource>(),
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineEncryptedSourceListResult(
+                false,
+                false,
+                Array.Empty<EngineEncryptedSource>(),
+                "Engine encrypted-source API unavailable",
+                -102);
+        }
+    }
+
+    public static EngineEncryptedSourceUnlockResult UnlockEncryptedSource(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        string provider,
+        string credentialKind,
+        string credentialMaterial)
+    {
+        try
+        {
+            var normalizedKind = NormalizeSourceKindForEngine(sourceKind);
+            var status = fr_unlock_encrypted_source(
+                sourcePath,
+                (int)normalizedKind,
+                provider,
+                credentialKind,
+                credentialMaterial,
+                out var unlocked);
+
+            return status switch
+            {
+                0 => new EngineEncryptedSourceUnlockResult(
+                    true,
+                    true,
+                    unlocked != 0,
+                    provider,
+                    unlocked != 0 ? "Encrypted source unlocked." : "Unlock request completed but source remained locked.",
+                    status),
+                _ => new EngineEncryptedSourceUnlockResult(
+                    true,
+                    false,
+                    false,
+                    provider,
+                    MapEncryptedSourceStatusMessage(status),
+                    status),
+            };
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineEncryptedSourceUnlockResult(
+                false,
+                false,
+                false,
+                provider,
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineEncryptedSourceUnlockResult(
+                false,
+                false,
+                false,
+                provider,
+                "Engine encrypted-source API unavailable",
+                -102);
+        }
+    }
+
+    public static EngineEncryptedSourceLockResult LockEncryptedSource(
+        string sourcePath,
+        RecoverySourceKind sourceKind,
+        string provider)
+    {
+        try
+        {
+            var normalizedKind = NormalizeSourceKindForEngine(sourceKind);
+            var status = fr_lock_encrypted_source(
+                sourcePath,
+                (int)normalizedKind,
+                provider,
+                out var locked);
+
+            return status switch
+            {
+                0 => new EngineEncryptedSourceLockResult(
+                    true,
+                    true,
+                    locked != 0,
+                    provider,
+                    locked != 0 ? "Encrypted source lock requested." : "Encrypted source lock completed with no lock-state change.",
+                    status),
+                _ => new EngineEncryptedSourceLockResult(
+                    true,
+                    false,
+                    false,
+                    provider,
+                    MapEncryptedSourceStatusMessage(status),
+                    status),
+            };
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineEncryptedSourceLockResult(
+                false,
+                false,
+                false,
+                provider,
+                "Engine unavailable",
+                -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineEncryptedSourceLockResult(
+                false,
+                false,
+                false,
+                provider,
+                "Engine encrypted-source API unavailable",
+                -102);
         }
     }
 
@@ -3357,6 +3581,36 @@ public static class NativeEngineProbe
         };
     }
 
+    private static string MapEncryptedSourceStatusMessage(int statusCode)
+    {
+        return statusCode switch
+        {
+            0 => "Encrypted source operation completed.",
+            10 => "Invalid source path.",
+            11 => "Unsupported platform.",
+            12 => "Access denied.",
+            13 => "Source not found.",
+            14 => "Windows I/O error.",
+            15 => "Invalid read offset.",
+            16 => "Misaligned read parameters.",
+            171 => "Encrypted source remains locked and requires credentials or key material.",
+            173 => "Credential material was rejected for encrypted source unlock.",
+            174 => "Encrypted source provider is unsupported in current build.",
+            _ => "Unknown engine response.",
+        };
+    }
+
+    private static string MapEncryptedProvider(uint providerCode)
+    {
+        return providerCode switch
+        {
+            EncryptedProviderBitLocker => "bitlocker",
+            EncryptedProviderFileVault => "filevault",
+            EncryptedProviderLuks => "luks",
+            _ => "auto",
+        };
+    }
+
     private static string MapConfidenceTier(uint confidenceTierCode)
     {
         return confidenceTierCode switch
@@ -3626,6 +3880,13 @@ public static class NativeEngineProbe
     private const uint RecoveryDiagUnreadableRange = 0x0400;
     private const uint RecoveryDiagEncryptedLocked = 0x0800;
     private const uint RecoveryDiagUnsupportedLayout = 0x1000;
+    private const uint EncryptedProviderBitLocker = 1;
+    private const uint EncryptedProviderFileVault = 2;
+    private const uint EncryptedProviderLuks = 3;
+    private const uint EncryptedSourceFlagLocked = 0x0001;
+    private const uint EncryptedSourceFlagSupportsPassword = 0x0002;
+    private const uint EncryptedSourceFlagSupportsRecoveryKey = 0x0004;
+    private const uint EncryptedSourceFlagSupportsKeyFile = 0x0008;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeNtfsBootMetadata
@@ -3964,6 +4225,19 @@ public static class NativeEngineProbe
         public byte[] SnapshotPath;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeEncryptedSourceInfo
+    {
+        public uint ProviderCode;
+        public uint Flags;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 96)]
+        public byte[] Identifier;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
+        public byte[] DisplayName;
+    }
+
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr fr_engine_version();
 
@@ -4189,6 +4463,30 @@ public static class NativeEngineProbe
         [Out] NativeVssSnapshot[] snapshots,
         uint snapshotCapacity,
         out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_list_encrypted_sources(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string sourcePath,
+        int sourceKind,
+        [Out] NativeEncryptedSourceInfo[] sources,
+        uint sourceCapacity,
+        out uint written);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_unlock_encrypted_source(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string sourcePath,
+        int sourceKind,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string provider,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string credentialKind,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string credentialMaterial,
+        out int unlocked);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_lock_encrypted_source(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string sourcePath,
+        int sourceKind,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string provider,
+        out int locked);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_recover_ntfs_candidate_to_file(

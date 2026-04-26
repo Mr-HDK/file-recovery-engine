@@ -10,6 +10,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
     private const int MinChunkSizeBytes = 64 * 1024;
     private const int DefaultConstrainedNetworkChunkSizeBytes = 512 * 1024;
     private readonly Func<string, int, Stream> _sourceStreamFactory;
+    private readonly IRemoteAgentRuntime _remoteAgentRuntime;
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -21,13 +22,16 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
     };
 
     public FileImageAcquisitionService()
-        : this(null)
+        : this(null, null)
     {
     }
 
-    public FileImageAcquisitionService(Func<string, int, Stream>? sourceStreamFactory)
+    public FileImageAcquisitionService(
+        Func<string, int, Stream>? sourceStreamFactory,
+        IRemoteAgentRuntime? remoteAgentRuntime = null)
     {
         _sourceStreamFactory = sourceStreamFactory ?? OpenDefaultSourceStream;
+        _remoteAgentRuntime = remoteAgentRuntime ?? new LoopbackRemoteAgentRuntime();
     }
 
     public async Task<ImageAcquisitionResult> AcquireImageAsync(
@@ -92,6 +96,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 ? stateLogPath + ".custody.jsonl"
                 : Path.GetFullPath(request.ChainOfCustodyLogPath))
             : null;
+        var remoteExecutionStatus = RemoteExecutionStatus.NotRequested;
+        var remoteExecutionErrorCode = RemoteExecutionErrorCode.None;
+        string? remoteExecutionMessage = null;
+        string? remoteExecutionIntegrityHash = null;
 
         var destinationDirectory = Path.GetDirectoryName(destinationPath);
         if (string.IsNullOrWhiteSpace(destinationDirectory))
@@ -111,6 +119,26 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             if (!string.IsNullOrWhiteSpace(custodyDirectory))
             {
                 Directory.CreateDirectory(custodyDirectory);
+            }
+        }
+
+        if (request.RemoteAgentMode != RemoteAgentMode.Disabled)
+        {
+            var remoteExecution = await ExecuteRemoteAcquisitionHandshakeAsync(
+                request,
+                sourcePath,
+                destinationPath,
+                effectiveChunkSizeBytes,
+                cancellationToken);
+            remoteExecutionStatus = remoteExecution.Status;
+            remoteExecutionErrorCode = remoteExecution.ErrorCode;
+            remoteExecutionMessage = remoteExecution.Message;
+            remoteExecutionIntegrityHash = remoteExecution.Integrity?.RequestHashHex;
+
+            if (remoteExecutionStatus != RemoteExecutionStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    $"Remote agent handshake failed: {remoteExecution.Message} ({remoteExecution.ErrorCode}).");
             }
         }
 
@@ -196,6 +224,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                 remoteAgentMode: request.RemoteAgentMode,
                 remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                remoteExecutionStatus: remoteExecutionStatus,
+                remoteExecutionErrorCode: remoteExecutionErrorCode,
+                remoteExecutionMessage: remoteExecutionMessage,
+                remoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                 networkCheckpointCount: networkCheckpointCount),
             cancellationToken);
 
@@ -343,6 +375,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                                 maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                                 remoteAgentMode: request.RemoteAgentMode,
                                 remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                                remoteExecutionStatus: remoteExecutionStatus,
+                                remoteExecutionErrorCode: remoteExecutionErrorCode,
+                                remoteExecutionMessage: remoteExecutionMessage,
+                                remoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                                 networkCheckpointCount: networkCheckpointCount),
                             cancellationToken);
                         if (isNetworkSource && custodyState is not null)
@@ -421,6 +457,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                 remoteAgentMode: request.RemoteAgentMode,
                 remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                remoteExecutionStatus: remoteExecutionStatus,
+                remoteExecutionErrorCode: remoteExecutionErrorCode,
+                remoteExecutionMessage: remoteExecutionMessage,
+                remoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                 networkCheckpointCount: networkCheckpointCount,
                 unreadableRangesManifestPath: unreadableRangesManifestPath);
             await WriteStateAsync(stateLogPath, completedState, cancellationToken);
@@ -441,12 +481,22 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                 MaxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                 RemoteAgentMode: request.RemoteAgentMode,
                 RemoteAgentEndpoint: request.RemoteAgentEndpoint,
+                RemoteExecutionStatus: remoteExecutionStatus,
+                RemoteExecutionErrorCode: remoteExecutionErrorCode,
+                RemoteExecutionMessage: remoteExecutionMessage,
+                RemoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                 ChainOfCustodyLogPath: custodyLogPath,
                 NetworkCheckpointCount: networkCheckpointCount,
                 UnreadableRangesManifestPath: unreadableRangesManifestPath);
         }
         catch (OperationCanceledException)
         {
+            if (request.RemoteAgentMode != RemoteAgentMode.Disabled)
+            {
+                remoteExecutionStatus = RemoteExecutionStatus.Canceled;
+                remoteExecutionMessage = "Remote operation canceled.";
+            }
+
             if (isNetworkSource && custodyState is not null)
             {
                 await AppendCustodyEventAsync(
@@ -489,6 +539,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                     remoteAgentMode: request.RemoteAgentMode,
                     remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                    remoteExecutionStatus: remoteExecutionStatus,
+                    remoteExecutionErrorCode: remoteExecutionErrorCode,
+                    remoteExecutionMessage: remoteExecutionMessage,
+                    remoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                     networkCheckpointCount: networkCheckpointCount,
                     unreadableRangesManifestPath: unreadableRangesManifestPath),
                 CancellationToken.None);
@@ -539,11 +593,69 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
                     maxNetworkThroughputBytesPerSecond: request.MaxNetworkThroughputBytesPerSecond,
                     remoteAgentMode: request.RemoteAgentMode,
                     remoteAgentEndpoint: request.RemoteAgentEndpoint,
+                    remoteExecutionStatus: remoteExecutionStatus,
+                    remoteExecutionErrorCode: remoteExecutionErrorCode,
+                    remoteExecutionMessage: remoteExecutionMessage,
+                    remoteExecutionIntegrityHash: remoteExecutionIntegrityHash,
                     networkCheckpointCount: networkCheckpointCount,
                     unreadableRangesManifestPath: unreadableRangesManifestPath),
                 CancellationToken.None);
             throw;
         }
+    }
+
+    private async Task<RemoteAgentResponse> ExecuteRemoteAcquisitionHandshakeAsync(
+        ImageAcquisitionRequest request,
+        string sourcePath,
+        string destinationPath,
+        int chunkSizeBytes,
+        CancellationToken cancellationToken)
+    {
+        var endpoint = request.RemoteAgentEndpoint?.Trim() ?? string.Empty;
+        if (request.RemoteAgentMode == RemoteAgentMode.Required && string.IsNullOrWhiteSpace(endpoint))
+        {
+            return new RemoteAgentResponse(
+                RequestId: Guid.NewGuid(),
+                Status: RemoteExecutionStatus.InvalidRequest,
+                ErrorCode: RemoteExecutionErrorCode.EndpointRequired,
+                Message: "Remote agent endpoint is required.",
+                RespondedUtc: DateTimeOffset.UtcNow,
+                Integrity: new RemoteAgentIntegrityMetadata(
+                    RequestHashHex: string.Empty,
+                    PayloadHashHex: null,
+                    CheckpointHashHex: null));
+        }
+
+        var payloadHash = ComputeDeterministicHash(
+            $"{sourcePath}|{destinationPath}|{chunkSizeBytes}|{request.AllowResume}|{request.ReadErrorPolicy}");
+        var requestHash = ComputeDeterministicHash(
+            $"{endpoint}|{request.RemoteAgentMode}|{request.SourceIsNetwork}|{payloadHash}");
+        var agentRequest = new RemoteAgentRequest(
+            RequestId: Guid.NewGuid(),
+            Endpoint: endpoint,
+            Operation: RemoteAgentOperationKind.Acquisition,
+            RequestedUtc: DateTimeOffset.UtcNow,
+            Integrity: new RemoteAgentIntegrityMetadata(
+                RequestHashHex: requestHash,
+                PayloadHashHex: payloadHash,
+                CheckpointHashHex: null));
+
+        var response = await _remoteAgentRuntime.ExecuteAsync(agentRequest, cancellationToken);
+        if (response.Status == RemoteExecutionStatus.Succeeded
+            && !string.Equals(
+                response.Integrity.RequestHashHex,
+                requestHash,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return response with
+            {
+                Status = RemoteExecutionStatus.IntegrityFailure,
+                ErrorCode = RemoteExecutionErrorCode.IntegrityVerificationFailed,
+                Message = "Remote execution integrity hash mismatch.",
+            };
+        }
+
+        return response;
     }
 
     private static bool IsCompatibleResume(
@@ -989,6 +1101,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         long? maxNetworkThroughputBytesPerSecond,
         RemoteAgentMode remoteAgentMode,
         string? remoteAgentEndpoint,
+        RemoteExecutionStatus remoteExecutionStatus,
+        RemoteExecutionErrorCode remoteExecutionErrorCode,
+        string? remoteExecutionMessage,
+        string? remoteExecutionIntegrityHash,
         int networkCheckpointCount,
         string? unreadableRangesManifestPath = null)
     {
@@ -1013,6 +1129,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             MaxNetworkThroughputBytesPerSecond = maxNetworkThroughputBytesPerSecond,
             RemoteAgentMode = remoteAgentMode,
             RemoteAgentEndpoint = remoteAgentEndpoint,
+            RemoteExecutionStatus = remoteExecutionStatus,
+            RemoteExecutionErrorCode = remoteExecutionErrorCode,
+            RemoteExecutionMessage = remoteExecutionMessage,
+            RemoteExecutionIntegrityHash = remoteExecutionIntegrityHash,
             NetworkCheckpointCount = networkCheckpointCount,
             UnreadableRangesManifestPath = unreadableRangesManifestPath,
         };
@@ -1073,6 +1193,10 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         public long? MaxNetworkThroughputBytesPerSecond { get; init; }
         public RemoteAgentMode RemoteAgentMode { get; init; } = RemoteAgentMode.Disabled;
         public string? RemoteAgentEndpoint { get; init; }
+        public RemoteExecutionStatus RemoteExecutionStatus { get; init; } = RemoteExecutionStatus.NotRequested;
+        public RemoteExecutionErrorCode RemoteExecutionErrorCode { get; init; } = RemoteExecutionErrorCode.None;
+        public string? RemoteExecutionMessage { get; init; }
+        public string? RemoteExecutionIntegrityHash { get; init; }
         public int NetworkCheckpointCount { get; init; }
         public string? UnreadableRangesManifestPath { get; init; }
     }
