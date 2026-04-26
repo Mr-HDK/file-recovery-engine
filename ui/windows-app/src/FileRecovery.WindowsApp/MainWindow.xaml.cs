@@ -971,6 +971,30 @@ public partial class MainWindow : Window
                                 AppendSessionMessage(
                                     $"RAID logical mapping skipped: {mapping.Message} (status {mapping.StatusCode}).");
                             }
+
+                            if (RaidReverseAssistantCheckBox.IsChecked == true)
+                            {
+                                var suggestions = BuildRaidReverseAssistantOverrides(metadata);
+                                if (suggestions.Count == 0)
+                                {
+                                    AppendSessionMessage("RAID reverse-layout assistant: no alternative layouts generated.");
+                                }
+                                else
+                                {
+                                    AppendSessionMessage(
+                                        $"RAID reverse-layout assistant generated {suggestions.Count} candidate override profiles for degraded/reversed scenarios.");
+                                    for (var index = 0; index < suggestions.Count; index++)
+                                    {
+                                        var suggestion = suggestions[index];
+                                        var probe = NativeEngineProbe.ProbeRaidLayoutFromSession(activeEngineSessionId, suggestion.Override);
+                                        var probeSummary = probe.Success && probe.Metadata is not null
+                                            ? $"success family={probe.Metadata.MetadataFamily}, level={probe.Metadata.Level}, parity={probe.Metadata.ParityRotation}"
+                                            : $"status {probe.StatusCode}";
+                                        AppendSessionMessage(
+                                            $"RAID assistant profile {index + 1}: {suggestion.Description} -> {probeSummary} ({probe.Message}).");
+                                    }
+                                }
+                            }
                         }
                         else if (raidProbe.StatusCode == 142)
                         {
@@ -2734,6 +2758,69 @@ public partial class MainWindow : Window
         }
 
         return values;
+    }
+
+    private sealed record RaidAssistantOverride(
+        string Description,
+        EngineRaidManualOverride Override);
+
+    private static IReadOnlyList<RaidAssistantOverride> BuildRaidReverseAssistantOverrides(
+        EngineRaidLayoutMetadata metadata)
+    {
+        if (metadata.DiskOrder.Count < 2)
+        {
+            return Array.Empty<RaidAssistantOverride>();
+        }
+
+        var suggestions = new List<RaidAssistantOverride>();
+        var reversed = metadata.DiskOrder.Reverse().ToArray();
+        suggestions.Add(new RaidAssistantOverride(
+            "reverse disk order",
+            new EngineRaidManualOverride(
+                OverrideLevel: true,
+                Level: metadata.Level,
+                OverrideStripeSize: true,
+                StripeSizeBytes: metadata.StripeSizeBytes,
+                OverrideDataOffset: true,
+                DataOffsetBytes: metadata.DataOffsetBytes,
+                OverrideParityRotation: true,
+                ParityRotation: metadata.ParityRotation,
+                DiskOrder: reversed)));
+
+        var switchedParity = string.Equals(metadata.ParityRotation, "LeftSymmetric", StringComparison.OrdinalIgnoreCase)
+            ? "RightSymmetric"
+            : "LeftSymmetric";
+        suggestions.Add(new RaidAssistantOverride(
+            "flip parity rotation",
+            new EngineRaidManualOverride(
+                OverrideLevel: true,
+                Level: metadata.Level,
+                OverrideStripeSize: true,
+                StripeSizeBytes: metadata.StripeSizeBytes,
+                OverrideDataOffset: true,
+                DataOffsetBytes: metadata.DataOffsetBytes,
+                OverrideParityRotation: true,
+                ParityRotation: switchedParity,
+                DiskOrder: metadata.DiskOrder)));
+
+        if (metadata.DiskOrder.Count >= 3)
+        {
+            var rotated = metadata.DiskOrder.Skip(1).Concat(metadata.DiskOrder.Take(1)).ToArray();
+            suggestions.Add(new RaidAssistantOverride(
+                "rotate disk order by 1 (degraded reconstruction hint)",
+                new EngineRaidManualOverride(
+                    OverrideLevel: true,
+                    Level: metadata.Level,
+                    OverrideStripeSize: true,
+                    StripeSizeBytes: metadata.StripeSizeBytes,
+                    OverrideDataOffset: true,
+                    DataOffsetBytes: metadata.DataOffsetBytes,
+                    OverrideParityRotation: true,
+                    ParityRotation: metadata.ParityRotation,
+                    DiskOrder: rotated)));
+        }
+
+        return suggestions;
     }
 
     private static DateTime? ToUtcStartOfDay(DateTime? date)

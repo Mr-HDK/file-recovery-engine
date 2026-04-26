@@ -397,6 +397,8 @@ const RAID_MANUAL_OVERRIDE_FLAG_PARITY_ROTATION: u32 = 0x0008;
 const RAID_MANUAL_OVERRIDE_FLAG_DISK_ORDER: u32 = 0x0010;
 const RAID_METADATA_FAMILY_LINUX_MD: u32 = 1;
 const RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES: u32 = 2;
+const RAID_METADATA_FAMILY_INTEL_IMSM: u32 = 3;
+const RAID_METADATA_FAMILY_DDF: u32 = 4;
 const RAID_LEVEL_RAID0: u32 = 1;
 const RAID_LEVEL_RAID1: u32 = 2;
 const RAID_LEVEL_RAID4: u32 = 3;
@@ -3491,6 +3493,8 @@ fn encode_raid_metadata_family(family: RaidMetadataFamily) -> u32 {
     match family {
         RaidMetadataFamily::LinuxMd => RAID_METADATA_FAMILY_LINUX_MD,
         RaidMetadataFamily::WindowsStorageSpaces => RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES,
+        RaidMetadataFamily::IntelImsm => RAID_METADATA_FAMILY_INTEL_IMSM,
+        RaidMetadataFamily::Ddf => RAID_METADATA_FAMILY_DDF,
     }
 }
 
@@ -3500,6 +3504,8 @@ fn decode_raid_metadata_family(value: u32) -> Option<RaidMetadataFamily> {
         RAID_METADATA_FAMILY_WINDOWS_STORAGE_SPACES => {
             Some(RaidMetadataFamily::WindowsStorageSpaces)
         }
+        RAID_METADATA_FAMILY_INTEL_IMSM => Some(RaidMetadataFamily::IntelImsm),
+        RAID_METADATA_FAMILY_DDF => Some(RaidMetadataFamily::Ddf),
         _ => None,
     }
 }

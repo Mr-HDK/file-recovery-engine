@@ -3385,6 +3385,8 @@ public static class NativeEngineProbe
         {
             RaidMetadataFamilyLinuxMd => "Linux MD",
             RaidMetadataFamilyWindowsStorageSpaces => "Windows Storage Spaces",
+            RaidMetadataFamilyIntelImsm => "Intel IMSM/RST",
+            RaidMetadataFamilyDdf => "DDF",
             _ => "Unknown",
         };
     }
@@ -3400,6 +3402,18 @@ public static class NativeEngineProbe
             || string.Equals(metadataFamily, "storage spaces", StringComparison.OrdinalIgnoreCase))
         {
             return RaidMetadataFamilyWindowsStorageSpaces;
+        }
+
+        if (string.Equals(metadataFamily, "intel imsm/rst", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(metadataFamily, "intel imsm", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(metadataFamily, "intel rst", StringComparison.OrdinalIgnoreCase))
+        {
+            return RaidMetadataFamilyIntelImsm;
+        }
+
+        if (string.Equals(metadataFamily, "ddf", StringComparison.OrdinalIgnoreCase))
+        {
+            return RaidMetadataFamilyDdf;
         }
 
         return RaidMetadataFamilyLinuxMd;
@@ -3857,6 +3871,8 @@ public static class NativeEngineProbe
     private const uint RaidManualOverrideFlagDiskOrder = 0x0010;
     private const uint RaidMetadataFamilyLinuxMd = 1;
     private const uint RaidMetadataFamilyWindowsStorageSpaces = 2;
+    private const uint RaidMetadataFamilyIntelImsm = 3;
+    private const uint RaidMetadataFamilyDdf = 4;
     private const uint RaidLevelRaid0 = 1;
     private const uint RaidLevelRaid1 = 2;
     private const uint RaidLevelRaid4 = 3;

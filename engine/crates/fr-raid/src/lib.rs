@@ -6,11 +6,15 @@ const MD_MAGIC: u32 = 0xA92B4EFC;
 
 const SPACES_HEADER_OFFSET: usize = 0x200;
 const SPACES_SIGNATURE: &[u8; 11] = b"SPACES_RAID";
+const IMSM_SIGNATURE: &[u8; 23] = b"Intel Raid ISM Cfg Sig.";
+const DDF_SIGNATURE: &[u8; 7] = b"DDF_HDR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RaidMetadataFamily {
     LinuxMd,
     WindowsStorageSpaces,
+    IntelImsm,
+    Ddf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,14 @@ pub fn detect_layout(image: &[u8]) -> Result<Option<RaidLayout>, RaidError> {
     }
 
     if let Some(layout) = detect_storage_spaces_layout(image)? {
+        return Ok(Some(layout));
+    }
+
+    if let Some(layout) = detect_imsm_layout(image)? {
+        return Ok(Some(layout));
+    }
+
+    if let Some(layout) = detect_ddf_layout(image)? {
         return Ok(Some(layout));
     }
 
@@ -253,6 +265,97 @@ fn detect_storage_spaces_layout(image: &[u8]) -> Result<Option<RaidLayout>, Raid
 
     Ok(Some(RaidLayout {
         metadata_family: RaidMetadataFamily::WindowsStorageSpaces,
+        level,
+        member_count,
+        stripe_size_bytes,
+        data_offset_bytes,
+        parity_rotation,
+        disk_order: (0..member_count).collect(),
+        confidence_score: confidence,
+    }))
+}
+
+fn detect_imsm_layout(image: &[u8]) -> Result<Option<RaidLayout>, RaidError> {
+    let Some(base) = find_signature_offset(image, IMSM_SIGNATURE) else {
+        return Ok(None);
+    };
+
+    let min_len = base + 0x58;
+    if image.len() < min_len {
+        return Ok(None);
+    }
+
+    let raw_level = read_u32_le(image, base + 0x40)?;
+    let member_count = read_u32_le(image, base + 0x44)?;
+    if member_count < 2 {
+        return Err(RaidError::InvalidMemberCount(member_count));
+    }
+
+    let raw_stripe_kib = read_u32_le(image, base + 0x48)?;
+    let raw_offset_sectors = read_u64_le(image, base + 0x50)?;
+    let stripe_size_bytes = normalize_stripe_size(raw_stripe_kib.saturating_mul(1024));
+    let data_offset_bytes = raw_offset_sectors
+        .checked_mul(512)
+        .ok_or(RaidError::ArithmeticOverflow("imsm data offset bytes"))?;
+    let level = map_imsm_level(raw_level);
+
+    let confidence = score_metadata_confidence(
+        member_count,
+        raw_stripe_kib != 0,
+        level != RaidLevel::Unknown,
+        true,
+    );
+
+    Ok(Some(RaidLayout {
+        metadata_family: RaidMetadataFamily::IntelImsm,
+        level,
+        member_count,
+        stripe_size_bytes,
+        data_offset_bytes,
+        parity_rotation: ParityRotation::LeftSymmetric,
+        disk_order: (0..member_count).collect(),
+        confidence_score: confidence,
+    }))
+}
+
+fn detect_ddf_layout(image: &[u8]) -> Result<Option<RaidLayout>, RaidError> {
+    let Some(base) = find_signature_offset(image, DDF_SIGNATURE) else {
+        return Ok(None);
+    };
+
+    let min_len = base + 0x60;
+    if image.len() < min_len {
+        return Ok(None);
+    }
+
+    let raw_level = read_u32_le(image, base + 0x24)?;
+    let member_count = read_u32_le(image, base + 0x28)?;
+    if member_count < 2 {
+        return Err(RaidError::InvalidMemberCount(member_count));
+    }
+    let raw_stripe_kib = read_u32_le(image, base + 0x2C)?;
+    let raw_offset_lba = read_u64_le(image, base + 0x30)?;
+    let raw_parity = read_u32_le(image, base + 0x38)?;
+
+    let stripe_size_bytes = normalize_stripe_size(raw_stripe_kib.saturating_mul(1024));
+    let data_offset_bytes = raw_offset_lba
+        .checked_mul(512)
+        .ok_or(RaidError::ArithmeticOverflow("ddf data offset bytes"))?;
+    let level = map_ddf_level(raw_level);
+    let parity_rotation = match raw_parity {
+        1 => ParityRotation::LeftSymmetric,
+        2 => ParityRotation::RightSymmetric,
+        _ => ParityRotation::Unknown,
+    };
+    let confidence = score_metadata_confidence(
+        member_count,
+        raw_stripe_kib != 0,
+        level != RaidLevel::Unknown,
+        parity_rotation != ParityRotation::Unknown,
+    );
+
+    Ok(Some(RaidLayout {
+        metadata_family: RaidMetadataFamily::Ddf,
         level,
         member_count,
         stripe_size_bytes,
@@ -483,6 +586,28 @@ fn map_spaces_level(value: u32) -> RaidLevel {
     }
 }
 
+fn map_imsm_level(value: u32) -> RaidLevel {
+    match value {
+        0 => RaidLevel::Raid0,
+        1 => RaidLevel::Raid1,
+        2 => RaidLevel::Raid5,
+        3 => RaidLevel::Raid10,
+        _ => RaidLevel::Unknown,
+    }
+}
+
+fn map_ddf_level(value: u32) -> RaidLevel {
+    match value {
+        0 => RaidLevel::Raid0,
+        1 => RaidLevel::Raid1,
+        4 => RaidLevel::Raid4,
+        5 => RaidLevel::Raid5,
+        6 => RaidLevel::Raid6,
+        10 => RaidLevel::Raid10,
+        _ => RaidLevel::Unknown,
+    }
+}
+
 fn map_md_parity_rotation(layout: u32) -> ParityRotation {
     match layout {
         0 => ParityRotation::LeftSymmetric,
@@ -511,6 +636,16 @@ fn score_metadata_confidence(
         score = score.saturating_add(10);
     }
     score.min(99)
+}
+
+fn find_signature_offset(bytes: &[u8], signature: &[u8]) -> Option<usize> {
+    if signature.is_empty() || bytes.len() < signature.len() {
+        return None;
+    }
+
+    bytes
+        .windows(signature.len())
+        .position(|window| window == signature)
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, RaidError> {
@@ -588,6 +723,29 @@ mod tests {
     fn returns_none_when_no_supported_metadata_is_present() {
         let image = vec![0u8; 32 * 1024];
         assert!(detect_layout(&image).expect("detect").is_none());
+    }
+
+    #[test]
+    fn detects_intel_imsm_layout_from_signature() {
+        let image = build_imsm_image(2, 128, 4, 4096);
+        let layout = detect_layout(&image).expect("detect").expect("imsm layout");
+        assert_eq!(layout.metadata_family, RaidMetadataFamily::IntelImsm);
+        assert_eq!(layout.level, RaidLevel::Raid5);
+        assert_eq!(layout.member_count, 4);
+        assert_eq!(layout.stripe_size_bytes, 128 * 1024);
+        assert_eq!(layout.data_offset_bytes, 4096 * 512);
+    }
+
+    #[test]
+    fn detects_ddf_layout_from_signature() {
+        let image = build_ddf_image(5, 64, 5, 8192, 2);
+        let layout = detect_layout(&image).expect("detect").expect("ddf layout");
+        assert_eq!(layout.metadata_family, RaidMetadataFamily::Ddf);
+        assert_eq!(layout.level, RaidLevel::Raid5);
+        assert_eq!(layout.member_count, 5);
+        assert_eq!(layout.stripe_size_bytes, 64 * 1024);
+        assert_eq!(layout.data_offset_bytes, 8192 * 512);
+        assert_eq!(layout.parity_rotation, ParityRotation::RightSymmetric);
     }
 
     #[test]
@@ -724,6 +882,40 @@ mod tests {
         write_u32(&mut image, SPACES_HEADER_OFFSET + 0x18, member_count);
         write_u32(&mut image, SPACES_HEADER_OFFSET + 0x1C, data_offset_kib);
         write_u32(&mut image, SPACES_HEADER_OFFSET + 0x20, parity);
+        image
+    }
+
+    fn build_imsm_image(
+        level: u32,
+        stripe_kib: u32,
+        member_count: u32,
+        data_offset_sectors: u64,
+    ) -> Vec<u8> {
+        let mut image = vec![0u8; 64 * 1024];
+        let base = 0x1800;
+        image[base..base + IMSM_SIGNATURE.len()].copy_from_slice(IMSM_SIGNATURE);
+        write_u32(&mut image, base + 0x40, level);
+        write_u32(&mut image, base + 0x44, member_count);
+        write_u32(&mut image, base + 0x48, stripe_kib);
+        write_u64(&mut image, base + 0x50, data_offset_sectors);
+        image
+    }
+
+    fn build_ddf_image(
+        level: u32,
+        stripe_kib: u32,
+        member_count: u32,
+        data_offset_lba: u64,
+        parity_rotation: u32,
+    ) -> Vec<u8> {
+        let mut image = vec![0u8; 64 * 1024];
+        let base = 0x400;
+        image[base..base + DDF_SIGNATURE.len()].copy_from_slice(DDF_SIGNATURE);
+        write_u32(&mut image, base + 0x24, level);
+        write_u32(&mut image, base + 0x28, member_count);
+        write_u32(&mut image, base + 0x2C, stripe_kib);
+        write_u64(&mut image, base + 0x30, data_offset_lba);
+        write_u32(&mut image, base + 0x38, parity_rotation);
         image
     }
 

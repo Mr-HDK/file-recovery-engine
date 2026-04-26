@@ -170,6 +170,8 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="220"/>
@@ -236,6 +238,12 @@
                                      Margin="8,0,0,0"
                                      TextWrapping="Wrap"
                                      AcceptsReturn="True"/>
+
+                            <CheckBox x:Name="RaidReverseAssistantCheckBox"
+                                      Grid.Row="16"
+                                      Grid.ColumnSpan="2"
+                                      Margin="0,8,0,0"
+                                      Content="Enable RAID reverse-layout assistant (expert)"/>
                         </Grid>
                     </Expander>
 
