@@ -9,6 +9,8 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
 {
     private const int MinChunkSizeBytes = 64 * 1024;
     private const int DefaultConstrainedNetworkChunkSizeBytes = 512 * 1024;
+    private static readonly TimeSpan RemoteSessionTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RemoteClockSkew = TimeSpan.FromMinutes(2);
     private readonly Func<string, int, Stream> _sourceStreamFactory;
     private readonly IRemoteAgentRuntime _remoteAgentRuntime;
 
@@ -630,15 +632,25 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             $"{sourcePath}|{destinationPath}|{chunkSizeBytes}|{request.AllowResume}|{request.ReadErrorPolicy}");
         var requestHash = ComputeDeterministicHash(
             $"{endpoint}|{request.RemoteAgentMode}|{request.SourceIsNetwork}|{payloadHash}");
+        var requestId = Guid.NewGuid();
+        var requestedUtc = DateTimeOffset.UtcNow;
+        var session = BuildRemoteSessionMetadata(
+            requestId,
+            endpoint,
+            requestHash,
+            payloadHash,
+            requestedUtc,
+            RemoteAgentOperationKind.Acquisition);
         var agentRequest = new RemoteAgentRequest(
-            RequestId: Guid.NewGuid(),
+            RequestId: requestId,
             Endpoint: endpoint,
             Operation: RemoteAgentOperationKind.Acquisition,
-            RequestedUtc: DateTimeOffset.UtcNow,
+            RequestedUtc: requestedUtc,
             Integrity: new RemoteAgentIntegrityMetadata(
                 RequestHashHex: requestHash,
                 PayloadHashHex: payloadHash,
-                CheckpointHashHex: null));
+                CheckpointHashHex: null),
+            Session: session);
 
         var response = await _remoteAgentRuntime.ExecuteAsync(agentRequest, cancellationToken);
         if (response.Status == RemoteExecutionStatus.Succeeded
@@ -667,7 +679,228 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
             };
         }
 
+        if (response.Status == RemoteExecutionStatus.Succeeded
+            && !ValidateRemoteResponseSession(
+                request,
+                requestHash,
+                payloadHash,
+                requestedUtc,
+                session,
+                RemoteAgentOperationKind.Acquisition,
+                response,
+                out var sessionError))
+        {
+            return response with
+            {
+                Status = RemoteExecutionStatus.IntegrityFailure,
+                ErrorCode = RemoteExecutionErrorCode.IntegrityVerificationFailed,
+                Message = sessionError,
+            };
+        }
+
         return response;
+    }
+
+    private static RemoteAgentSessionMetadata? BuildRemoteSessionMetadata(
+        Guid requestId,
+        string endpoint,
+        string requestHash,
+        string payloadHash,
+        DateTimeOffset requestedUtc,
+        RemoteAgentOperationKind operation)
+    {
+        var sharedKey = Environment.GetEnvironmentVariable("FR_REMOTE_AGENT_SHARED_KEY");
+        if (string.IsNullOrWhiteSpace(sharedKey))
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri))
+        {
+            return null;
+        }
+
+        var keyId = Environment.GetEnvironmentVariable("FR_REMOTE_AGENT_KEY_ID");
+        if (string.IsNullOrWhiteSpace(keyId))
+        {
+            keyId = "env-default";
+        }
+
+        var expiresUtc = requestedUtc.Add(RemoteSessionTtl);
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var sessionId = ComputeDeterministicHash(
+            $"{endpointUri.Host}|{endpointUri.Port}|{requestId:D}|{nonce}|{requestedUtc:O}");
+        var requestMaterial = BuildRemoteRequestSignatureMaterial(
+            requestId,
+            endpoint,
+            requestHash,
+            payloadHash,
+            requestedUtc,
+            expiresUtc,
+            nonce,
+            sessionId,
+            keyId,
+            operation);
+        var requestSignature = ComputeHmacSha256Hex(sharedKey, requestMaterial);
+        return new RemoteAgentSessionMetadata(
+            SessionId: sessionId,
+            KeyId: keyId,
+            Nonce: nonce,
+            ExpiresUtc: expiresUtc,
+            RequestSignatureHex: requestSignature,
+            ResponseSignatureHex: null);
+    }
+
+    private static bool ValidateRemoteResponseSession(
+        ImageAcquisitionRequest request,
+        string requestHash,
+        string payloadHash,
+        DateTimeOffset requestedUtc,
+        RemoteAgentSessionMetadata? expectedSession,
+        RemoteAgentOperationKind operation,
+        RemoteAgentResponse response,
+        out string error)
+    {
+        error = string.Empty;
+        if (expectedSession is null)
+        {
+            return true;
+        }
+
+        if (response.Session is null)
+        {
+            error = "Remote execution session metadata is missing from response.";
+            return false;
+        }
+
+        if (!string.Equals(response.Session.SessionId, expectedSession.SessionId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(response.Session.KeyId, expectedSession.KeyId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(response.Session.Nonce, expectedSession.Nonce, StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Remote execution session metadata does not match request.";
+            return false;
+        }
+
+        if (response.RespondedUtc > expectedSession.ExpiresUtc.Add(RemoteClockSkew))
+        {
+            error = "Remote execution response exceeded session expiry window.";
+            return false;
+        }
+
+        if (response.RespondedUtc < requestedUtc.Subtract(RemoteClockSkew))
+        {
+            error = "Remote execution response timestamp is outside acceptable skew.";
+            return false;
+        }
+
+        var sharedKey = Environment.GetEnvironmentVariable("FR_REMOTE_AGENT_SHARED_KEY");
+        if (string.IsNullOrWhiteSpace(sharedKey))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(response.Session.ResponseSignatureHex))
+        {
+            error = "Remote execution response signature is missing.";
+            return false;
+        }
+
+        var responseMaterial = BuildRemoteResponseSignatureMaterial(
+            requestId: response.RequestId,
+            endpoint: request.RemoteAgentEndpoint ?? string.Empty,
+            requestHash: requestHash,
+            payloadHash: payloadHash,
+            requestedUtc: requestedUtc,
+            respondedUtc: response.RespondedUtc,
+            status: response.Status,
+            errorCode: response.ErrorCode,
+            message: response.Message,
+            expiresUtc: response.Session.ExpiresUtc,
+            nonce: response.Session.Nonce,
+            sessionId: response.Session.SessionId,
+            keyId: response.Session.KeyId,
+            operation: operation);
+        var expectedSignature = ComputeHmacSha256Hex(sharedKey, responseMaterial);
+        if (!string.Equals(
+                response.Session.ResponseSignatureHex,
+                expectedSignature,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            error = "Remote execution response signature validation failed.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string BuildRemoteRequestSignatureMaterial(
+        Guid requestId,
+        string endpoint,
+        string requestHash,
+        string payloadHash,
+        DateTimeOffset requestedUtc,
+        DateTimeOffset expiresUtc,
+        string nonce,
+        string sessionId,
+        string keyId,
+        RemoteAgentOperationKind operation)
+    {
+        return string.Join(
+            "|",
+            "fr-remote-v1",
+            requestId.ToString("D"),
+            endpoint.Trim(),
+            operation.ToString(),
+            requestHash,
+            payloadHash,
+            requestedUtc.ToString("O"),
+            expiresUtc.ToString("O"),
+            nonce,
+            sessionId,
+            keyId);
+    }
+
+    private static string BuildRemoteResponseSignatureMaterial(
+        Guid requestId,
+        string endpoint,
+        string requestHash,
+        string payloadHash,
+        DateTimeOffset requestedUtc,
+        DateTimeOffset respondedUtc,
+        RemoteExecutionStatus status,
+        RemoteExecutionErrorCode errorCode,
+        string message,
+        DateTimeOffset expiresUtc,
+        string nonce,
+        string sessionId,
+        string keyId,
+        RemoteAgentOperationKind operation)
+    {
+        return string.Join(
+            "|",
+            "fr-remote-v1-response",
+            requestId.ToString("D"),
+            endpoint.Trim(),
+            operation.ToString(),
+            requestHash,
+            payloadHash,
+            requestedUtc.ToString("O"),
+            respondedUtc.ToString("O"),
+            ((int)status).ToString(),
+            ((int)errorCode).ToString(),
+            message ?? string.Empty,
+            expiresUtc.ToString("O"),
+            nonce,
+            sessionId,
+            keyId);
+    }
+
+    private static string ComputeHmacSha256Hex(string secret, string material)
+    {
+        var keyBytes = Encoding.UTF8.GetBytes(secret);
+        var payload = Encoding.UTF8.GetBytes(material);
+        using var hmac = new HMACSHA256(keyBytes);
+        return Convert.ToHexString(hmac.ComputeHash(payload)).ToLowerInvariant();
     }
 
     private static bool IsCompatibleResume(

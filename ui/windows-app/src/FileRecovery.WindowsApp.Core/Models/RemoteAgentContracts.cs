@@ -12,12 +12,21 @@ public sealed record RemoteAgentIntegrityMetadata(
     string? PayloadHashHex,
     string? CheckpointHashHex);
 
+public sealed record RemoteAgentSessionMetadata(
+    string SessionId,
+    string KeyId,
+    string Nonce,
+    DateTimeOffset ExpiresUtc,
+    string? RequestSignatureHex,
+    string? ResponseSignatureHex);
+
 public sealed record RemoteAgentRequest(
     Guid RequestId,
     string Endpoint,
     RemoteAgentOperationKind Operation,
     DateTimeOffset RequestedUtc,
-    RemoteAgentIntegrityMetadata Integrity);
+    RemoteAgentIntegrityMetadata Integrity,
+    RemoteAgentSessionMetadata? Session = null);
 
 public sealed record RemoteAgentResponse(
     Guid RequestId,
@@ -25,4 +34,5 @@ public sealed record RemoteAgentResponse(
     RemoteExecutionErrorCode ErrorCode,
     string Message,
     DateTimeOffset RespondedUtc,
-    RemoteAgentIntegrityMetadata Integrity);
+    RemoteAgentIntegrityMetadata Integrity,
+    RemoteAgentSessionMetadata? Session = null);

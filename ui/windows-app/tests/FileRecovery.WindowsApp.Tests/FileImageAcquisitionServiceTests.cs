@@ -396,6 +396,68 @@ public sealed class FileImageAcquisitionServiceTests
         Assert.Contains("Remote agent handshake failed", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task AcquireImageAsyncSucceedsWithSignedRemoteSessionResponse()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-remote-signed.bin");
+        var destinationPath = Path.Combine(tempRoot, "remote-signed-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(98_304));
+
+        await using var authContext = new EnvironmentVariableScope("FR_REMOTE_AGENT_SHARED_KEY", "unit-test-shared-key");
+        await using var keyIdContext = new EnvironmentVariableScope("FR_REMOTE_AGENT_KEY_ID", "unit-test-key");
+
+        var service = new FileImageAcquisitionService(
+            sourceStreamFactory: null,
+            remoteAgentRuntime: new SignedRemoteAgentRuntime(includeResponseSignature: true));
+
+        var result = await service.AcquireImageAsync(
+            new ImageAcquisitionRequest(
+                SourcePath: sourcePath,
+                DestinationImagePath: destinationPath,
+                ChunkSizeBytes: 64 * 1024,
+                SourceIsNetwork: true,
+                RemoteAgentMode: RemoteAgentMode.Required,
+                RemoteAgentEndpoint: "https://agent.example/exec"),
+            progress: null,
+            CancellationToken.None);
+
+        Assert.Equal(RemoteExecutionStatus.Succeeded, result.RemoteExecutionStatus);
+        Assert.Equal(RemoteExecutionErrorCode.None, result.RemoteExecutionErrorCode);
+        Assert.False(string.IsNullOrWhiteSpace(result.RemoteExecutionIntegrityHash));
+    }
+
+    [Fact]
+    public async Task AcquireImageAsyncFailsWhenSignedRemoteSessionResponseMissingSignature()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var sourcePath = Path.Combine(tempRoot, "source-remote-signed-missing.bin");
+        var destinationPath = Path.Combine(tempRoot, "remote-signed-missing-output.img");
+        await File.WriteAllBytesAsync(sourcePath, BuildBytes(98_304));
+
+        await using var authContext = new EnvironmentVariableScope("FR_REMOTE_AGENT_SHARED_KEY", "unit-test-shared-key");
+        await using var keyIdContext = new EnvironmentVariableScope("FR_REMOTE_AGENT_KEY_ID", "unit-test-key");
+
+        var service = new FileImageAcquisitionService(
+            sourceStreamFactory: null,
+            remoteAgentRuntime: new SignedRemoteAgentRuntime(includeResponseSignature: false));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.AcquireImageAsync(
+                new ImageAcquisitionRequest(
+                    SourcePath: sourcePath,
+                    DestinationImagePath: destinationPath,
+                    ChunkSizeBytes: 64 * 1024,
+                    SourceIsNetwork: true,
+                    RemoteAgentMode: RemoteAgentMode.Required,
+                    RemoteAgentEndpoint: "https://agent.example/exec"),
+                progress: null,
+                CancellationToken.None));
+
+        Assert.Contains("Remote agent handshake failed", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("signature", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static byte[] BuildBytes(int length)
     {
         var bytes = new byte[length];
@@ -513,6 +575,82 @@ public sealed class FileImageAcquisitionServiceTests
                     Message: "ok",
                     RespondedUtc: DateTimeOffset.UtcNow,
                     Integrity: request.Integrity));
+        }
+    }
+
+    private sealed class SignedRemoteAgentRuntime : IRemoteAgentRuntime
+    {
+        private readonly bool _includeResponseSignature;
+
+        public SignedRemoteAgentRuntime(bool includeResponseSignature)
+        {
+            _includeResponseSignature = includeResponseSignature;
+        }
+
+        public Task<RemoteAgentResponse> ExecuteAsync(RemoteAgentRequest request, CancellationToken cancellationToken)
+        {
+            var respondedUtc = DateTimeOffset.UtcNow;
+            var session = request.Session;
+            if (session is not null && _includeResponseSignature)
+            {
+                var signatureMaterial = string.Join(
+                    "|",
+                    "fr-remote-v1-response",
+                    request.RequestId.ToString("D"),
+                    request.Endpoint.Trim(),
+                    RemoteAgentOperationKind.Acquisition.ToString(),
+                    request.Integrity.RequestHashHex,
+                    request.Integrity.PayloadHashHex ?? string.Empty,
+                    request.RequestedUtc.ToString("O"),
+                    respondedUtc.ToString("O"),
+                    ((int)RemoteExecutionStatus.Succeeded).ToString(),
+                    ((int)RemoteExecutionErrorCode.None).ToString(),
+                    "ok",
+                    session.ExpiresUtc.ToString("O"),
+                    session.Nonce,
+                    session.SessionId,
+                    session.KeyId);
+                var sharedKey = Environment.GetEnvironmentVariable("FR_REMOTE_AGENT_SHARED_KEY") ?? string.Empty;
+                var signature = ComputeHmacSha256Hex(sharedKey, signatureMaterial);
+                session = session with { ResponseSignatureHex = signature };
+            }
+
+            return Task.FromResult(
+                new RemoteAgentResponse(
+                    RequestId: request.RequestId,
+                    Status: RemoteExecutionStatus.Succeeded,
+                    ErrorCode: RemoteExecutionErrorCode.None,
+                    Message: "ok",
+                    RespondedUtc: respondedUtc,
+                    Integrity: request.Integrity,
+                    Session: session));
+        }
+    }
+
+    private static string ComputeHmacSha256Hex(string secret, string material)
+    {
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(secret);
+        var payload = System.Text.Encoding.UTF8.GetBytes(material);
+        using var hmac = new HMACSHA256(keyBytes);
+        return Convert.ToHexString(hmac.ComputeHash(payload)).ToLowerInvariant();
+    }
+
+    private sealed class EnvironmentVariableScope : IAsyncDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previousValue;
+
+        public EnvironmentVariableScope(string name, string value)
+        {
+            _name = name;
+            _previousValue = Environment.GetEnvironmentVariable(name);
+            Environment.SetEnvironmentVariable(name, value);
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Environment.SetEnvironmentVariable(_name, _previousValue);
+            return ValueTask.CompletedTask;
         }
     }
 }

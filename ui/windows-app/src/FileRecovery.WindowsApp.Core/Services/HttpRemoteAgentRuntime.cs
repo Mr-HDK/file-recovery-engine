@@ -70,6 +70,17 @@ public sealed class HttpRemoteAgentRuntime : IRemoteAgentRuntime
                 {
                     requestMessage.Headers.TryAddWithoutValidation("X-FR-Payload-Hash", request.Integrity.PayloadHashHex);
                 }
+                if (request.Session is not null)
+                {
+                    requestMessage.Headers.TryAddWithoutValidation("X-FR-Session-Id", request.Session.SessionId);
+                    requestMessage.Headers.TryAddWithoutValidation("X-FR-Session-Key", request.Session.KeyId);
+                    requestMessage.Headers.TryAddWithoutValidation("X-FR-Session-Nonce", request.Session.Nonce);
+                    requestMessage.Headers.TryAddWithoutValidation("X-FR-Session-Expires", request.Session.ExpiresUtc.ToString("O"));
+                    if (!string.IsNullOrWhiteSpace(request.Session.RequestSignatureHex))
+                    {
+                        requestMessage.Headers.TryAddWithoutValidation("X-FR-Session-Signature", request.Session.RequestSignatureHex);
+                    }
+                }
 
                 try
                 {
@@ -131,6 +142,7 @@ public sealed class HttpRemoteAgentRuntime : IRemoteAgentRuntime
                     {
                         RequestId = parsed.RequestId == Guid.Empty ? request.RequestId : parsed.RequestId,
                         Integrity = parsed.Integrity ?? request.Integrity,
+                        Session = parsed.Session ?? request.Session,
                     };
                 }
                 catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
