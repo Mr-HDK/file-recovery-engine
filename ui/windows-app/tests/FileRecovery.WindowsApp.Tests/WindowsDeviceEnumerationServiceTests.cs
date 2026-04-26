@@ -41,6 +41,23 @@ public sealed class WindowsDeviceEnumerationServiceTests
     }
 
     [Fact]
+    public async Task BuildImageSourceAsyncDetectsVmImageFormats()
+    {
+        var tempRoot = CreateTemporaryDirectory();
+        var imagePath = Path.Combine(tempRoot, "guest-disk.vmdk");
+        await File.WriteAllBytesAsync(imagePath, new byte[4096]);
+
+        var topology = new FakeStorageTopologyService();
+        var service = new WindowsDeviceEnumerationService(topology);
+
+        var candidate = await service.BuildImageSourceAsync(imagePath, CancellationToken.None);
+
+        Assert.Equal("VM image (VMDK)", candidate.FileSystem);
+        Assert.Equal("Image file source (VMDK)", candidate.PartitionInfo);
+        Assert.Contains("VMDK Image:", candidate.DisplayName, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task BuildImageSourceAsyncHonorsCancellationToken()
     {
         var tempRoot = CreateTemporaryDirectory();

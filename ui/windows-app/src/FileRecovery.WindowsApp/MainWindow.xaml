@@ -265,6 +265,7 @@
                     <RowDefinition Height="140"/>
                     <RowDefinition Height="120"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="120"/>
                 </Grid.RowDefinitions>
 
                 <DockPanel Grid.Row="0" Margin="0,0,0,6">
@@ -477,6 +478,15 @@
                                              TextWrapping="Wrap"
                                              VerticalScrollBarVisibility="Auto"/>
                                 </TabItem>
+                                <TabItem Header="Hex Inspector">
+                                    <TextBox x:Name="PreviewHexTextBox"
+                                             IsReadOnly="True"
+                                             FontFamily="Consolas"
+                                             FontSize="12"
+                                             TextWrapping="NoWrap"
+                                             VerticalScrollBarVisibility="Auto"
+                                             HorizontalScrollBarVisibility="Auto"/>
+                                </TabItem>
                             </TabControl>
                         </Grid>
                     </Grid>
@@ -514,6 +524,10 @@
 
                 <GroupBox Grid.Row="10" Header="Safety Warnings Page" Margin="0,8,0,0" Padding="8">
                     <ListBox x:Name="SafetyWarningsListBox"/>
+                </GroupBox>
+
+                <GroupBox Grid.Row="11" Header="SMART Health" Margin="0,8,0,0" Padding="8">
+                    <ListBox x:Name="SmartHealthListBox" FontFamily="Consolas" FontSize="12"/>
                 </GroupBox>
             </Grid>
         </GroupBox>

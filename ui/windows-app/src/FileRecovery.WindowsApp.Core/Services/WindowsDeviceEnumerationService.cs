@@ -38,13 +38,21 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
             var mountPaths = volumeId is null
                 ? []
                 : _topologyService.GetMountPathsForVolumeId(volumeId);
+            var imageFormat = DetectImageFormatLabel(fullPath);
+            var partitionInfo = imageFormat is null
+                ? "Image file source"
+                : $"Image file source ({imageFormat})";
+            var displayPrefix = imageFormat is null
+                ? "Image"
+                : $"{imageFormat} Image";
+            var fileSystem = imageFormat is null ? null : $"VM image ({imageFormat})";
 
             return new SourceCandidate(
                 Id: $"image-{info.Name}-{info.Length}",
                 Kind: RecoverySourceKind.ImageFile,
-                DisplayName: $"Image: {info.Name}",
+                DisplayName: $"{displayPrefix}: {info.Name}",
                 DevicePath: null,
-                FileSystem: null,
+                FileSystem: fileSystem,
                 SizeBytes: info.Length,
                 SectorSizeBytes: _topologyService.TryGetSectorSizeFromPath(fullPath),
                 DiskIndex: _topologyService.TryGetDiskIndexFromPath(fullPath),
@@ -53,7 +61,7 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
                 ReadOnlyEnforced: true,
                 VolumeLabel: null,
                 MountedPaths: string.Join(";", mountPaths),
-                PartitionInfo: "Image file source",
+                PartitionInfo: partitionInfo,
                 IsNetworkSource: false,
                 NetworkProtocol: null,
                 NetworkEndpoint: null);
@@ -92,13 +100,23 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
                 NetworkSourceProtocol.Nfs => "NFS",
                 _ => "Network",
             };
+            var imageFormat = DetectImageFormatLabel(normalizedPath);
+            var sourceLabel = imageFormat is null
+                ? $"{protocolLabel} Image: {info.Name}"
+                : $"{protocolLabel} {imageFormat} Image: {info.Name}";
+            var partitionInfo = imageFormat is null
+                ? $"{protocolLabel} mounted image source"
+                : $"{protocolLabel} mounted image source ({imageFormat})";
+            var fileSystem = imageFormat is null
+                ? "Network image"
+                : $"Network VM image ({imageFormat})";
 
             return new SourceCandidate(
                 Id: $"network-{request.Protocol}-{info.Name}-{info.Length}",
                 Kind: RecoverySourceKind.ImageFile,
-                DisplayName: $"{protocolLabel} Image: {info.Name}",
+                DisplayName: sourceLabel,
                 DevicePath: null,
-                FileSystem: "Network image",
+                FileSystem: fileSystem,
                 SizeBytes: info.Length,
                 SectorSizeBytes: _topologyService.TryGetSectorSizeFromPath(normalizedPath),
                 DiskIndex: _topologyService.TryGetDiskIndexFromPath(normalizedPath),
@@ -107,7 +125,7 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
                 ReadOnlyEnforced: true,
                 VolumeLabel: null,
                 MountedPaths: string.Join(";", mountPaths),
-                PartitionInfo: $"{protocolLabel} mounted image source",
+                PartitionInfo: partitionInfo,
                 IsNetworkSource: true,
                 NetworkProtocol: protocolLabel,
                 NetworkEndpoint: endpoint);
@@ -300,6 +318,19 @@ public sealed partial class WindowsDeviceEnumerationService : IDeviceEnumeration
         }
 
         return $"{segments[0]}/{segments[1]}";
+    }
+
+    private static string? DetectImageFormatLabel(string path)
+    {
+        var extension = Path.GetExtension(path)?.Trim().ToLowerInvariant();
+        return extension switch
+        {
+            ".vmdk" => "VMDK",
+            ".vhd" => "VHD",
+            ".vhdx" => "VHDX",
+            ".qcow2" => "QCOW2",
+            _ => null,
+        };
     }
 
     private static long? TryReadInt64(ManagementObject obj, string propertyName)

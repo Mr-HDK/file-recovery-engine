@@ -155,12 +155,14 @@ public partial class MainWindow : Window
     private readonly IPrivilegeService _privilegeService;
     private readonly IImageAcquisitionService _imageAcquisitionService;
     private readonly IWinPeRuntimeService _winPeRuntimeService;
+    private readonly IStorageHealthTelemetryService _storageHealthTelemetryService;
     private readonly SqliteSessionStore _sessionStore;
     private readonly SessionLogWriter _sessionLogWriter;
     private readonly ReadPreviewScanner _previewScanner;
     private readonly CandidatePostProcessor _candidatePostProcessor;
     private readonly ObservableCollection<SourceCandidate> _sources = [];
     private readonly ObservableCollection<string> _validationOutput = [];
+    private readonly ObservableCollection<string> _smartHealthOutput = [];
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
@@ -225,6 +227,7 @@ public partial class MainWindow : Window
         _privilegeService = new WindowsPrivilegeService();
         _imageAcquisitionService = new FileImageAcquisitionService();
         _winPeRuntimeService = new WinPeRuntimeService(new WindowsWinPeRuntimeProbe());
+        _storageHealthTelemetryService = new WindowsStorageHealthTelemetryService();
         _sessionStore = new SqliteSessionStore();
         _sessionLogWriter = new SessionLogWriter();
         _previewScanner = new ReadPreviewScanner();
@@ -232,6 +235,7 @@ public partial class MainWindow : Window
 
         SourcesDataGrid.ItemsSource = _sources;
         ValidationListBox.ItemsSource = _validationOutput;
+        SmartHealthListBox.ItemsSource = _smartHealthOutput;
         CandidateActivityListBox.ItemsSource = _candidateActivity;
 
         _quickScanCandidates.CollectionChanged += (_, _) => UpdateCandidateSummary();
@@ -270,6 +274,7 @@ public partial class MainWindow : Window
             await _sessionStore.EnsureCreatedAsync(CancellationToken.None);
             await RunSessionStoreMaintenanceAsync(userInitiated: false, compactDatabase: false, CancellationToken.None);
             await RefreshSourcesAsync(CancellationToken.None);
+            await RefreshSmartHealthTelemetryAsync(CancellationToken.None);
             await LoadLatestPersistedCandidatesAsync(CancellationToken.None);
             AppendSessionMessage($"UI build: {UiBuildTag}");
             AppendSessionMessage($"Session DB: {_sessionStore.DatabasePath}");
@@ -318,6 +323,7 @@ public partial class MainWindow : Window
 
             AppendVssSnapshotSources();
             AppendOfflineReadinessDiagnostics(result.Sources);
+            await RefreshSmartHealthTelemetryAsync(cancellationToken);
             StatusTextBlock.Text = $"Found {_sources.Count} sources";
         }
         catch (OperationCanceledException)
@@ -519,13 +525,18 @@ public partial class MainWindow : Window
     private void SourcesDataGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         _selectedSource = SourcesDataGrid.SelectedItem as SourceCandidate;
+        if (_selectedSource is not null)
+        {
+            AppendSessionMessage(
+                $"Source inspector: id={_selectedSource.Id}, type={_selectedSource.Kind}, fs={_selectedSource.FileSystem ?? "unknown"}, size={_selectedSource.SizeBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}, path={_selectedSource.SourcePath ?? _selectedSource.DevicePath ?? "n/a"}.");
+        }
     }
 
     private async void ImportImageButton_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Filter = "Image Files (*.img;*.dd;*.raw)|*.img;*.dd;*.raw|All Files (*.*)|*.*",
+            Filter = "Image Files (*.img;*.dd;*.raw;*.vmdk;*.vhd;*.vhdx;*.qcow2)|*.img;*.dd;*.raw;*.vmdk;*.vhd;*.vhdx;*.qcow2|All Files (*.*)|*.*",
             CheckFileExists = true,
             Multiselect = false,
         };
@@ -2952,6 +2963,7 @@ public partial class MainWindow : Window
         PreviewHeaderTextBlock.Text = "Select a candidate to preview metadata and recovered content.";
         PreviewSummaryTextBox.Text = "No candidate selected.";
         PreviewTextTextBox.Text = string.Empty;
+        PreviewHexTextBox.Text = string.Empty;
         PreviewMetadataTextBox.Text = string.Empty;
         PreviewImageControl.Source = null;
     }
@@ -2980,6 +2992,7 @@ public partial class MainWindow : Window
         if (resolvedPath is null)
         {
             PreviewTextTextBox.Text = "Recover this candidate first to preview content.";
+            PreviewHexTextBox.Text = "Recover this candidate first to inspect hex bytes.";
             PreviewImageControl.Source = null;
             return;
         }
@@ -2998,6 +3011,15 @@ public partial class MainWindow : Window
         else
         {
             PreviewTextTextBox.Text = "Text preview not available for this file type.";
+        }
+
+        try
+        {
+            PreviewHexTextBox.Text = LoadHexPreview(resolvedPath, maxBytes: 4096);
+        }
+        catch (Exception ex)
+        {
+            PreviewHexTextBox.Text = $"Unable to render hex preview: {ex.Message}";
         }
 
         if (IsImageExtension(resolvedPath))
@@ -3045,6 +3067,49 @@ public partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    private static string LoadHexPreview(string path, int maxBytes)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var length = Math.Min(maxBytes, bytes.Length);
+        if (length == 0)
+        {
+            return "(empty file)";
+        }
+
+        const int bytesPerLine = 16;
+        var sb = new StringBuilder();
+        sb.AppendLine($"Hex preview ({length} of {bytes.Length} bytes)");
+        for (var offset = 0; offset < length; offset += bytesPerLine)
+        {
+            var count = Math.Min(bytesPerLine, length - offset);
+            var hex = new StringBuilder();
+            var ascii = new StringBuilder();
+            for (var i = 0; i < bytesPerLine; i++)
+            {
+                if (i < count)
+                {
+                    var value = bytes[offset + i];
+                    hex.Append(value.ToString("X2", CultureInfo.InvariantCulture)).Append(' ');
+                    ascii.Append(value is >= 32 and <= 126 ? (char)value : '.');
+                }
+                else
+                {
+                    hex.Append("   ");
+                    ascii.Append(' ');
+                }
+            }
+
+            sb.Append(offset.ToString("X8", CultureInfo.InvariantCulture))
+                .Append("  ")
+                .Append(hex)
+                .Append(" |")
+                .Append(ascii)
+                .AppendLine("|");
+        }
+
+        return sb.ToString();
     }
 
     private string BuildPreviewMetadata(QuickScanCandidateRow candidate)
@@ -6106,6 +6171,44 @@ public partial class MainWindow : Window
             RecoverySourceKind.PhysicalDisk => source.DevicePath,
             _ => null,
         };
+    }
+
+    private async Task RefreshSmartHealthTelemetryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var snapshot = await _storageHealthTelemetryService.GetSnapshotAsync(cancellationToken);
+            _smartHealthOutput.Clear();
+
+            foreach (var record in snapshot.Devices.OrderBy(item => item.DiskIndex ?? int.MaxValue))
+            {
+                _smartHealthOutput.Add(
+                    $"Disk {record.DiskIndex?.ToString(CultureInfo.InvariantCulture) ?? "?"} | {record.HealthStatus} | PredictFailure={record.PredictFailure} | {record.Model}");
+                if (!string.IsNullOrWhiteSpace(record.Warning))
+                {
+                    _validationOutput.Add($"Warning: {record.Warning}");
+                }
+            }
+
+            foreach (var warning in snapshot.Warnings)
+            {
+                _smartHealthOutput.Add($"Warning: {warning}");
+            }
+
+            if (snapshot.Devices.Count == 0 && snapshot.Warnings.Count == 0)
+            {
+                _smartHealthOutput.Add("No SMART telemetry available.");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // no-op
+        }
+        catch (Exception ex)
+        {
+            _smartHealthOutput.Clear();
+            _smartHealthOutput.Add($"SMART telemetry unavailable: {ex.Message}");
+        }
     }
 
     private static int GetAlignedBufferLength(uint alignmentBytes, int preferredSize)
