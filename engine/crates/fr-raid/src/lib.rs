@@ -63,6 +63,16 @@ pub struct RaidLogicalMapping {
     pub parity_member_index: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaidDegradedAssessment {
+    pub missing_member_count: u32,
+    pub sample_count: u32,
+    pub recoverable_sample_count: u32,
+    pub recoverability_percent: u8,
+    pub confidence_penalty: u8,
+    pub recommendation: String,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RaidError {
     #[error("buffer too small: expected at least {expected} bytes, got {actual}")]
@@ -169,6 +179,57 @@ pub fn map_logical_offset(
         RaidLevel::Raid10 => map_raid10(layout, logical_offset_bytes),
         RaidLevel::Raid6 | RaidLevel::Unknown => Err(RaidError::UnsupportedLayout),
     }
+}
+
+pub fn assess_degraded_layout(
+    layout: &RaidLayout,
+    missing_members: &[u32],
+    sample_count: u32,
+) -> Result<RaidDegradedAssessment, RaidError> {
+    if layout.member_count < 2 {
+        return Err(RaidError::InvalidMemberCount(layout.member_count));
+    }
+    if !is_valid_stripe_size(layout.stripe_size_bytes) {
+        return Err(RaidError::InvalidStripeSize(layout.stripe_size_bytes));
+    }
+    validate_disk_order(&layout.disk_order, layout.member_count)?;
+
+    let normalized_missing = normalize_missing_members(missing_members, layout.member_count);
+    let samples = sample_count.max(8).min(1024);
+    let step = layout.stripe_size_bytes as u64;
+    let mut recoverable = 0u32;
+    for index in 0..samples {
+        let logical_offset =
+            (index as u64)
+                .checked_mul(step)
+                .ok_or(RaidError::ArithmeticOverflow(
+                    "degraded assessment logical offset",
+                ))?;
+        let mapping = match map_logical_offset(layout, logical_offset) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if is_mapping_recoverable(layout.level, &mapping, &normalized_missing) {
+            recoverable += 1;
+        }
+    }
+
+    let recoverability_percent = ((recoverable as f64 / samples as f64) * 100.0).round() as u8;
+    let confidence_penalty = (100u8.saturating_sub(recoverability_percent)).min(60);
+    let recommendation = build_degraded_recommendation(
+        layout.level,
+        normalized_missing.len() as u32,
+        recoverability_percent,
+    );
+
+    Ok(RaidDegradedAssessment {
+        missing_member_count: normalized_missing.len() as u32,
+        sample_count: samples,
+        recoverable_sample_count: recoverable,
+        recoverability_percent,
+        confidence_penalty,
+        recommendation,
+    })
 }
 
 fn detect_mdraid_layout(image: &[u8]) -> Result<Option<RaidLayout>, RaidError> {
@@ -638,6 +699,69 @@ fn score_metadata_confidence(
     score.min(99)
 }
 
+fn normalize_missing_members(missing_members: &[u32], member_count: u32) -> Vec<u32> {
+    let mut members = missing_members
+        .iter()
+        .copied()
+        .filter(|value| *value < member_count)
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members.dedup();
+    members
+}
+
+fn is_mapping_recoverable(
+    level: RaidLevel,
+    mapping: &RaidLogicalMapping,
+    missing_members: &[u32],
+) -> bool {
+    let data_missing = missing_members.contains(&mapping.member_index);
+    let parity_missing = mapping
+        .parity_member_index
+        .is_some_and(|value| missing_members.contains(&value));
+
+    match level {
+        RaidLevel::Raid0 => !data_missing,
+        RaidLevel::Raid1 => !data_missing || !parity_missing,
+        RaidLevel::Raid4 | RaidLevel::Raid5 => {
+            if data_missing {
+                missing_members.len() <= 1
+            } else {
+                true
+            }
+        }
+        RaidLevel::Raid6 => missing_members.len() <= 2,
+        RaidLevel::Raid10 => !data_missing || !parity_missing,
+        RaidLevel::Unknown => false,
+    }
+}
+
+fn build_degraded_recommendation(
+    level: RaidLevel,
+    missing_member_count: u32,
+    recoverability_percent: u8,
+) -> String {
+    if missing_member_count == 0 {
+        return "No missing members detected; run full recovery path.".to_string();
+    }
+
+    if recoverability_percent >= 95 {
+        return format!(
+            "{level:?} degraded profile appears recoverable; continue with cautious export and parity verification."
+        );
+    }
+
+    if recoverability_percent >= 60 {
+        return format!(
+            "{level:?} degraded profile has mixed recoverability; export critical ranges first and validate hashes."
+        );
+    }
+
+    format!(
+        "{level:?} degraded profile has low recoverability; prefer clone-first triage and manual layout overrides."
+    )
+}
+
 fn find_signature_offset(bytes: &[u8], signature: &[u8]) -> Option<usize> {
     if signature.is_empty() || bytes.len() < signature.len() {
         return None;
@@ -746,6 +870,42 @@ mod tests {
         assert_eq!(layout.stripe_size_bytes, 64 * 1024);
         assert_eq!(layout.data_offset_bytes, 8192 * 512);
         assert_eq!(layout.parity_rotation, ParityRotation::RightSymmetric);
+    }
+
+    #[test]
+    fn degraded_assessment_reports_full_recoverability_for_raid5_single_missing_parity() {
+        let layout = RaidLayout {
+            metadata_family: RaidMetadataFamily::LinuxMd,
+            level: RaidLevel::Raid5,
+            member_count: 4,
+            stripe_size_bytes: 64 * 1024,
+            data_offset_bytes: 2 * 1024 * 1024,
+            parity_rotation: ParityRotation::LeftSymmetric,
+            disk_order: vec![0, 1, 2, 3],
+            confidence_score: 85,
+        };
+
+        let assessment = assess_degraded_layout(&layout, &[3], 64).expect("assessment");
+        assert!(assessment.recoverability_percent >= 95);
+        assert_eq!(assessment.missing_member_count, 1);
+    }
+
+    #[test]
+    fn degraded_assessment_reports_low_recoverability_for_raid0_missing_member() {
+        let layout = RaidLayout {
+            metadata_family: RaidMetadataFamily::LinuxMd,
+            level: RaidLevel::Raid0,
+            member_count: 3,
+            stripe_size_bytes: 64 * 1024,
+            data_offset_bytes: 1_048_576,
+            parity_rotation: ParityRotation::Unknown,
+            disk_order: vec![0, 1, 2],
+            confidence_score: 80,
+        };
+
+        let assessment = assess_degraded_layout(&layout, &[1], 64).expect("assessment");
+        assert!(assessment.recoverability_percent < 95);
+        assert!(assessment.confidence_penalty > 0);
     }
 
     #[test]

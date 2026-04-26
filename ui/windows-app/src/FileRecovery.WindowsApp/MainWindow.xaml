@@ -172,6 +172,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="220"/>
@@ -244,6 +245,9 @@
                                       Grid.ColumnSpan="2"
                                       Margin="0,8,0,0"
                                       Content="Enable RAID reverse-layout assistant (expert)"/>
+
+                            <TextBlock Grid.Row="17" Grid.Column="0" VerticalAlignment="Center" Text="Missing RAID members (comma separated)"/>
+                            <TextBox x:Name="RaidMissingMembersTextBox" Grid.Row="17" Grid.Column="1" Margin="8,4,0,0"/>
                         </Grid>
                     </Expander>
 

@@ -974,6 +974,27 @@ public partial class MainWindow : Window
 
                             if (RaidReverseAssistantCheckBox.IsChecked == true)
                             {
+                                var missingMembers = ParseRaidMissingMembers(RaidMissingMembersTextBox.Text);
+                                if (missingMembers is null)
+                                {
+                                    AppendSessionMessage("RAID degraded assessment skipped: missing-member list is invalid.");
+                                }
+                                else
+                                {
+                                    var degraded = NativeEngineProbe.AssessRaidDegradedLayout(metadata, missingMembers, sampleCount: 96);
+                                    if (degraded.Success && degraded.Assessment is not null)
+                                    {
+                                        var assessment = degraded.Assessment;
+                                        AppendSessionMessage(
+                                            $"RAID degraded assessment: missing={assessment.MissingMemberCount}, recoverable={assessment.RecoverableSampleCount}/{assessment.SampleCount} ({assessment.RecoverabilityPercent}%), confidence-penalty={assessment.ConfidencePenalty}. {assessment.Recommendation}");
+                                    }
+                                    else
+                                    {
+                                        AppendSessionMessage(
+                                            $"RAID degraded assessment failed: {degraded.Message} (status {degraded.StatusCode}).");
+                                    }
+                                }
+
                                 var suggestions = BuildRaidReverseAssistantOverrides(metadata);
                                 if (suggestions.Count == 0)
                                 {
@@ -2758,6 +2779,28 @@ public partial class MainWindow : Window
         }
 
         return values;
+    }
+
+    private static IReadOnlyList<uint>? ParseRaidMissingMembers(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return Array.Empty<uint>();
+        }
+
+        var segments = raw.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var values = new List<uint>(segments.Length);
+        foreach (var segment in segments)
+        {
+            if (!uint.TryParse(segment, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return null;
+            }
+
+            values.Add(parsed);
+        }
+
+        return values.Distinct().OrderBy(value => value).ToArray();
     }
 
     private sealed record RaidAssistantOverride(

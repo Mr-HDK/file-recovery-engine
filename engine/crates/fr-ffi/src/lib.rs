@@ -17,8 +17,10 @@ use fr_hfs::{
 use fr_mft::{parse_mft_record, AttributeForm, ATTRIBUTE_TYPE_DATA};
 use fr_ntfs::parse_boot_sector as parse_ntfs_boot_sector;
 use fr_raid::{
+    assess_degraded_layout as assess_raid_degraded_layout,
     map_logical_offset as map_raid_logical_offset, resolve_layout_with_override, ParityRotation,
-    RaidLayout, RaidLevel, RaidLogicalMapping, RaidManualOverride, RaidMetadataFamily,
+    RaidDegradedAssessment, RaidLayout, RaidLevel, RaidLogicalMapping, RaidManualOverride,
+    RaidMetadataFamily,
 };
 use fr_refs::{parse_boot_sector as parse_refs_boot_sector, scan_deleted_candidates_with_boot};
 use fr_scoring::score_candidate_with_reasons;
@@ -305,6 +307,32 @@ pub struct FrRaidLogicalMapping {
     pub member_offset_bytes: u64,
     pub has_parity_member: u32,
     pub parity_member_index: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrRaidDegradedAssessment {
+    pub missing_member_count: u32,
+    pub sample_count: u32,
+    pub recoverable_sample_count: u32,
+    pub recoverability_percent: u8,
+    pub confidence_penalty: u8,
+    pub _reserved0: [u8; 2],
+    pub recommendation: [u8; 160],
+}
+
+impl Default for FrRaidDegradedAssessment {
+    fn default() -> Self {
+        Self {
+            missing_member_count: 0,
+            sample_count: 0,
+            recoverable_sample_count: 0,
+            recoverability_percent: 0,
+            confidence_penalty: 0,
+            _reserved0: [0u8; 2],
+            recommendation: [0u8; 160],
+        }
+    }
 }
 
 #[repr(C)]
@@ -1661,6 +1689,47 @@ pub extern "C" fn fr_map_raid_logical_offset(
 
     unsafe {
         *out_mapping = encode_raid_mapping(&mapping);
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn fr_assess_raid_degraded_layout(
+    layout: *const FrRaidLayout,
+    missing_members: *const u32,
+    missing_member_count: u32,
+    sample_count: u32,
+    out_assessment: *mut FrRaidDegradedAssessment,
+) -> i32 {
+    if layout.is_null() || out_assessment.is_null() {
+        return -1;
+    }
+
+    if missing_member_count > 0 && missing_members.is_null() {
+        return -1;
+    }
+
+    let layout = match decode_raid_layout(unsafe { &*layout }) {
+        Ok(layout) => layout,
+        Err(status) => return status,
+    };
+
+    let missing = if missing_member_count == 0 {
+        Vec::new()
+    } else {
+        let raw =
+            unsafe { std::slice::from_raw_parts(missing_members, missing_member_count as usize) };
+        raw.to_vec()
+    };
+
+    let assessment = match assess_raid_degraded_layout(&layout, &missing, sample_count) {
+        Ok(value) => value,
+        Err(err) => return map_raid_error_to_status(err, true),
+    };
+
+    unsafe {
+        *out_assessment = encode_raid_degraded_assessment(&assessment);
     }
 
     0
@@ -3487,6 +3556,22 @@ fn encode_raid_mapping(mapping: &RaidLogicalMapping) -> FrRaidLogicalMapping {
         has_parity_member: u32::from(mapping.parity_member_index.is_some()),
         parity_member_index: mapping.parity_member_index.unwrap_or(0),
     }
+}
+
+fn encode_raid_degraded_assessment(
+    assessment: &RaidDegradedAssessment,
+) -> FrRaidDegradedAssessment {
+    let mut out = FrRaidDegradedAssessment {
+        missing_member_count: assessment.missing_member_count,
+        sample_count: assessment.sample_count,
+        recoverable_sample_count: assessment.recoverable_sample_count,
+        recoverability_percent: assessment.recoverability_percent,
+        confidence_penalty: assessment.confidence_penalty,
+        _reserved0: [0u8; 2],
+        recommendation: [0u8; 160],
+    };
+    write_utf8(&assessment.recommendation, &mut out.recommendation);
+    out
 }
 
 fn encode_raid_metadata_family(family: RaidMetadataFamily) -> u32 {
@@ -5783,6 +5868,40 @@ mod tests {
         assert_eq!(mapping.member_offset_bytes, 2 * 1024 * 1024);
         assert_eq!(mapping.has_parity_member, 1);
         assert_eq!(mapping.parity_member_index, 3);
+    }
+
+    #[test]
+    fn ffi_assess_raid_degraded_layout_reports_recoverability() {
+        let layout = FrRaidLayout {
+            metadata_family: RAID_METADATA_FAMILY_LINUX_MD,
+            level: RAID_LEVEL_RAID5,
+            member_count: 4,
+            stripe_size_bytes: 64 * 1024,
+            data_offset_bytes: 2 * 1024 * 1024,
+            parity_rotation: RAID_PARITY_LEFT_SYMMETRIC,
+            confidence_score: 85,
+            _reserved0: [0u8; 3],
+            disk_order_count: 4,
+            disk_order: [
+                0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+            ],
+        };
+        let missing = [3u32];
+        let mut assessment = FrRaidDegradedAssessment::default();
+        assert_eq!(
+            fr_assess_raid_degraded_layout(
+                &layout,
+                missing.as_ptr(),
+                missing.len() as u32,
+                64,
+                &mut assessment
+            ),
+            0
+        );
+        assert_eq!(assessment.missing_member_count, 1);
+        assert!(assessment.recoverability_percent >= 95);
+        assert!(!c_string_bytes_to_string(&assessment.recommendation).is_empty());
     }
 
     #[test]

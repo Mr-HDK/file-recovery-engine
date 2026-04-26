@@ -31,7 +31,7 @@ public sealed class FileImageAcquisitionService : IImageAcquisitionService
         IRemoteAgentRuntime? remoteAgentRuntime = null)
     {
         _sourceStreamFactory = sourceStreamFactory ?? OpenDefaultSourceStream;
-        _remoteAgentRuntime = remoteAgentRuntime ?? new LoopbackRemoteAgentRuntime();
+        _remoteAgentRuntime = remoteAgentRuntime ?? new HybridRemoteAgentRuntime();
     }
 
     public async Task<ImageAcquisitionResult> AcquireImageAsync(

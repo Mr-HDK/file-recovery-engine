@@ -146,6 +146,34 @@ public sealed class NativeEngineProbeTests
     }
 
     [Fact]
+    public void AssessRaidDegradedLayoutReturnsDeterministicStatus()
+    {
+        var layout = new EngineRaidLayoutMetadata(
+            MetadataFamily: "Linux MD",
+            Level: "RAID5",
+            MemberCount: 4,
+            StripeSizeBytes: 64 * 1024,
+            DataOffsetBytes: 2 * 1024 * 1024,
+            ParityRotation: "LeftSymmetric",
+            ConfidenceScore: 85,
+            DiskOrder: new uint[] { 0, 1, 2, 3 });
+
+        var result = NativeEngineProbe.AssessRaidDegradedLayout(layout, new uint[] { 3 }, sampleCount: 64);
+        Assert.False(string.IsNullOrWhiteSpace(result.Message));
+
+        if (!result.EngineAvailable)
+        {
+            Assert.Contains(result.StatusCode, new[] { -100, -101 });
+            Assert.False(result.Success);
+            Assert.Null(result.Assessment);
+        }
+        else
+        {
+            Assert.Contains(result.StatusCode, new[] { 0, 141, 142 });
+        }
+    }
+
+    [Fact]
     public void ProbeRefsBootFromSessionReturnsDeterministicStatus()
     {
         var result = NativeEngineProbe.ProbeRefsBootFromSession(987654321);

@@ -326,6 +326,23 @@ public sealed record EngineRaidLogicalMappingResult(
     int StatusCode
 );
 
+public sealed record EngineRaidDegradedAssessment(
+    uint MissingMemberCount,
+    uint SampleCount,
+    uint RecoverableSampleCount,
+    byte RecoverabilityPercent,
+    byte ConfidencePenalty,
+    string Recommendation
+);
+
+public sealed record EngineRaidDegradedAssessmentResult(
+    bool EngineAvailable,
+    bool Success,
+    EngineRaidDegradedAssessment? Assessment,
+    string Message,
+    int StatusCode
+);
+
 public sealed record EngineNtfsQuickScanResult(
     bool EngineAvailable,
     bool Success,
@@ -2078,6 +2095,76 @@ public static class NativeEngineProbe
         catch (EntryPointNotFoundException)
         {
             return new EngineRaidLogicalMappingResult(false, false, null, "Engine ABI mismatch", -101);
+        }
+    }
+
+    public static EngineRaidDegradedAssessmentResult AssessRaidDegradedLayout(
+        EngineRaidLayoutMetadata layout,
+        IReadOnlyList<uint>? missingMembers,
+        uint sampleCount = 64)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+
+        NativeRaidLayout nativeLayout;
+        try
+        {
+            nativeLayout = BuildNativeRaidLayout(layout);
+        }
+        catch (ArgumentException ex)
+        {
+            return new EngineRaidDegradedAssessmentResult(true, false, null, ex.Message, 142);
+        }
+
+        var missing = (missingMembers ?? Array.Empty<uint>()).ToArray();
+        if (missing.Length > RaidLayoutMaxMembers)
+        {
+            return new EngineRaidDegradedAssessmentResult(
+                true,
+                false,
+                null,
+                "Missing-member list exceeds RAID max member count.",
+                142);
+        }
+
+        try
+        {
+            var status = fr_assess_raid_degraded_layout(
+                ref nativeLayout,
+                missing,
+                checked((uint)missing.Length),
+                sampleCount,
+                out var nativeAssessment);
+            if (status == 0)
+            {
+                var assessment = new EngineRaidDegradedAssessment(
+                    MissingMemberCount: nativeAssessment.MissingMemberCount,
+                    SampleCount: nativeAssessment.SampleCount,
+                    RecoverableSampleCount: nativeAssessment.RecoverableSampleCount,
+                    RecoverabilityPercent: nativeAssessment.RecoverabilityPercent,
+                    ConfidencePenalty: nativeAssessment.ConfidencePenalty,
+                    Recommendation: DecodeUtf8(nativeAssessment.Recommendation) ?? string.Empty);
+                return new EngineRaidDegradedAssessmentResult(
+                    true,
+                    true,
+                    assessment,
+                    "RAID degraded assessment completed.",
+                    0);
+            }
+
+            return new EngineRaidDegradedAssessmentResult(
+                true,
+                false,
+                null,
+                MapRaidStatusMessage(status),
+                status);
+        }
+        catch (DllNotFoundException)
+        {
+            return new EngineRaidDegradedAssessmentResult(false, false, null, "Engine unavailable", -100);
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return new EngineRaidDegradedAssessmentResult(false, false, null, "Engine ABI mismatch", -101);
         }
     }
 
@@ -4134,6 +4221,22 @@ public static class NativeEngineProbe
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRaidDegradedAssessment
+    {
+        public uint MissingMemberCount;
+        public uint SampleCount;
+        public uint RecoverableSampleCount;
+        public byte RecoverabilityPercent;
+        public byte ConfidencePenalty;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2)]
+        public byte[] Reserved0;
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 160)]
+        public byte[] Recommendation;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct NativeNtfsQuickScanSummary
     {
         public uint ParsedRecords;
@@ -4431,6 +4534,14 @@ public static class NativeEngineProbe
         ref NativeRaidLayout layout,
         ulong logicalOffsetBytes,
         out NativeRaidLogicalMapping mapping);
+
+    [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int fr_assess_raid_degraded_layout(
+        ref NativeRaidLayout layout,
+        [In] uint[] missingMembers,
+        uint missingMemberCount,
+        uint sampleCount,
+        out NativeRaidDegradedAssessment assessment);
 
     [DllImport("file_recovery_engine", CallingConvention = CallingConvention.Cdecl)]
     private static extern int fr_quick_scan_ntfs_from_session(
