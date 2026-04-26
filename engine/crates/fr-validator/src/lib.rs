@@ -40,6 +40,7 @@ pub enum FileFormat {
     Flac,
     Mp3,
     Wav,
+    ThumbcacheDb,
 }
 
 impl FileFormat {
@@ -68,6 +69,7 @@ impl FileFormat {
             FileFormat::Flac => "flac",
             FileFormat::Mp3 => "mp3",
             FileFormat::Wav => "wav",
+            FileFormat::ThumbcacheDb => "db",
         }
     }
 }
@@ -114,6 +116,7 @@ pub fn validate_carved_bytes_with_extension(
         FileFormat::Flac => validate_flac(bytes),
         FileFormat::Mp3 => validate_mp3(bytes),
         FileFormat::Wav => validate_wav(bytes),
+        FileFormat::ThumbcacheDb => validate_thumbcache_db(bytes),
     };
     report.format = format;
     apply_extension_check(&mut report, extension);
@@ -728,6 +731,28 @@ fn validate_wav(bytes: &[u8]) -> ValidationReport {
     valid(FileFormat::Wav, reasons)
 }
 
+fn validate_thumbcache_db(bytes: &[u8]) -> ValidationReport {
+    let mut reasons = Vec::new();
+    if bytes.len() < 128 {
+        reasons.push("Thumbcache candidate too small".to_string());
+        return invalid(FileFormat::ThumbcacheDb, reasons);
+    }
+
+    if !bytes.starts_with(b"CMMM") {
+        reasons.push("Thumbcache CMMM header missing".to_string());
+        return invalid(FileFormat::ThumbcacheDb, reasons);
+    }
+
+    // Older and newer thumbcache variants share the CMMM header but can vary in
+    // exact record/table layout. Keep validator permissive and mark short blobs partial.
+    if bytes.len() < 1024 {
+        reasons.push("Thumbcache payload appears truncated".to_string());
+        return partial(FileFormat::ThumbcacheDb, reasons);
+    }
+
+    valid(FileFormat::ThumbcacheDb, reasons)
+}
+
 fn has_plausible_zip_local_header(bytes: &[u8]) -> bool {
     if bytes.len() < 30 {
         return false;
@@ -1059,6 +1084,25 @@ mod tests {
                 bytes: vec![0x1F, 0x8B, 0x08, 0x00, 0, 0, 0, 0, 0, 0],
                 expected_valid: true,
                 expected_partial: true,
+            },
+            RegressionCase {
+                name: "thumbcache-minimal-partial",
+                format: FileFormat::ThumbcacheDb,
+                bytes: {
+                    let mut bytes = Vec::new();
+                    bytes.extend_from_slice(b"CMMM");
+                    bytes.extend_from_slice(&[0u8; 252]);
+                    bytes
+                },
+                expected_valid: true,
+                expected_partial: true,
+            },
+            RegressionCase {
+                name: "thumbcache-bad-header",
+                format: FileFormat::ThumbcacheDb,
+                bytes: b"NOTCMMM".to_vec(),
+                expected_valid: false,
+                expected_partial: false,
             },
         ];
 

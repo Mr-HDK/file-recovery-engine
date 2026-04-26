@@ -48,6 +48,7 @@ pub fn signature_pack_formats() -> &'static [FileFormat] {
         FileFormat::Flac,
         FileFormat::Mp3,
         FileFormat::Wav,
+        FileFormat::ThumbcacheDb,
     ]
 }
 
@@ -58,6 +59,7 @@ pub enum CarvingFamily {
     Archives,
     Office,
     Media,
+    Artifacts,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +295,10 @@ pub fn carve_bytes(plan: &CarvingPlan, source_bytes: &[u8]) -> Vec<CarvedCandida
 
     if plan.format_enabled(FileFormat::Mp3) {
         carve_header_footer(bytes, FileFormat::Mp3, b"ID3", None, &mut seen, &mut carved);
+    }
+
+    if plan.format_enabled(FileFormat::ThumbcacheDb) {
+        carve_thumbcache_db(bytes, &mut seen, &mut carved);
     }
 
     carved.sort_by_key(|candidate| candidate.offset);
@@ -575,6 +581,17 @@ fn carve_wav(
     }
 }
 
+fn carve_thumbcache_db(
+    bytes: &[u8],
+    seen: &mut HashSet<(usize, FileFormat)>,
+    carved: &mut Vec<CarvedCandidate>,
+) {
+    for offset in find_all_subsequences(bytes, b"CMMM") {
+        let end = bytes.len().min(offset.saturating_add(8 * 1024 * 1024));
+        push_candidate(bytes, FileFormat::ThumbcacheDb, offset, end, seen, carved);
+    }
+}
+
 fn push_candidate(
     source_bytes: &[u8],
     format: FileFormat,
@@ -608,7 +625,18 @@ fn push_candidate(
         partial: validation.partial,
     };
     let scored = score_candidate_with_reasons(&recovery_candidate);
-    let diagnostics = collect_diagnostics(&validation, &scored.reasons);
+    let confidence = if format == FileFormat::ThumbcacheDb {
+        ConfidenceTier::VeryLow
+    } else {
+        scored.tier
+    };
+    let mut diagnostics = collect_diagnostics(&validation, &scored.reasons);
+    if format == FileFormat::ThumbcacheDb {
+        diagnostics.push(
+            "Thumbnail-cache artifacts are secondary evidence and default to low confidence."
+                .to_string(),
+        );
+    }
 
     carved.push(CarvedCandidate {
         id: recovery_candidate.id,
@@ -617,7 +645,7 @@ fn push_candidate(
         offset,
         length: slice.len(),
         partial: validation.partial,
-        confidence: scored.tier,
+        confidence,
         diagnostics,
     });
 }
@@ -685,6 +713,7 @@ fn family_for_format(format: FileFormat) -> CarvingFamily {
         | FileFormat::Midi
         | FileFormat::Ogg
         | FileFormat::Flac => CarvingFamily::Media,
+        FileFormat::ThumbcacheDb => CarvingFamily::Artifacts,
     }
 }
 
@@ -710,6 +739,7 @@ mod tests {
         assert!(signature_pack_formats().contains(&FileFormat::Mp4));
         assert!(signature_pack_formats().contains(&FileFormat::Avi));
         assert!(signature_pack_formats().contains(&FileFormat::Rtf));
+        assert!(signature_pack_formats().contains(&FileFormat::ThumbcacheDb));
     }
 
     #[test]
@@ -804,6 +834,24 @@ mod tests {
         assert!(carved
             .iter()
             .any(|candidate| candidate.format == FileFormat::Avi));
+    }
+
+    #[test]
+    fn artifact_family_can_find_thumbcache_candidate() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"CMMM");
+        bytes.extend_from_slice(&[0u8; 4096]);
+
+        let plan = CarvingPlan::default()
+            .without_family(CarvingFamily::Images)
+            .without_family(CarvingFamily::Documents)
+            .with_family(CarvingFamily::Artifacts);
+        let carved = carve_bytes(&plan, &bytes);
+        let candidate = carved
+            .iter()
+            .find(|item| item.format == FileFormat::ThumbcacheDb)
+            .expect("thumbcache candidate");
+        assert_eq!(candidate.confidence, ConfidenceTier::VeryLow);
     }
 
     fn build_test_zip_blob(file_name: &str, payload: &[u8]) -> Vec<u8> {

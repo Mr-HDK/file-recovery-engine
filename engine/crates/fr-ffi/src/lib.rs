@@ -413,6 +413,7 @@ const CARVE_FAMILY_DOCUMENTS: u32 = 0x0002;
 const CARVE_FAMILY_ARCHIVES: u32 = 0x0004;
 const CARVE_FAMILY_OFFICE: u32 = 0x0008;
 const CARVE_FAMILY_MEDIA: u32 = 0x0010;
+const CARVE_FAMILY_ARTIFACTS: u32 = 0x0020;
 
 const NTFS_ATTRIBUTE_FLAG_COMPRESSED: u16 = 0x0001;
 const NTFS_ATTRIBUTE_FLAG_ENCRYPTED: u16 = 0x4000;
@@ -3217,6 +3218,7 @@ fn carve_family_flag_for_extension(extension: &str) -> u32 {
         "zip" | "gz" | "7z" | "rar" => CARVE_FAMILY_ARCHIVES,
         "docx" | "xlsx" | "pptx" => CARVE_FAMILY_OFFICE,
         "mp4" | "avi" | "mid" | "ogg" | "flac" | "mp3" | "wav" => CARVE_FAMILY_MEDIA,
+        "db" => CARVE_FAMILY_ARTIFACTS,
         _ => 0,
     }
 }
@@ -5223,6 +5225,9 @@ fn build_carving_plan(family_flags: u32, max_scan_bytes: u64) -> CarvingPlan {
     }
     if family_flags & CARVE_FAMILY_MEDIA != 0 {
         plan = plan.with_family(CarvingFamily::Media);
+    }
+    if family_flags & CARVE_FAMILY_ARTIFACTS != 0 {
+        plan = plan.with_family(CarvingFamily::Artifacts);
     }
 
     plan.with_max_scan_bytes(max_scan_bytes)
@@ -8100,10 +8105,12 @@ mod tests {
         assert!(metadata.format_count >= 20);
         assert_ne!(metadata.family_flags & CARVE_FAMILY_IMAGES, 0);
         assert_ne!(metadata.family_flags & CARVE_FAMILY_ARCHIVES, 0);
+        assert_ne!(metadata.family_flags & CARVE_FAMILY_ARTIFACTS, 0);
         let formats = c_string_bytes_to_string(&metadata.formats_csv);
         assert!(formats.contains("webp"));
         assert!(formats.contains("7z"));
         assert!(formats.contains("mp4"));
+        assert!(formats.contains("db"));
     }
 
     #[test]

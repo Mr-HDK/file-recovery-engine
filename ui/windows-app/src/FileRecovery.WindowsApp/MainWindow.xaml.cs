@@ -1965,6 +1965,10 @@ public partial class MainWindow : Window
         {
             flags |= NativeEngineProbe.CarveFamilyMedia;
         }
+        if (CarveArtifactsCheckBox.IsChecked == true)
+        {
+            flags |= NativeEngineProbe.CarveFamilyArtifacts;
+        }
 
         if (flags == 0)
         {
@@ -2024,6 +2028,10 @@ public partial class MainWindow : Window
         if ((flags & NativeEngineProbe.CarveFamilyMedia) != 0)
         {
             labels.Add("media");
+        }
+        if ((flags & NativeEngineProbe.CarveFamilyArtifacts) != 0)
+        {
+            labels.Add("artifacts");
         }
 
         return labels.Count == 0 ? ["none"] : labels;

@@ -498,6 +498,7 @@ public static class NativeEngineProbe
     public const uint CarveFamilyArchives = 0x0004;
     public const uint CarveFamilyOffice = 0x0008;
     public const uint CarveFamilyMedia = 0x0010;
+    public const uint CarveFamilyArtifacts = 0x0020;
 
     public static string GetVersionDisplay()
     {

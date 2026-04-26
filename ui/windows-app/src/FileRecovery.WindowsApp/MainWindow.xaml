@@ -148,6 +148,7 @@
                             <CheckBox x:Name="CarveArchivesCheckBox" Content="Archives" Margin="0,0,12,0" IsChecked="True"/>
                             <CheckBox x:Name="CarveOfficeCheckBox" Content="Office" Margin="0,0,12,0"/>
                             <CheckBox x:Name="CarveMediaCheckBox" Content="Media"/>
+                            <CheckBox x:Name="CarveArtifactsCheckBox" Content="Thumbnails (opt-in)" Margin="12,0,0,0"/>
                         </WrapPanel>
                     </StackPanel>
 
