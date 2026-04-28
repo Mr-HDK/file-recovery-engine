@@ -3,8 +3,8 @@ use fr_apfs::{
     scan_deleted_candidates_with_container as scan_apfs_deleted_candidates_with_container,
 };
 use fr_carving::{
-    carve_bytes, signature_pack_format_extensions, CarvingFamily, CarvingPlan,
-    SIGNATURE_PACK_NAME, SIGNATURE_PACK_VERSION,
+    carve_bytes, signature_pack_format_extensions, CarvingFamily, CarvingPlan, SIGNATURE_PACK_NAME,
+    SIGNATURE_PACK_VERSION,
 };
 use fr_ext::{parse_superblock as parse_ext_superblock, scan_deleted_candidates_with_superblock};
 use fr_fat::{
