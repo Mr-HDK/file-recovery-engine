@@ -150,6 +150,46 @@ public partial class MainWindow : Window
         string CredentialKind,
         string CredentialMaterial);
 
+    private sealed class CandidateTreeNodeView : INotifyPropertyChanged
+    {
+        private bool _isSelected;
+
+        public required string DisplayName { get; init; }
+        public required string FullPathKey { get; init; }
+        public required bool IsFolder { get; init; }
+        public required ObservableCollection<CandidateTreeNodeView> Children { get; init; }
+        public required IReadOnlyList<QuickScanCandidateRow> LinkedCandidates { get; init; }
+
+        public bool IsSelected
+        {
+            get => _isSelected;
+            set
+            {
+                if (_isSelected == value)
+                {
+                    return;
+                }
+
+                _isSelected = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+            }
+        }
+
+        public IEnumerable<CandidateTreeNodeView> DescendantsAndSelf()
+        {
+            yield return this;
+            foreach (var child in Children)
+            {
+                foreach (var descendant in child.DescendantsAndSelf())
+                {
+                    yield return descendant;
+                }
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+    }
+
     private readonly IDeviceEnumerationService _deviceEnumerationService;
     private readonly SourceDestinationSafetyValidator _safetyValidator;
     private readonly IPrivilegeService _privilegeService;
@@ -164,6 +204,8 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<string> _validationOutput = [];
     private readonly ObservableCollection<string> _smartHealthOutput = [];
     private readonly ObservableCollection<QuickScanCandidateRow> _quickScanCandidates = [];
+    private readonly ObservableCollection<CandidateTreeNodeView> _candidateTreeNodes = [];
+    private readonly Dictionary<string, CandidateTreeNodeView> _candidateTreeNodeByPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly ObservableCollection<string> _candidateActivity = [];
     private static readonly TimeSpan SessionRetentionAge = TimeSpan.FromDays(30);
     private const string UiBuildTag = "phase17-streaming-signatures-20260420-1245";
@@ -208,6 +250,8 @@ public partial class MainWindow : Window
     private DateTime? _filterDeletedToUtc;
     private int _candidateClusterCount;
     private int _candidateDedupedCount;
+    private CandidateBrowserViewMode _candidateViewMode = CandidateBrowserViewMode.Grid;
+    private bool _synchronizingTreeSelection;
     private bool _winPeReadinessWarningLogged;
     private RuntimeEnvironmentProfile _runtimeEnvironmentProfile =
         new(
@@ -242,8 +286,10 @@ public partial class MainWindow : Window
         _quickScanCandidatesView = CollectionViewSource.GetDefaultView(_quickScanCandidates);
         _quickScanCandidatesView.Filter = FilterQuickScanCandidate;
         QuickScanCandidatesDataGrid.ItemsSource = _quickScanCandidatesView;
+        CandidateTreeView.ItemsSource = _candidateTreeNodes;
         InitializeCandidateFilterControls();
         InitializeSafetyWarningsPage();
+        ApplyCandidateViewModeUi();
         ClearPreviewPanel();
         OperationProgressBar.Value = 0;
         ThroughputStatusTextBlock.Text = "Throughput: -";
@@ -3045,8 +3091,153 @@ public partial class MainWindow : Window
     private static string BuildCandidateSelectionKey(uint recordNumber, string? name, string? originalPath)
     {
         var normalizedName = string.IsNullOrWhiteSpace(name) ? "(unknown)" : name.Trim().ToLowerInvariant();
-        var normalizedPath = string.IsNullOrWhiteSpace(originalPath) ? "(unresolved)" : originalPath.Trim().ToLowerInvariant();
-        return $"{recordNumber.ToString(CultureInfo.InvariantCulture)}|{normalizedName}|{normalizedPath}";
+        var normalizedPath = CandidateTreeBuilder.NormalizePath(originalPath);
+        var normalizedPathToken = string.IsNullOrWhiteSpace(normalizedPath)
+            ? "(unresolved)"
+            : normalizedPath.ToLowerInvariant();
+        return $"{recordNumber.ToString(CultureInfo.InvariantCulture)}|{normalizedName}|{normalizedPathToken}";
+    }
+
+    private void ApplyCandidateViewModeUi()
+    {
+        var showTree = _candidateViewMode == CandidateBrowserViewMode.Tree;
+        QuickScanCandidatesDataGrid.Visibility = showTree ? Visibility.Collapsed : Visibility.Visible;
+        CandidateTreeViewPanel.Visibility = showTree ? Visibility.Visible : Visibility.Collapsed;
+        CandidateGridViewRadioButton.IsChecked = !showTree;
+        CandidateTreeViewRadioButton.IsChecked = showTree;
+        RefreshCandidateTreeHint();
+    }
+
+    private void RefreshCandidateTreeHint()
+    {
+        CandidateTreeViewRadioButton.IsEnabled = CandidateBrowserViewState.IsTreeEnabled(_quickScanCandidates.Count);
+        var resolvedMode = CandidateBrowserViewState.ResolveMode(_candidateViewMode, _quickScanCandidates.Count);
+        if (_candidateViewMode != resolvedMode)
+        {
+            _candidateViewMode = resolvedMode;
+            ApplyCandidateViewModeUi();
+            return;
+        }
+
+        var hint = CandidateBrowserViewState.BuildHintText(_quickScanCandidates.Count, _candidateTreeNodes.Count);
+        if (!string.IsNullOrWhiteSpace(hint))
+        {
+            CandidateTreeHintTextBlock.Text = hint;
+            CandidateTreeHintTextBlock.Visibility = Visibility.Visible;
+            return;
+        }
+
+        CandidateTreeHintTextBlock.Visibility = Visibility.Collapsed;
+    }
+
+    private void RebuildCandidateTree()
+    {
+        var visibleRows = _quickScanCandidatesView?.Cast<object>()
+            .OfType<QuickScanCandidateRow>()
+            .ToArray() ?? _quickScanCandidates.ToArray();
+        var keyToCandidate = _quickScanCandidates
+            .ToDictionary(BuildCandidateSelectionKey, StringComparer.OrdinalIgnoreCase);
+
+        var entries = visibleRows.Select(candidate => new CandidateTreeEntry(
+            CandidateKey: BuildCandidateSelectionKey(candidate),
+            Name: candidate.Name,
+            OriginalPath: candidate.OriginalPath,
+            IsDirectory: candidate.Directory));
+
+        var built = CandidateTreeBuilder.Build(entries);
+        _candidateTreeNodes.Clear();
+        _candidateTreeNodeByPath.Clear();
+
+        foreach (var node in built)
+        {
+            _candidateTreeNodes.Add(MapTreeNode(node, keyToCandidate));
+        }
+
+        SyncTreeSelectionFromCandidates();
+        RefreshCandidateTreeHint();
+    }
+
+    private CandidateTreeNodeView MapTreeNode(
+        CandidateTreeNode node,
+        IReadOnlyDictionary<string, QuickScanCandidateRow> keyToCandidate)
+    {
+        var children = new ObservableCollection<CandidateTreeNodeView>();
+        var linked = node.CandidateKeys
+            .Select(candidateKey => keyToCandidate.TryGetValue(candidateKey, out var candidate) ? candidate : null)
+            .Where(candidate => candidate is not null)
+            .Cast<QuickScanCandidateRow>()
+            .ToArray();
+
+        var mapped = new CandidateTreeNodeView
+        {
+            DisplayName = node.DisplayName,
+            FullPathKey = node.FullPathKey,
+            IsFolder = node.IsFolder,
+            Children = children,
+            LinkedCandidates = linked,
+        };
+
+        _candidateTreeNodeByPath[node.FullPathKey] = mapped;
+        foreach (var child in node.Children)
+        {
+            children.Add(MapTreeNode(child, keyToCandidate));
+        }
+
+        return mapped;
+    }
+
+    private void SyncTreeSelectionFromCandidates()
+    {
+        _synchronizingTreeSelection = true;
+        try
+        {
+            foreach (var root in _candidateTreeNodes)
+            {
+                SyncTreeSelectionRecursive(root);
+            }
+        }
+        finally
+        {
+            _synchronizingTreeSelection = false;
+        }
+    }
+
+    private bool SyncTreeSelectionRecursive(CandidateTreeNodeView node)
+    {
+        var descendantRows = node.DescendantsAndSelf()
+            .SelectMany(descendant => descendant.LinkedCandidates)
+            .Distinct()
+            .Where(IsRecoverableCandidate)
+            .ToArray();
+        var allSelected = descendantRows.Length > 0 && descendantRows.All(candidate => candidate.IsSelected);
+        node.IsSelected = allSelected;
+
+        foreach (var child in node.Children)
+        {
+            SyncTreeSelectionRecursive(child);
+        }
+
+        return allSelected;
+    }
+
+    private void ApplyTreeNodeSelection(CandidateTreeNodeView node, bool isSelected)
+    {
+        var targetRows = node.DescendantsAndSelf()
+            .SelectMany(descendant => descendant.LinkedCandidates)
+            .Distinct()
+            .ToArray();
+
+        foreach (var row in targetRows)
+        {
+            if (isSelected)
+            {
+                row.IsSelected = IsRecoverableCandidate(row);
+            }
+            else
+            {
+                row.IsSelected = false;
+            }
+        }
     }
 
     private bool FilterQuickScanCandidate(object rowObject)
@@ -3170,6 +3361,7 @@ public partial class MainWindow : Window
     private void RefreshCandidateView()
     {
         _quickScanCandidatesView?.Refresh();
+        RebuildCandidateTree();
         UpdateCandidateSummary();
     }
 
@@ -3867,6 +4059,67 @@ public partial class MainWindow : Window
         _candidateSearchTerm = string.Empty;
         RefreshCandidateView();
         AppendCandidateActivity("Candidate view reset.");
+    }
+
+    private void CandidateViewModeRadioButton_Checked(object sender, RoutedEventArgs e)
+    {
+        if (CandidateTreeViewRadioButton.IsChecked == true && !CandidateTreeViewRadioButton.IsEnabled)
+        {
+            CandidateGridViewRadioButton.IsChecked = true;
+            return;
+        }
+
+        _candidateViewMode = CandidateTreeViewRadioButton.IsChecked == true
+            ? CandidateBrowserViewMode.Tree
+            : CandidateBrowserViewMode.Grid;
+        ApplyCandidateViewModeUi();
+        if (_candidateViewMode == CandidateBrowserViewMode.Tree)
+        {
+            SyncTreeSelectionFromCandidates();
+        }
+    }
+
+    private void CandidateTreeNodeCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (_synchronizingTreeSelection)
+        {
+            return;
+        }
+
+        if (sender is not System.Windows.Controls.CheckBox checkBox
+            || checkBox.DataContext is not CandidateTreeNodeView node)
+        {
+            return;
+        }
+
+        var isSelected = checkBox.IsChecked == true;
+        ApplyTreeNodeSelection(node, isSelected);
+        RefreshCandidateView();
+        AppendCandidateActivity(
+            $"Tree selection {(isSelected ? "applied" : "cleared")} for '{node.DisplayName}'.");
+    }
+
+    private void CandidateTreeView_SelectedItemChanged(
+        object sender,
+        RoutedPropertyChangedEventArgs<object> e)
+    {
+        if (e.NewValue is not CandidateTreeNodeView node)
+        {
+            return;
+        }
+
+        var previewCandidate = node.DescendantsAndSelf()
+            .SelectMany(descendant => descendant.LinkedCandidates)
+            .FirstOrDefault();
+        if (previewCandidate is null)
+        {
+            ClearPreviewPanel();
+            return;
+        }
+
+        QuickScanCandidatesDataGrid.SelectedItem = previewCandidate;
+        QuickScanCandidatesDataGrid.ScrollIntoView(previewCandidate);
+        UpdatePreviewPanel(previewCandidate);
     }
 
     private void QuickScanCandidatesDataGrid_CellEditEnding(object sender, System.Windows.Controls.DataGridCellEditEndingEventArgs e)
